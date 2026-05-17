@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>World Generation — Voxel Raytracer</title>
+<style>
+  :root {
+    --bg: #11140f;
+    --panel: #1b1f17;
+    --ink: #d8e0cc;
+    --muted: #8a957a;
+    --accent: #7fc24a;
+    --accent2: #4aa3c2;
+    --warn: #c2a14a;
+    --code-bg: #0c0e09;
+    --border: #2c3322;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 48px 24px 96px; }
+  h1 { font-size: 2rem; margin: 0 0 4px; color: #fff; }
+  h2 {
+    font-size: 1.35rem; margin: 56px 0 12px; color: var(--accent);
+    border-bottom: 1px solid var(--border); padding-bottom: 8px;
+  }
+  h3 { font-size: 1.05rem; margin: 28px 0 8px; color: var(--accent2); }
+  .sub { color: var(--muted); margin: 0 0 32px; }
+  p { margin: 12px 0; }
+  code {
+    background: var(--code-bg); padding: 2px 6px; border-radius: 4px;
+    font-family: "JetBrains Mono", Consolas, monospace; font-size: 0.88em;
+    color: #c9d6b6;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px; overflow-x: auto;
+    font-family: "JetBrains Mono", Consolas, monospace;
+    font-size: 0.84rem; line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; color: #c9d6b6; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px 24px; margin: 20px 0;
+  }
+  .kv { display: grid; grid-template-columns: 200px 1fr; gap: 6px 16px; margin: 16px 0; }
+  .kv dt { color: var(--accent2); font-family: monospace; }
+  .kv dd { margin: 0; color: var(--ink); }
+  .pipeline { display: flex; flex-direction: column; gap: 0; margin: 24px 0; }
+  .stage {
+    background: var(--panel); border: 1px solid var(--border);
+    border-left: 3px solid var(--accent); border-radius: 6px;
+    padding: 14px 18px; position: relative;
+  }
+  .stage h4 { margin: 0 0 4px; color: #fff; font-size: 1rem; }
+  .stage p { margin: 4px 0 0; color: var(--muted); font-size: 0.92rem; }
+  .arrow { text-align: center; color: var(--border); font-size: 1.2rem; line-height: 1.2; }
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 0.9rem; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); font-weight: 600; }
+  td code { font-size: 0.85em; }
+  .num { text-align: right; font-family: monospace; color: #c9d6b6; }
+  .note {
+    border-left: 3px solid var(--accent2); background: rgba(74,163,194,0.08);
+    padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0;
+    font-size: 0.92rem;
+  }
+  .win {
+    border-left: 3px solid var(--accent); background: rgba(127,194,74,0.08);
+    padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0;
+    font-size: 0.92rem;
+  }
+  .tag {
+    display: inline-block; background: var(--border); color: var(--ink);
+    font-size: 0.72rem; padding: 2px 8px; border-radius: 10px;
+    font-family: monospace; margin-left: 8px; vertical-align: middle;
+  }
+  .ascii {
+    color: var(--muted); font-size: 0.8rem; line-height: 1.35;
+    white-space: pre; overflow-x: auto;
+  }
+  footer { margin-top: 64px; color: var(--muted); font-size: 0.85rem; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>World Generation</h1>
+  <p class="sub">Infinite streaming voxel world &mdash; Odin + SDL3 GPU compute raytracer</p>
+
+  <div class="panel">
+    <p style="margin-top:0"><strong>One-sentence model:</strong> the world is an infinite field defined by a pure function of coordinates. Worker threads materialise that function into voxel <em>columns</em> on demand, which the main thread uploads into a fixed-size toroidal GPU ring buffer centred on the player.</p>
+  </div>
+
+  <h2>1. Spatial units</h2>
+  <dl class="kv">
+    <dt>voxel</dt><dd>One cube. Smallest unit. Carries a <code>Block_Type</code> (Air, Grass, Stone, Log, Leaves).</dd>
+    <dt>chunk</dt><dd><code>8&times;8&times;8</code> voxels (<code>CHUNK_VOXELS = 8</code>). The unit of GPU upload.</dd>
+    <dt>column</dt><dd>All <code>16</code> stacked Y-chunks at one XZ position (<code>CHUNKS_H = 16</code>). The unit of <em>generation work</em>.</dd>
+    <dt>ring</dt><dd><code>64&times;16&times;64</code> chunks (<code>CHUNKS_W = 64</code>). The fixed GPU buffer the world wraps into.</dd>
+  </dl>
+
+  <div class="ascii">   world (infinite)                      GPU ring (fixed 64&times;16&times;64)
+   ┌───────────────────────┐            ┌──────────────────┐
+   │   . . . columns . . . │  generate  │  toroidal wrap   │
+   │   . ┌─┐ ┌─┐ ┌─┐ . . . │  ───────▶  │  slot = f(x,y,z) │
+   │   . │ │ │ │ │ │ . . . │            │  owner-tagged    │
+   │   . └─┘ └─┘ └─┘ . . . │  upload    │  per slot        │
+   └───────────────────────┘            └──────────────────┘
+        ▲ one column =                        ▲ player always
+          16 Y-chunks                           at the centre</div>
+
+  <h2>2. The terrain function</h2>
+  <p>Terrain is a pure function of world position &mdash; no state, no neighbours, fully deterministic. For each XZ voxel a surface height is sampled from three octaves of 2D simplex noise:</p>
+  <pre><code>n0 = noise2d(seed=2, p / 600)   // continental shape
+n1 = noise2d(seed=0, p / 280)   // hills, gated by n0
+n2 = noise2d(seed=1, p /  70)   // local roughness
+height = n0*0.45 + n1*n0*0.45 + n2*0.10
+surface = 10 + height * 90      // → world Y in [10, 100]</code></pre>
+  <p>A voxel is solid if its world Y is below <code>surface</code>. Solid voxels are <code>Grass</code>, overridden to <code>Stone</code> where a 3D noise lobe fires. Above the surface is <code>Air</code>.</p>
+  <div class="note"><code>surface_height_at(wx, wz)</code> reuses this exact formula standalone, so trees can ask "where is the ground here?" without touching any chunk data.</div>
+
+  <h2>3. Trees: deterministic, per-column, self-clipping</h2>
+  <p>Trees are the hard part &mdash; a single tree spans many chunks. The design that finally worked treats a tree as a <strong>pure function of its base position</strong>, regenerated independently by every column it overlaps, with each column keeping only the voxels that land inside it.</p>
+
+  <h3>Why this is correct</h3>
+  <ul>
+    <li>A tree's RNG is seeded purely from its world XZ (<code>wx*1000 + wz</code>). Every column that regenerates it produces <em>byte-identical</em> geometry.</li>
+    <li><code>Tree_Target</code> holds the 16 chunk pointers of one column plus its XZ origin. Every voxel write (<code>set_voxel_world</code>, <code>place_leaves</code>) is silently clipped: writes outside the column's <code>8&times;(16&middot;8)&times;8</code> box are dropped.</li>
+    <li>A column scans every tree whose base falls within <code>TREE_VOXEL_REACH = 48</code> voxels of its footprint. Trees straddling a boundary are drawn by <em>both</em> columns &mdash; each keeps its half &mdash; so edges are seamless with <strong>zero shared state and zero cross-thread writes</strong>.</li>
+  </ul>
+
+  <div class="ascii">  column A          column B
+  ┌────────┐ ┌────────┐
+  │     🌳─┼─┼─🌳      │   the tree is generated twice,
+  │    /│  │ │  │\     │   once per column. A keeps the
+  │   / │  │ │  │ \    │   left voxels, B keeps the right.
+  └────────┘ └────────┘   identical RNG → seam is invisible</div>
+
+  <h3>Why it is fast (the optimisation story)</h3>
+  <p>Naively this is wasteful: a tree near a boundary is fully regenerated by ~6&times;6 columns. Three layers of AABB rejection make the wasted calls nearly free:</p>
+  <table>
+    <tr><th>Level</th><th>Check</th><th>Skips</th></tr>
+    <tr><td>Whole tree</td><td><code>aabb_hits_chunk</code> on the tree's full bounding box, before any RNG</td><td>Trees whose footprint misses this column entirely</td></tr>
+    <tr><td>Branch / trunk segment</td><td>AABB of each <code>draw_thick_segment</code> vs column</td><td>Branches pointing away from this column</td></tr>
+    <tr><td>Crown</td><td>AABB of each <code>place_crown</code> ellipsoid</td><td>Leaf clusters outside this column</td></tr>
+  </table>
+  <p>The biggest single win was switching the <strong>work unit from a chunk to a column</strong>. The terrain noise sweep and the <code>97&times;97</code> tree scan depend only on XZ &mdash; doing them per-chunk repeated identical work 16&times; for every Y layer. Per-column, they run exactly once.</p>
+
+  <div class="win"><strong>Measured:</strong> startup 6.05&nbsp;s &rarr; 0.10&nbsp;s. Tree-scan invocations 6615 &rarr; 441 (one per column). Terrain-noise time ~16&times; lower.</div>
+
+  <h2>4. The streaming pipeline</h2>
+
+  <div class="pipeline">
+    <div class="stage">
+      <h4>enqueue_radius() <span class="tag">main thread</span></h4>
+      <p>Every frame, queue every XZ column within <code>LOAD_RADIUS_XZ = 28</code> of the player that isn't already on the GPU. One job = one column.</p>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="stage">
+      <h4>Worker_Pool <span class="tag">12 worker threads</span></h4>
+      <p>Workers pop column jobs and call <code>generate_column_at(wcx, wcz)</code> &mdash; terrain + trees, fully isolated, no locks during generation. Lock-free in-flight counter tracks outstanding work.</p>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="stage">
+      <h4>generate_column_at() <span class="tag">pure</span></h4>
+      <p>Allocates 16 chunks. One noise sweep for the surface map. Fills all 16 Y-chunks. One tree scan over the reach-padded footprint. Returns the column.</p>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="stage">
+      <h4>integrate_ready_chunks() <span class="tag">main thread</span></h4>
+      <p>Drains finished columns. For each, integrates all 16 chunks into the ring (or frees the column if that XZ is already loaded &mdash; duplicate from re-enqueue).</p>
+    </div>
+    <div class="arrow">&darr;</div>
+    <div class="stage">
+      <h4>integrate_chunk() &rarr; GPU ring <span class="tag">main thread</span></h4>
+      <p>Computes the toroidal <code>ring_slot</code>. Evicts whatever chunk previously owned that slot. Copies voxels into <code>gpu_voxels</code>, tags the slot's owner, marks it dirty for upload.</p>
+    </div>
+  </div>
+
+  <h2>5. The toroidal ring buffer</h2>
+  <p>The GPU buffer is a fixed <code>64&times;16&times;64</code> grid. An infinite world maps into it by wrapping:</p>
+  <pre><code>ring_slot(wcx, wcy, wcz):
+    sx = ((wcx % 64) + 64) % 64      // wrap, handles negatives
+    sz = ((wcz % 64) + 64) % 64
+    return sx + wcy*64 + sz*64*16</code></pre>
+  <p>As the player moves, far chunks and near chunks collide on the same slot. The <strong>owner tag</strong> (<code>gpu_chunk_owner[slot] = (wcx, wcz)</code>) records which world chunk currently lives there. When a new chunk claims a slot, the old owner is evicted from <code>gpu_loaded</code> and unqueued. The compute shader checks the owner tag before sampling, so a stale slot is never rendered as the wrong chunk.</p>
+  <div class="note">This is why the world is "infinite" without unbounded memory: only a <code>64&times;64</code> chunk window around the player is ever resident. Walk far enough and coordinates wrap back onto the same physical slots, re-owned by new terrain.</div>
+
+  <h2>6. Startup vs. steady state</h2>
+  <p>Both use the exact same pipeline &mdash; there is no special-case loader.</p>
+  <dl class="kv">
+    <dt>Startup</dt><dd>Enqueue a small <code>STARTUP_RADIUS_XZ = 10</code> radius and <em>block</em> (drain in a loop until <code>worker_pool_idle</code>) so the window opens to a populated world fast (~0.1&nbsp;s).</dd>
+    <dt>Steady state</dt><dd>The game loop calls <code>enqueue_radius(LOAD_RADIUS_XZ)</code> + <code>integrate_ready_chunks</code> every frame. The ring fills out to full radius in the background while you play; columns crossing into range stream in continuously.</dd>
+  </dl>
+
+  <h2>7. Profiling</h2>
+  <p><code>profile.odin</code> is a lock-free cross-thread zone profiler. Each zone accumulates total nanoseconds and a call count via atomics; <code>profile_dump</code> prints totals after startup. Zones: <code>Terrain_Noise</code>, <code>Terrain_Fill</code>, <code>Tree_Scan</code>, <code>Tree_Generate</code>. <code>Tree_Scan</code> wraps <code>Tree_Generate</code>, so <em>scan&nbsp;&minus;&nbsp;generate</em> = the pure footprint-sweep cost.</p>
+  <pre><code>World gen (startup radius 10): 0.100 s
+=== Profile: startup ===
+  Terrain_Noise   total   12.1 ms   calls   441   avg   27.41 us
+  Terrain_Fill    total  413.6 ms   calls   441   avg  937.77 us
+  Tree_Scan       total  742.5 ms   calls   441   avg 1683.72 us
+  Tree_Generate   total  695.1 ms   calls  4102   avg  169.46 us</code></pre>
+  <p>441 = exactly one call per column in the startup radius (<code>21&times;21</code>). The remaining cost is real geometry work (<code>Terrain_Fill</code> writing 16&times;512 voxels/column, actual tree drawing), not redundancy.</p>
+
+  <h2>8. Key invariants</h2>
+  <ul>
+    <li><strong>Determinism:</strong> terrain and trees are pure functions of world coordinates. Same coords &rarr; same voxels, always, on any thread.</li>
+    <li><strong>No cross-column writes:</strong> a column only ever writes its own 16 chunks. Boundary trees are duplicated, never shared.</li>
+    <li><strong>Atomic columns:</strong> a column is integrated all-16-chunks or not at all, so checking Y=0 in <code>gpu_loaded</code> is a valid "is this column present?" probe.</li>
+    <li><strong>Owner-gated rendering:</strong> a ring slot is only valid if its owner tag matches the world chunk the shader expects.</li>
+  </ul>
+
+  <footer>Generated for the Voxel Raytracer project &middot; reflects <code>world.odin</code>, <code>worker.odin</code>, <code>profile.odin</code> at current state</footer>
+
+</div>
+</body>
+</html>
