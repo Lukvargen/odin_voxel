@@ -19,10 +19,13 @@ Game_State :: struct {
     pool:            Worker_Pool,
     dirty_slots:     [dynamic]int,   // slots needing GPU upload this frame
     index_dirty:     bool,
-    gpu_voxels:      []u32,
+    gpu_voxels:      []u8,
+    gpu_voxel_mask:  []u32,              // 16 u32 (512-bit occupancy) per ring slot
     gpu_index:       []i32,
     gpu_chunk_owner: [][2]i32,           // ring slot -> (world_cx, world_cz)
+    brick_pool:      Brick_Pool,         // free-list allocator over pool ids
     player_chunk:    [3]int,
+    prof_frames:     int,
 
     // GPU resources
     pipeline:    ^SDL.GPUComputePipeline,
@@ -30,6 +33,7 @@ Game_State :: struct {
     voxel_buf:   ^SDL.GPUBuffer,
     index_buf:   ^SDL.GPUBuffer,
     owner_buf:   ^SDL.GPUBuffer,
+    mask_buf:    ^SDL.GPUBuffer,
 
     // Settings
     light_dir:      [3]f32,
@@ -212,9 +216,7 @@ main :: proc() {
                 defer delete(dirty)
                 edit_sphere(&gs, target, block, &dirty)
                 for slot in dirty {
-                    old_idx := gs.gpu_index[slot]
-                    refresh_chunk_index(&gs, slot)
-                    if gs.gpu_index[slot] != old_idx { gs.index_dirty = true }
+                    if refresh_chunk_index(&gs, slot) { gs.index_dirty = true }
                     append(&gs.dirty_slots, slot)
                 }
             }
@@ -222,5 +224,12 @@ main :: proc() {
 
         flush_gpu_uploads(&gs)
         gpu_render(&gs)
+
+        gs.prof_frames += 1
+        if gs.prof_frames >= 300 {
+            profile_dump("last ~300 frames")
+            profile_reset()
+            gs.prof_frames = 0
+        }
     }
 }

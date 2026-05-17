@@ -6,8 +6,66 @@ import "core:math/noise"
 import "core:time"
 
 CHUNK_VOXELS :: 8
-CHUNKS_W     :: 64
+CHUNKS_W     :: 128   // ring width in chunks (MUST match shader CHUNK_COUNT_WIDTH)
 CHUNKS_H     :: 64    // total Y chunks resident in the ring
+
+// Per-brick occupancy bitmask: 8^3 = 512 voxels = 512 bits = 16 u32.
+MASK_U32_PER_BRICK :: (CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS) / 32
+
+VOXELS_PER_BRICK :: CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS // 512
+
+// Stage 3 sparse brick pool. gpu_index[slot] is now a POOL ID in
+// [0, MAX_RESIDENT_BRICKS) or -1 (air / no storage). The pool id indexes
+// gpu_voxels (pool_id*512) and gpu_voxel_mask (pool_id*16). All-air bricks
+// consume zero pool blocks. Block = 512 + 64 bytes.
+//
+// This 64-tall world is mostly solid stone (Y=-256 up to the surface), so the
+// resident non-empty set is large. With LOAD_RADIUS_XZ=56 that's ~113x113
+// columns * ~45 non-empty Y chunks ≈ 575k bricks worst case. 1<<20 = 1048576
+// blocks (~576 MiB GPU + 576 MiB CPU mirror) covers it with margin. A
+// uniform-stone sentinel (future) would let this shrink substantially.
+MAX_RESIDENT_BRICKS :: 1 << 20
+
+// Free-list allocator: a stack of free pool ids. free_top is the count of
+// ids available in free_ids[0:free_top]. alloc = pop, free = push. O(1),
+// no fragmentation, deterministic.
+Brick_Pool :: struct {
+    free_ids: []i32,
+    free_top: int,
+}
+
+pool_init :: proc(p: ^Brick_Pool) {
+    p.free_ids = make([]i32, MAX_RESIDENT_BRICKS)
+    for i in 0 ..< MAX_RESIDENT_BRICKS {
+        p.free_ids[i] = i32(MAX_RESIDENT_BRICKS - 1 - i) // pop order hands out 0,1,2...
+    }
+    p.free_top = MAX_RESIDENT_BRICKS
+}
+
+// Returns a pool id in [0, MAX_RESIDENT_BRICKS) or -1 if exhausted.
+pool_alloc :: proc(p: ^Brick_Pool) -> i32 {
+    if p.free_top == 0 { return -1 }
+    p.free_top -= 1
+    return p.free_ids[p.free_top]
+}
+
+// Returns a pool id to the free list. id must have been handed out by
+// pool_alloc and not already freed; the caller enforces this by setting
+// gpu_index[slot] = -1 immediately after freeing (pool_free(-1) is a no-op).
+pool_free :: proc(p: ^Brick_Pool, id: i32) {
+    if id < 0 { return }
+    p.free_ids[p.free_top] = id
+    p.free_top += 1
+}
+
+@(private="file")
+g_pool_warned: bool
+pool_exhaustion_warn :: proc() {
+    if !g_pool_warned {
+        g_pool_warned = true
+        fmt.eprintln("WARNING: brick pool exhausted; bricks rendering as air. Raise MAX_RESIDENT_BRICKS.")
+    }
+}
 
 // World chunk-Y range. wcy (world chunk Y) is valid in
 // [WORLD_CHUNK_Y_MIN, WORLD_CHUNK_Y_MIN + CHUNKS_H). It maps to a ring Y
@@ -29,7 +87,7 @@ Chunk :: struct {
     voxels: [CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS]u8,
 }
 
-LOAD_RADIUS_XZ  :: 28
+LOAD_RADIUS_XZ  :: 56   // must stay < CHUNKS_W/2 (=64) so a chunk and its ring-twin never coexist
 LOAD_RADIUS_Y   :: 7
 
 // Cave band. Below CAVE_FLOOR_Y everything is solid stone (skippable fast
@@ -38,6 +96,17 @@ LOAD_RADIUS_Y   :: 7
 CAVE_FLOOR_Y    :: -224         // a few chunks above WORLD_Y_MIN (-256)
 CAVE_TOP_MARGIN :: 6            // keep caves this far below the surface
 CAVE_THRESHOLD  :: 0.32         // higher = fewer/smaller caves
+
+// PROFILING A/B: when true, the per-voxel cave 3D-noise is replaced by a
+// constant (no caves). Compare Terrain_Fill totals true-vs-false to isolate
+// exactly how much of the fill cost is the cave noise. Set back to false.
+PROF_NO_CAVE_NOISE :: #config(PROF_NO_CAVE_NOISE, false)
+
+// The grass/stone speckle 3D-noise only affects the visible surface skin.
+// Solid voxels deeper than this below the surface are unconditionally Stone
+// (no noise) — they're only ever seen as a cave wall, which reads as stone
+// anyway. Cave carving keeps full per-voxel noise (future ores live there).
+SURFACE_SKIN :: 6
 
 // Floor division — rounds toward -inf, unlike Odin's / which truncates toward zero.
 floor_div :: proc(a, b: int) -> int {
@@ -70,9 +139,14 @@ generate_world :: proc(gs: ^Game_State) {
     total := CHUNKS_W * CHUNKS_H * CHUNKS_W
     gs.chunk_map       = make(map[[3]int]^Chunk)
     gs.gpu_loaded      = make(map[[3]int]bool)
-    gs.gpu_voxels      = make([]u32,    total * CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS)
+    // Pool-sized: indexed by pool id, NOT slot.
+    gs.gpu_voxels      = make([]u8,  MAX_RESIDENT_BRICKS * VOXELS_PER_BRICK)
+    gs.gpu_voxel_mask  = make([]u32, MAX_RESIDENT_BRICKS * MASK_U32_PER_BRICK)
+    // Slot-sized: indexed by ring slot.
     gs.gpu_index       = make([]i32,    total)
     gs.gpu_chunk_owner = make([][2]i32, total)
+
+    pool_init(&gs.brick_pool)
 
     for i in 0 ..< total {
         gs.gpu_index[i]       = -1
@@ -129,20 +203,53 @@ integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, gpu_ready: 
     if key in gs.gpu_loaded { return }
 
     slot := ring_slot(wcx, wcy, wcz)
+
+    // Eviction: the slot is being reassigned. Drop the old owner, then free
+    // any pool id this slot holds EXACTLY ONCE (set to -1 in the same breath
+    // so a second free is structurally impossible). Covers implicit
+    // eviction-by-owner, same-slot re-integration, and air slots (id == -1).
     old := gs.gpu_chunk_owner[slot]
     if old[0] != 0x7fffffff {
         old_key := [3]int{int(old[0]), wcy, int(old[1])}
         delete_key(&gs.gpu_loaded, old_key)
         worker_pool_unqueue(&gs.pool, [2]int{int(old[0]), int(old[1])})
     }
-
-    base := slot * CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS
-    for vi in 0 ..< CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS {
-        gs.gpu_voxels[base + vi] = u32(chunk.voxels[vi])
+    old_id := gs.gpu_index[slot]
+    if old_id >= 0 {
+        pool_free(&gs.brick_pool, old_id)
+        gs.gpu_index[slot] = -1
     }
+
+    // Decide emptiness from the authoritative chunk source.
+    empty := true
+    for vi in 0 ..< VOXELS_PER_BRICK {
+        if chunk.voxels[vi] != 0 { empty = false; break }
+    }
+
     gs.gpu_loaded[key]       = true
     gs.gpu_chunk_owner[slot] = {i32(wcx), i32(wcz)}
-    refresh_chunk_index(gs, slot)
+
+    if empty {
+        gs.gpu_index[slot] = -1 // air: zero pool blocks
+    } else {
+        pid := pool_alloc(&gs.brick_pool)
+        if pid < 0 {
+            pool_exhaustion_warn()
+            gs.gpu_index[slot] = -1 // graceful: render as air, no leak
+        } else {
+            base      := int(pid) * VOXELS_PER_BRICK
+            mask_base := int(pid) * MASK_U32_PER_BRICK
+            for m in 0 ..< MASK_U32_PER_BRICK { gs.gpu_voxel_mask[mask_base + m] = 0 }
+            for vi in 0 ..< VOXELS_PER_BRICK {
+                v := chunk.voxels[vi]
+                gs.gpu_voxels[base + vi] = v
+                if v != 0 {
+                    gs.gpu_voxel_mask[mask_base + (vi >> 5)] |= u32(1) << u32(vi & 31)
+                }
+            }
+            gs.gpu_index[slot] = pid
+        }
+    }
 
     if gpu_ready {
         append(&gs.dirty_slots, slot)
@@ -152,9 +259,17 @@ integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, gpu_ready: 
 
 // Drain finished columns from the worker pool and integrate them. Each column
 // arrives complete (terrain + trees clipped per chunk), so this just uploads.
+// Max columns integrated on the main thread per frame. Each column is 64
+// chunk integrations (512-voxel scan + pool alloc + GPU dirty-mark), so a
+// burst of completed columns is the streaming spike source. Budgeting it
+// keeps frames smooth; backlog drains over subsequent frames.
+INTEGRATE_BUDGET_PER_FRAME :: 6
+
 integrate_ready_chunks :: proc(gs: ^Game_State) {
-    results := worker_pool_drain(&gs.pool)
+    results := worker_pool_drain_budget(&gs.pool, INTEGRATE_BUDGET_PER_FRAME)
     defer delete(results)
+    if len(results) == 0 { return }
+    t_int := time.tick_now()
     for r in results {
         wcx := r.key[0]; wcz := r.key[1]
         probe := [3]int{wcx, 0, wcz}
@@ -170,6 +285,7 @@ integrate_ready_chunks :: proc(gs: ^Game_State) {
             integrate_chunk(gs, key, r.column[iy], true)
         }
     }
+    profile_add(.Integrate, t_int)
 }
 
 // Generate an entire XZ column: all CHUNKS_H Y chunks at world chunk coord
@@ -243,12 +359,22 @@ generate_column_at :: proc(wcx, wcz: int) -> [CHUNKS_H]^Chunk {
                     // Solid. Carve caves with a 3D noise lobe inside the cave
                     // band (deep enough below the surface, above the floor).
                     if wy > f64(CAVE_FLOOR_Y) && wy < grass_level - CAVE_TOP_MARGIN {
-                        cave := noise.noise_3d_improve_xy(7, {wx * 0.04, wy * 0.05, wz * 0.04})
+                        cave: f32 = 0.0
+                        when !PROF_NO_CAVE_NOISE {
+                            cave = noise.noise_3d_improve_xy(7, {wx * 0.04, wy * 0.05, wz * 0.04})
+                        }
                         if cave > CAVE_THRESHOLD {
                             chunk.voxels[i] = u8(Block_Type.Air)
                             continue
                         }
                     }
+                    // Deeper than the surface skin: unconditionally Stone, no
+                    // noise (only ever seen as a cave wall = stone anyway).
+                    if wy < grass_level - SURFACE_SKIN {
+                        chunk.voxels[i] = u8(Block_Type.Stone)
+                        continue
+                    }
+                    // Surface skin: grass with the stone-speckle 3D-noise.
                     chunk.voxels[i] = u8(Block_Type.Grass)
                     if noise.noise_3d_improve_xy(0, {wx * 0.05, wy * 0.05, wz * 0.05}) > 0.4 {
                         chunk.voxels[i] = u8(Block_Type.Stone)
@@ -554,10 +680,11 @@ get_voxel :: proc(gs: ^Game_State, wx, wy, wz: int) -> u32 {
     // Validate ring ownership
     owner := gs.gpu_chunk_owner[slot]
     if owner[0] != i32(cx) || owner[1] != i32(cz) { return 0 }
-    if gs.gpu_index[slot] == -1 { return 0 }
+    pid := gs.gpu_index[slot]
+    if pid == -1 { return 0 }
     lx := wx - cx * CHUNK_VOXELS; ly := wy - cy * CHUNK_VOXELS; lz := wz - cz * CHUNK_VOXELS
-    base := slot * (CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS)
-    return gs.gpu_voxels[base + lx + ly * CHUNK_VOXELS + lz * CHUNK_VOXELS * CHUNK_VOXELS]
+    base := int(pid) * VOXELS_PER_BRICK
+    return u32(gs.gpu_voxels[base + lx + ly * CHUNK_VOXELS + lz * CHUNK_VOXELS * CHUNK_VOXELS])
 }
 
 // CPU-side DDA raycast — mirrors the shader's two-level traversal.
@@ -569,10 +696,11 @@ raycast_voxel :: proc(gs: ^Game_State, origin, dir: [3]f32, max_dist: f32) -> (h
         slot := ring_slot(cx, cy, cz)
         owner := gs.gpu_chunk_owner[slot]
         if owner[0] != i32(cx) || owner[1] != i32(cz) { return 0 }
-        if gs.gpu_index[slot] == -1 { return 0 }
+        pid := gs.gpu_index[slot]
+        if pid == -1 { return 0 }
         lx := wx - cx * CHUNK_VOXELS; ly := wy - cy * CHUNK_VOXELS; lz := wz - cz * CHUNK_VOXELS
-        base := slot * (CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS)
-        return gs.gpu_voxels[base + lx + ly * CHUNK_VOXELS + lz * CHUNK_VOXELS * CHUNK_VOXELS]
+        base := int(pid) * VOXELS_PER_BRICK
+        return u32(gs.gpu_voxels[base + lx + ly * CHUNK_VOXELS + lz * CHUNK_VOXELS * CHUNK_VOXELS])
     }
 
     dx := dir[0]; dy := dir[1]; dz := dir[2]
@@ -642,22 +770,68 @@ edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^
                 ly := wy - cy * CHUNK_VOXELS
                 lz := wz - cz * CHUNK_VOXELS
                 vi := lx + ly * CHUNK_VOXELS + lz * CHUNK_VOXELS * CHUNK_VOXELS
-                base := slot * CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS
-                chunk.voxels[vi]         = u8(block)
-                gs.gpu_voxels[base + vi] = u32(block)
+                // Write only the authoritative chunk; the pool-aware
+                // refresh_chunk_index (called per dirty slot) syncs the
+                // pool-id voxel + mask blocks, handling air<->solid.
+                chunk.voxels[vi] = u8(block)
                 dirty[slot] = true
             }
         }
     }
 }
 
-// Recomputes gpu_index emptiness for a slot based on current gpu_voxels.
-refresh_chunk_index :: proc(gs: ^Game_State, slot: int) {
-    base := slot * CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS
-    empty := true
-    for vi in 0 ..< CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS {
-        if gs.gpu_voxels[base + vi] != 0 { empty = false; break }
+// Pool-aware re-sync of a slot after an edit. Reads the authoritative
+// chunk.voxels, decides emptiness, allocates/frees the pool id as needed,
+// rewrites the pool-id voxel + mask blocks. Returns true if gpu_index[slot]
+// changed (caller must then set index_dirty).
+refresh_chunk_index :: proc(gs: ^Game_State, slot: int) -> bool {
+    owner := gs.gpu_chunk_owner[slot]
+    if owner[0] == 0x7fffffff { return false }
+    // Invert ring_slot: iy = (slot / CHUNKS_W) % CHUNKS_H, wcy = iy + WORLD_CHUNK_Y_MIN.
+    key := [3]int{
+        int(owner[0]),
+        (slot / CHUNKS_W) % CHUNKS_H + WORLD_CHUNK_Y_MIN,
+        int(owner[1]),
     }
-    gs.gpu_index[slot] = empty ? -1 : i32(slot)
+    chunk := gs.chunk_map[key]
+    if chunk == nil { return false }
+
+    old_id := gs.gpu_index[slot]
+
+    empty := true
+    for vi in 0 ..< VOXELS_PER_BRICK {
+        if chunk.voxels[vi] != 0 { empty = false; break }
+    }
+
+    if empty {
+        if old_id >= 0 {
+            pool_free(&gs.brick_pool, old_id)
+            gs.gpu_index[slot] = -1
+        }
+        return gs.gpu_index[slot] != old_id
+    }
+
+    pid := old_id
+    if pid < 0 {
+        pid = pool_alloc(&gs.brick_pool)
+        if pid < 0 {
+            pool_exhaustion_warn()
+            gs.gpu_index[slot] = -1
+            return -1 != old_id
+        }
+        gs.gpu_index[slot] = pid
+    }
+
+    base      := int(pid) * VOXELS_PER_BRICK
+    mask_base := int(pid) * MASK_U32_PER_BRICK
+    for m in 0 ..< MASK_U32_PER_BRICK { gs.gpu_voxel_mask[mask_base + m] = 0 }
+    for vi in 0 ..< VOXELS_PER_BRICK {
+        v := chunk.voxels[vi]
+        gs.gpu_voxels[base + vi] = v
+        if v != 0 {
+            gs.gpu_voxel_mask[mask_base + (vi >> 5)] |= u32(1) << u32(vi & 31)
+        }
+    }
+    return gs.gpu_index[slot] != old_id
 }
 

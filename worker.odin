@@ -33,13 +33,19 @@ Worker_Pool :: struct {
     running:     bool,
 }
 
-// True when there is no pending work and nothing being generated. Used to
-// block at startup until the visible world is fully loaded.
+// True when there is no pending work, nothing being generated, AND nothing
+// waiting in the ready queue. The ready check matters because the budgeted
+// drain can leave completed columns un-integrated; the startup blocking loop
+// must not exit while any remain.
 worker_pool_idle :: proc(pool: ^Worker_Pool) -> bool {
     sync.mutex_lock(&pool.mu_pending)
     pending := len(pool.pending)
     sync.mutex_unlock(&pool.mu_pending)
-    return pending == 0 && sync.atomic_load(&pool.in_flight) == 0
+    if pending != 0 || sync.atomic_load(&pool.in_flight) != 0 { return false }
+    sync.mutex_lock(&pool.mu_ready)
+    ready := len(pool.ready)
+    sync.mutex_unlock(&pool.mu_ready)
+    return ready == 0
 }
 
 worker_pool_start :: proc(pool: ^Worker_Pool) {
@@ -88,6 +94,28 @@ worker_pool_drain :: proc(pool: ^Worker_Pool) -> []Chunk_Result {
     results := make([]Chunk_Result, len(pool.ready))
     copy(results, pool.ready[:])
     clear(&pool.ready)
+    sync.mutex_unlock(&pool.mu_ready)
+    return results
+}
+
+// Drain at most max_n finished columns; the rest stay queued for next frame.
+// Bounds per-frame main-thread integration cost so a burst of completed
+// columns can't spike the frame. max_n <= 0 means unbounded (drain all).
+worker_pool_drain_budget :: proc(pool: ^Worker_Pool, max_n: int) -> []Chunk_Result {
+    sync.mutex_lock(&pool.mu_ready)
+    avail := len(pool.ready)
+    take  := avail
+    if max_n > 0 && take > max_n { take = max_n }
+    results := make([]Chunk_Result, take)
+    copy(results, pool.ready[:take])
+    if take == avail {
+        clear(&pool.ready)
+    } else {
+        // Shift the untaken tail down to the front, keep it for next frame.
+        remaining := avail - take
+        copy(pool.ready[:remaining], pool.ready[take:avail])
+        resize(&pool.ready, remaining)
+    }
     sync.mutex_unlock(&pool.mu_ready)
     return results
 }

@@ -9,8 +9,9 @@
 
 // set 0, binding 0..2: read-only storage buffers
 StructuredBuffer<uint>     voxel_chunk : register(t0, space0); // voxel data per chunk
-StructuredBuffer<int>      chunk_index : register(t1, space0); // -1 = empty
+StructuredBuffer<int>      chunk_index : register(t1, space0); // pool id, -1 = air (no storage)
 StructuredBuffer<int2>     chunk_owner : register(t2, space0); // (world_cx, world_cz) owner per ring slot
+StructuredBuffer<uint>     voxel_mask  : register(t3, space0); // 16 u32 (512-bit occupancy) per slot
 
 // set 1, binding 0: read-write storage texture
 RWTexture2D<float4>        img_output  : register(u0, space1);
@@ -36,19 +37,34 @@ cbuffer CameraUniforms : register(b0, space2) {
 // ---- Constants --------------------------------------------------------------
 
 #define BRICK_CHUNK_SIZE     8
-#define CHUNK_COUNT_WIDTH   64
+#define CHUNK_COUNT_WIDTH   128   // MUST match world.odin CHUNKS_W
 #define GPU_CHUNKS_HEIGHT   64
 // World chunk-Y range: wcy in [WORLD_CHUNK_Y_MIN, WORLD_CHUNK_Y_MIN+GPU_CHUNKS_HEIGHT).
 // Ring Y index = wcy - WORLD_CHUNK_Y_MIN. Must match world.odin.
 #define WORLD_CHUNK_Y_MIN  (-32)
-#define RAY_MAX_LENGTH      512.0
-#define RAY_ITERATIONS      2000
+#define RAY_MAX_LENGTH      1024.0
+#define RAY_ITERATIONS      3000
 
 #define BLOCK_AIR    0u
 #define BLOCK_GRASS  1u
 #define BLOCK_STONE  2u
 #define BLOCK_LOG    3u
 #define BLOCK_LEAVES 4u
+
+// voxel_chunk packs 4 voxels (1 byte each) per uint. idx = global per-voxel
+// index; returns the block id in [0,255].
+uint load_voxel(int idx) {
+    uint word = voxel_chunk[idx >> 2];
+    return (word >> ((uint(idx) & 3u) * 8u)) & 0xFFu;
+}
+
+// Occupancy test: brick = chunk slot id, lvi = local voxel index [0,512).
+// 16 u32 per brick, bit lvi&31 of word lvi>>5. Avoids a material fetch for
+// air voxels (the common case along a ray).
+bool voxel_solid(int brick, int lvi) {
+    uint w = voxel_mask[brick * 16 + (lvi >> 5)];
+    return ((w >> (uint(lvi) & 31u)) & 1u) != 0u;
+}
 
 // ---- Structs ----------------------------------------------------------------
 
@@ -58,6 +74,7 @@ struct HitInfo {
     float t;
     float3 normal;
     float3 hit_pos;
+    int3   vkey;     // exact integer voxel coord (precision-safe, for hashing)
 };
 
 // ---- Helpers ----------------------------------------------------------------
@@ -76,6 +93,22 @@ float3 hash33(float3 p) {
     return float3(hash31(p),
                   hash31(p + float3(17.3, 0.0, 31.7)),
                   hash31(p + float3(0.0, 41.1, 7.9)));
+}
+
+// Integer-coordinate hash. Used for per-voxel color so it stays exact far
+// from spawn (float floor() of a huge world coord collapses to one value;
+// integer voxel coords never lose precision).
+float hash31i(int3 v) {
+    uint3 q = uint3(v); // two's-complement wrap for negatives is fine (hash)
+    q = q * uint3(1597334677u, 3812015801u, 2798796415u);
+    uint n = (q.x ^ q.y ^ q.z) * 1376312589u;
+    return float(n) * (1.0 / float(0xFFFFFFFFu));
+}
+
+float3 hash33i(int3 v) {
+    return float3(hash31i(v),
+                  hash31i(v + int3(17, 0, 31)),
+                  hash31i(v + int3(0, 41, 7)));
 }
 
 // Sun elevation in [0,1]: 0 = horizon, 1 = overhead.
@@ -138,8 +171,10 @@ uint sample_voxel(float3 world_pos) {
 
     int3 local = int3(floor(world_pos)) - chunk_coord * BRICK_CHUNK_SIZE;
     local = clamp(local, int3(0,0,0), int3(BRICK_CHUNK_SIZE-1, BRICK_CHUNK_SIZE-1, BRICK_CHUNK_SIZE-1));
+    int lvi  = local.x + local.y*BRICK_CHUNK_SIZE + local.z*BRICK_CHUNK_SIZE*BRICK_CHUNK_SIZE;
+    if (!voxel_solid(ci, lvi)) return 0u;
     int base = ci * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
-    return voxel_chunk[base + local.x + local.y*BRICK_CHUNK_SIZE + local.z*BRICK_CHUNK_SIZE*BRICK_CHUNK_SIZE];
+    return load_voxel(base + lvi);
 }
 
 // ---- Voxel-level DDA --------------------------------------------------------
@@ -178,10 +213,8 @@ HitInfo trace_ray_chunk_voxels(float3 origin, float3 dir, float3 chunk_pos,
 
     if (x_i >= 0 && y_i >= 0 && z_i >= 0 &&
         x_i < BRICK_CHUNK_SIZE && y_i < BRICK_CHUNK_SIZE && z_i < BRICK_CHUNK_SIZE) {
-        hit_block_id = voxel_chunk[global_chunk_i
-                                  + x_i
-                                  + y_i * BRICK_CHUNK_SIZE
-                                  + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE];
+        int lvi = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
+        if (voxel_solid(chunk_i, lvi)) hit_block_id = load_voxel(global_chunk_i + lvi);
     }
 
     while (i < 23 && hit_block_id == 0u) {
@@ -199,10 +232,8 @@ HitInfo trace_ray_chunk_voxels(float3 origin, float3 dir, float3 chunk_pos,
         if (x_i < 0 || y_i < 0 || z_i < 0 ||
             x_i >= BRICK_CHUNK_SIZE || y_i >= BRICK_CHUNK_SIZE || z_i >= BRICK_CHUNK_SIZE)
             break;
-        hit_block_id = voxel_chunk[global_chunk_i
-                                  + x_i
-                                  + y_i * BRICK_CHUNK_SIZE
-                                  + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE];
+        int lvi2 = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
+        if (voxel_solid(chunk_i, lvi2)) hit_block_id = load_voxel(global_chunk_i + lvi2);
     }
 
     float3 hit_pos = origin + dir * t;
@@ -212,6 +243,12 @@ HitInfo trace_ray_chunk_voxels(float3 origin, float3 dir, float3 chunk_pos,
     info.t         = t;
     info.normal    = hit_side;
     info.hit_pos   = hit_pos;
+    // Precision-safe voxel key: integer chunk coord (magnitude = world/8, so
+    // exact ~8x farther than a voxel-scale float) * 8 + exact local coords
+    // (0..7). Never reconstructs a giant voxel-scale float, so the per-voxel
+    // hash stays unique far from spawn instead of collapsing to one color.
+    int3 chunk_i3 = int3(floor(chunk_pos));
+    info.vkey      = chunk_i3 * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i);
     return info;
 }
 
@@ -245,6 +282,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light) {
 
     uint   hit_block_id      = 0u;
     float3 hit_side          = float3(0,0,0);
+    int3   hit_vkey          = int3(0,0,0);
     float3 chunk_entry_normal = float3(0,0,0);
 
     int ring_w = CHUNK_COUNT_WIDTH;
@@ -277,6 +315,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light) {
                     hit_block_id = vhit.block_id;
                     t += vhit.t / float(BRICK_CHUNK_SIZE);
                     hit_side = vhit.normal;
+                    hit_vkey = vhit.vkey;
                     break;
                 }
             }
@@ -301,6 +340,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light) {
     info.t          = t * BRICK_CHUNK_SIZE;
     info.normal     = hit_side;
     info.hit_pos    = hit_pos;
+    info.vkey       = hit_vkey;
     return info;
 }
 
@@ -405,7 +445,9 @@ float4 trace_pixel(float2 pixel, float2 dims) {
         if (hit.block_id != 0u) {
             float4 hit_color;
             float3 voxel_pos    = floor(hit.hit_pos - hit.normal * 0.5);
-            float3 color_jitter = hash33(voxel_pos) * 2.0 - 1.0;
+            // Per-voxel color uses the exact integer voxel key, not the
+            // float hit_pos (which collapses to one value far from spawn).
+            float3 color_jitter = hash33i(hit.vkey) * 2.0 - 1.0;
             if (hit.block_id == BLOCK_GRASS) {
                 bool is_top = abs(hit.normal.y) > 0.5;
                 float3 grass = float3(0.13, 0.55, 0.08);

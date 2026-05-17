@@ -12,7 +12,8 @@ Profile_Zone :: enum {
     Terrain_Fill,    // 3D voxel fill + 3D stone noise
     Tree_Scan,       // should_place_tree scan loop
     Tree_Generate,   // generate_tree calls
-    Integrate,       // main-thread GPU integrate
+    Integrate,       // main-thread column integrate (scan+pool+dirty mark)
+    GPU_Upload,      // main-thread flush_gpu_uploads (transfer + copy pass)
 }
 
 @(private="file") prof_ns:    [Profile_Zone]i64
