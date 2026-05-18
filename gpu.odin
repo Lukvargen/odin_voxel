@@ -26,6 +26,10 @@ Camera_Uniform :: struct #packed {
     player_chunk_x:   i32,
     player_chunk_z:   i32,
     quality:          i32,   // packed: AA*10 + shadow_rays
+    vol:              i32,   // packed: enabled*100 + steps (0/16/24/32)
+    _padq0:           f32,
+    _padq1:           f32,
+    _padq2:           f32,
 }
 
 gpu_init :: proc(gs: ^Game_State) {
@@ -46,7 +50,7 @@ gpu_init :: proc(gs: ^Game_State) {
         entrypoint                   = "main",
         format                       = {.SPIRV},
         num_readonly_storage_buffers = 4, // voxel_chunk (t0), chunk_index (t1), chunk_owner (t2), voxel_mask (t3)
-        num_readwrite_storage_textures = 1, // img_output (u0)
+        num_readwrite_storage_textures = 2, // img_output (u0), depth_output (u1)
         num_uniform_buffers          = 1, // CameraUniforms (b0)
         threadcount_x                = 16,
         threadcount_y                = 16,
@@ -54,6 +58,36 @@ gpu_init :: proc(gs: ^Game_State) {
     }
     gs.pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, pipeline_info)
     assert(gs.pipeline != nil, "Failed to create compute pipeline")
+
+    // Volumetric pass: 1 RO storage texture (depth) + 4 RO storage buffers,
+    // 1 RW storage texture (half-res inscatter).
+    vol_bytes := #load("shaders/volumetric.spv")
+    gs.vol_pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, SDL.GPUComputePipelineCreateInfo{
+        code                           = raw_data(vol_bytes),
+        code_size                      = len(vol_bytes),
+        entrypoint                     = "main",
+        format                         = {.SPIRV},
+        num_readonly_storage_textures  = 1, // depth_input (t0)
+        num_readonly_storage_buffers   = 4, // voxel buffers (t1..t4)
+        num_readwrite_storage_textures = 1, // vol_output (u0)
+        num_uniform_buffers            = 1,
+        threadcount_x = 16, threadcount_y = 16, threadcount_z = 1,
+    })
+    assert(gs.vol_pipeline != nil, "Failed to create volumetric pipeline")
+
+    // Composite pass: 2 RO storage textures (vol, depth), 1 RW (scene color).
+    comp_bytes := #load("shaders/composite.spv")
+    gs.comp_pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, SDL.GPUComputePipelineCreateInfo{
+        code                           = raw_data(comp_bytes),
+        code_size                      = len(comp_bytes),
+        entrypoint                     = "main",
+        format                         = {.SPIRV},
+        num_readonly_storage_textures  = 2, // vol_input (t0), depth_input (t1)
+        num_readwrite_storage_textures = 1, // img_output (u0)
+        num_uniform_buffers            = 1,
+        threadcount_x = 16, threadcount_y = 16, threadcount_z = 1,
+    })
+    assert(gs.comp_pipeline != nil, "Failed to create composite pipeline")
 
     // Output storage texture (compute writes here each frame)
     gs.out_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
@@ -66,6 +100,32 @@ gpu_init :: proc(gs: ^Game_State) {
         num_levels           = 1,
     })
     assert(gs.out_texture != nil, "Failed to create output texture")
+
+    // Per-pixel primary-hit distance (R32F). Consumed by the volumetric
+    // composite for depth-aware upscale and march-length clamping.
+    gs.depth_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
+        type                 = .D2,
+        format               = .R32_FLOAT,
+        usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
+        width                = TEX_W,
+        height               = TEX_H,
+        layer_count_or_depth = 1,
+        num_levels           = 1,
+    })
+    assert(gs.depth_texture != nil, "Failed to create depth texture")
+
+    // Half-res volumetric inscatter. Written by the volumetric pass
+    // (storage write), read by composite (RO storage texture / .SAMPLER).
+    gs.vol_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
+        type                 = .D2,
+        format               = .R32G32B32A32_FLOAT,
+        usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
+        width                = TEX_W / 2,
+        height               = TEX_H / 2,
+        layer_count_or_depth = 1,
+        num_levels           = 1,
+    })
+    assert(gs.vol_texture != nil, "Failed to create volumetric texture")
 
     // GPU buffers for voxel data (read-only in compute).
     // gpu_voxels is 1 byte/voxel; the shader reads it as StructuredBuffer<uint>
@@ -317,24 +377,43 @@ gpu_render :: proc(gs: ^Game_State) {
         player_chunk_x  = i32(gs.player_chunk[0]),
         player_chunk_z  = i32(gs.player_chunk[2]),
         quality         = gs.aa_samples * 10 + gs.shadow_rays,
+        vol             = (gs.vol_enabled ? 100 : 0) + gs.vol_steps,
     }
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
-    // Compute pass: raytrace into out_texture
-    rw_tex_binding := SDL.GPUStorageTextureReadWriteBinding{
-        texture = gs.out_texture,
-        cycle   = true,
-    }
-    compute_pass := SDL.BeginGPUComputePass(cmd, &rw_tex_binding, 1, nil, 0)
-
-    SDL.BindGPUComputePipeline(compute_pass, gs.pipeline)
-
-    // Bind readonly storage buffers: voxel_chunk (t0), chunk_index (t1), chunk_owner (t2), voxel_mask (t3)
     ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}
-    SDL.BindGPUComputeStorageBuffers(compute_pass, 0, raw_data(ro_bufs[:]), 4)
 
-    SDL.DispatchGPUCompute(compute_pass, TEX_W / 16, TEX_H / 16, 1)
-    SDL.EndGPUComputePass(compute_pass)
+    // --- Pass 1: main raytrace → out_texture (+ depth_texture) ---
+    rw_main := [2]SDL.GPUStorageTextureReadWriteBinding{
+        { texture = gs.out_texture,   cycle = true },
+        { texture = gs.depth_texture, cycle = true },
+    }
+    p1 := SDL.BeginGPUComputePass(cmd, raw_data(rw_main[:]), 2, nil, 0)
+    SDL.BindGPUComputePipeline(p1, gs.pipeline)
+    SDL.BindGPUComputeStorageBuffers(p1, 0, raw_data(ro_bufs[:]), 4)
+    SDL.DispatchGPUCompute(p1, TEX_W / 16, TEX_H / 16, 1)
+    SDL.EndGPUComputePass(p1)
+
+    // --- Pass 2: half-res volumetric march → vol_texture ---
+    // Reads depth (RO storage tex, t0) + voxel buffers (t1..t4).
+    rw_vol := SDL.GPUStorageTextureReadWriteBinding{ texture = gs.vol_texture, cycle = true }
+    p2 := SDL.BeginGPUComputePass(cmd, &rw_vol, 1, nil, 0)
+    SDL.BindGPUComputePipeline(p2, gs.vol_pipeline)
+    vol_ro_tex := [1]^SDL.GPUTexture{ gs.depth_texture }
+    SDL.BindGPUComputeStorageTextures(p2, 0, raw_data(vol_ro_tex[:]), 1)
+    SDL.BindGPUComputeStorageBuffers(p2, 0, raw_data(ro_bufs[:]), 4)
+    SDL.DispatchGPUCompute(p2, (TEX_W/2 + 15) / 16, (TEX_H/2 + 15) / 16, 1)
+    SDL.EndGPUComputePass(p2)
+
+    // --- Pass 3: composite (bilateral upscale + add) → out_texture ---
+    // Reads vol (t0) + depth (t1) as RO storage textures; RW out_texture.
+    rw_comp := SDL.GPUStorageTextureReadWriteBinding{ texture = gs.out_texture, cycle = false }
+    p3 := SDL.BeginGPUComputePass(cmd, &rw_comp, 1, nil, 0)
+    SDL.BindGPUComputePipeline(p3, gs.comp_pipeline)
+    comp_ro_tex := [2]^SDL.GPUTexture{ gs.vol_texture, gs.depth_texture }
+    SDL.BindGPUComputeStorageTextures(p3, 0, raw_data(comp_ro_tex[:]), 2)
+    SDL.DispatchGPUCompute(p3, TEX_W / 16, TEX_H / 16, 1)
+    SDL.EndGPUComputePass(p3)
 
     // Acquire swapchain and blit out_texture onto it
     swapchain_tex: ^SDL.GPUTexture
@@ -367,6 +446,7 @@ gpu_render :: proc(gs: ^Game_State) {
 gpu_destroy :: proc(gs: ^Game_State) {
     _ = SDL.WaitForGPUIdle(gs.gpu_device)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.voxel_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.index_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.owner_buf)

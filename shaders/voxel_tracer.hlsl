@@ -2,21 +2,18 @@
 // Two-level DDA: chunk-grid traversal, then per-chunk voxel traversal.
 
 // ---- Bindings ---------------------------------------------------------------
-// SDL3 GPU SPIR-V binding layout for compute shaders:
-//   set 0: samplers, read-only storage textures, read-only storage buffers
-//   set 1: read-write storage textures, read-write storage buffers
-//   set 2: uniform buffers
+// SPIR-V/SDL3 space0 order: (sampled tex) → RO storage tex → RO storage buf.
+// This pass has NO RO storage textures, so the 4 voxel buffers are t0..t3.
+// RW textures (set 1): img_output (u0), depth_output (u1). Shared
+// constants/functions come from voxel_common.hlsl AFTER these decls.
+StructuredBuffer<uint>     voxel_chunk : register(t0, space0);
+StructuredBuffer<int>      chunk_index : register(t1, space0);
+StructuredBuffer<int2>     chunk_owner : register(t2, space0);
+StructuredBuffer<uint>     voxel_mask  : register(t3, space0);
 
-// set 0, binding 0..2: read-only storage buffers
-StructuredBuffer<uint>     voxel_chunk : register(t0, space0); // voxel data per chunk
-StructuredBuffer<int>      chunk_index : register(t1, space0); // pool id, -1 = air (no storage)
-StructuredBuffer<int2>     chunk_owner : register(t2, space0); // (world_cx, world_cz) owner per ring slot
-StructuredBuffer<uint>     voxel_mask  : register(t3, space0); // 16 u32 (512-bit occupancy) per slot
+RWTexture2D<float4>        img_output   : register(u0, space1);
+RWTexture2D<float>         depth_output : register(u1, space1); // primary-hit dist, 1e30 = sky
 
-// set 1, binding 0: read-write storage texture
-RWTexture2D<float4>        img_output  : register(u0, space1);
-
-// set 2, binding 0: uniform buffer
 cbuffer CameraUniforms : register(b0, space2) {
     float3 u_cam_pos;
     float  _pad0;
@@ -31,40 +28,14 @@ cbuffer CameraUniforms : register(b0, space2) {
     int    u_reflect_amount;
     int    u_player_chunk_x;
     int    u_player_chunk_z;
-    int    u_quality;   // packed: AA = /10 (1..4), shadow_rays = %10 (1 or 3)
+    int    u_quality;
+    int    u_vol;
+    float  _padq0;
+    float  _padq1;
+    float  _padq2;
 };
 
-// ---- Constants --------------------------------------------------------------
-
-#define BRICK_CHUNK_SIZE     8
-#define CHUNK_COUNT_WIDTH   128   // MUST match world.odin CHUNKS_W
-#define GPU_CHUNKS_HEIGHT   64
-// World chunk-Y range: wcy in [WORLD_CHUNK_Y_MIN, WORLD_CHUNK_Y_MIN+GPU_CHUNKS_HEIGHT).
-// Ring Y index = wcy - WORLD_CHUNK_Y_MIN. Must match world.odin.
-#define WORLD_CHUNK_Y_MIN  (-32)
-#define RAY_MAX_LENGTH      1024.0
-#define RAY_ITERATIONS      3000
-
-#define BLOCK_AIR    0u
-#define BLOCK_GRASS  1u
-#define BLOCK_STONE  2u
-#define BLOCK_LOG    3u
-#define BLOCK_LEAVES 4u
-
-// voxel_chunk packs 4 voxels (1 byte each) per uint. idx = global per-voxel
-// index; returns the block id in [0,255].
-uint load_voxel(int idx) {
-    uint word = voxel_chunk[idx >> 2];
-    return (word >> ((uint(idx) & 3u) * 8u)) & 0xFFu;
-}
-
-// Occupancy test: brick = chunk slot id, lvi = local voxel index [0,512).
-// 16 u32 per brick, bit lvi&31 of word lvi>>5. Avoids a material fetch for
-// air voxels (the common case along a ray).
-bool voxel_solid(int brick, int lvi) {
-    uint w = voxel_mask[brick * 16 + (lvi >> 5)];
-    return ((w >> (uint(lvi) & 31u)) & 1u) != 0u;
-}
+#include "voxel_common.hlsl"
 
 // ---- Structs ----------------------------------------------------------------
 
@@ -153,29 +124,6 @@ float3 tone_map(float3 x) {
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
 }
 
-uint sample_voxel(float3 world_pos) {
-    int3 chunk_coord = int3(floor(world_pos / float(BRICK_CHUNK_SIZE)));
-    int ry = chunk_coord.y - WORLD_CHUNK_Y_MIN;            // ring Y index
-    if (ry < 0 || ry >= GPU_CHUNKS_HEIGHT) return 0u;
-
-    int ring_w = CHUNK_COUNT_WIDTH;
-    int rx = ((chunk_coord.x % ring_w) + ring_w) % ring_w;
-    int rz = ((chunk_coord.z % ring_w) + ring_w) % ring_w;
-    int slot = rx + ry * ring_w + rz * ring_w * GPU_CHUNKS_HEIGHT;
-
-    int2 owner = chunk_owner[slot];
-    if (owner.x != chunk_coord.x || owner.y != chunk_coord.z) return 0u;
-
-    int ci = chunk_index[slot];
-    if (ci == -1) return 0u;
-
-    int3 local = int3(floor(world_pos)) - chunk_coord * BRICK_CHUNK_SIZE;
-    local = clamp(local, int3(0,0,0), int3(BRICK_CHUNK_SIZE-1, BRICK_CHUNK_SIZE-1, BRICK_CHUNK_SIZE-1));
-    int lvi  = local.x + local.y*BRICK_CHUNK_SIZE + local.z*BRICK_CHUNK_SIZE*BRICK_CHUNK_SIZE;
-    if (!voxel_solid(ci, lvi)) return 0u;
-    int base = ci * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
-    return load_voxel(base + lvi);
-}
 
 // ---- Voxel-level DDA --------------------------------------------------------
 
@@ -344,60 +292,6 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light) {
     return info;
 }
 
-// ---- Shadow transmittance ray -----------------------------------------------
-// Walks toward the light, accumulating transmittance.
-// Leaves (block_id==4) attenuate by LEAF_TRANSMIT each voxel crossed.
-// Any other solid block = fully occluded.
-
-#define LEAF_TRANSMIT 0.35
-
-float trace_shadow_transmittance(float3 origin, float3 dir) {
-    float t_delta_x = abs(1.0 / dir.x);
-    float t_delta_y = abs(1.0 / dir.y);
-    float t_delta_z = abs(1.0 / dir.z);
-
-    int step_x = (int)sign(dir.x);
-    int step_y = (int)sign(dir.y);
-    int step_z = (int)sign(dir.z);
-
-    int dir_x = step_x > 0 ? 1 : 0;
-    int dir_y = step_y > 0 ? 1 : 0;
-    int dir_z = step_z > 0 ? 1 : 0;
-
-    int xi = (int)floor(origin.x);
-    int yi = (int)floor(origin.y);
-    int zi = (int)floor(origin.z);
-
-    float t_max_x = ((xi + dir_x) - origin.x) / dir.x;
-    float t_max_y = ((yi + dir_y) - origin.y) / dir.y;
-    float t_max_z = ((zi + dir_z) - origin.z) / dir.z;
-
-    float transmittance = 1.0;
-    float t = 0.0;
-
-    for (int iter = 0; iter < RAY_ITERATIONS && t < RAY_MAX_LENGTH; iter++) {
-        uint bid = sample_voxel(float3(xi, yi, zi) + 0.5);
-        if (bid == BLOCK_LEAVES) {
-            transmittance *= LEAF_TRANSMIT;
-            if (transmittance < 0.01) return 0.0;
-        } else if (bid != 0u) {
-            return 0.0;
-        }
-
-        if (t_max_x < t_max_y && t_max_x < t_max_z) {
-            xi += step_x; t = t_max_x; t_max_x += t_delta_x;
-        } else if (t_max_y < t_max_z) {
-            yi += step_y; t = t_max_y; t_max_y += t_delta_y;
-        } else {
-            zi += step_z; t = t_max_z; t_max_z += t_delta_z;
-        }
-
-        if (yi < WORLD_CHUNK_Y_MIN * BRICK_CHUNK_SIZE ||
-            yi >= (WORLD_CHUNK_Y_MIN + GPU_CHUNKS_HEIGHT) * BRICK_CHUNK_SIZE) break;
-    }
-    return transmittance;
-}
-
 // ---- Lighting / AO ----------------------------------------------------------
 
 float compute_ao(float3 p, float3 nrm) {
@@ -431,7 +325,7 @@ static const float2 aa_offsets[4] = {
     float2(-0.125,  0.375),
 };
 
-float4 trace_pixel(float2 pixel, float2 dims) {
+float4 trace_pixel(float2 pixel, float2 dims, out float prim_depth) {
     float3 origin = u_cam_pos;
     float nx = (pixel.x * 2.0 - dims.x) / dims.x;
     float ny = -(pixel.y * 2.0 - dims.y) / dims.y;
@@ -439,9 +333,11 @@ float4 trace_pixel(float2 pixel, float2 dims) {
 
     float4 pixel_color = sky_color(normalize(dir));
     float reflection_amount = 1.0;
+    prim_depth = 1e30; // sky default
 
     for (int i = 0; i < u_reflect_amount; i++) {
         HitInfo hit = trace_ray_chunk(origin, dir, false);
+        if (i == 0) prim_depth = (hit.block_id != 0u) ? hit.t : 1e30;
         if (hit.block_id != 0u) {
             float4 hit_color;
             float3 voxel_pos    = floor(hit.hit_pos - hit.normal * 0.5);
@@ -552,8 +448,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     // shadow ray count handled in trace_pixel via u_quality%10.
     int aa = clamp(u_quality / 10, 1, AA_SAMPLES);
     float4 color = float4(0, 0, 0, 0);
+    float prim_depth = 1e30;
     for (int s = 0; s < aa; s++) {
-        color += trace_pixel(pixel + aa_offsets[s], dims);
+        float d;
+        color += trace_pixel(pixel + aa_offsets[s], dims, d);
+        if (s == 0) prim_depth = d; // sample-0 depth (avoid AA-edge blending)
     }
-    img_output[int2(id.xy)] = color / float(aa);
+    img_output[int2(id.xy)]   = color / float(aa);
+    depth_output[int2(id.xy)] = prim_depth;
 }

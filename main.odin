@@ -28,8 +28,12 @@ Game_State :: struct {
     prof_frames:     int,
 
     // GPU resources
-    pipeline:    ^SDL.GPUComputePipeline,
-    out_texture: ^SDL.GPUTexture,
+    pipeline:      ^SDL.GPUComputePipeline,
+    vol_pipeline:  ^SDL.GPUComputePipeline,
+    comp_pipeline: ^SDL.GPUComputePipeline,
+    out_texture:   ^SDL.GPUTexture,
+    depth_texture: ^SDL.GPUTexture,
+    vol_texture:   ^SDL.GPUTexture,   // half-res volumetric inscatter
     voxel_buf:   ^SDL.GPUBuffer,
     index_buf:   ^SDL.GPUBuffer,
     owner_buf:   ^SDL.GPUBuffer,
@@ -40,6 +44,8 @@ Game_State :: struct {
     reflect_amount: i32,
     aa_samples:     i32,   // anti-alias samples: 1/2/4 (F2 cycles)
     shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
+    vol_enabled:    bool,  // volumetric god rays on/off (F4)
+    vol_steps:      i32,   // volumetric march steps: 16/24/32 (F5 cycles)
 
     // Input state
     mouse_locked:        bool,
@@ -56,6 +62,8 @@ main :: proc() {
     gs.reflect_amount = 1
     gs.aa_samples     = 2   // F2 cycles 4->2->1
     gs.shadow_rays    = 1   // F3 toggles 1<->3 (1=hard, 3=soft near)
+    gs.vol_enabled    = true // F4 toggles volumetric god rays
+    gs.vol_steps      = 16   // measured: 16 = 55 FPS (~baseline), 24/32 cost more for little visual gain. F5 cycles 16/24/32
     gs.light_dir      = {0.6, 0.8, 0.4}
     gs.camera.pos     = {0, 80, 0}
     gs.camera.yaw     = 0
@@ -130,6 +138,12 @@ main :: proc() {
                 case SDL.K_F3:
                     gs.shadow_rays = gs.shadow_rays == 3 ? 1 : 3
                     fmt.printf("shadow rays (near): %d\n", gs.shadow_rays)
+                case SDL.K_F4:
+                    gs.vol_enabled = !gs.vol_enabled
+                    fmt.printf("volumetric: %v\n", gs.vol_enabled)
+                case SDL.K_F5:
+                    gs.vol_steps = gs.vol_steps == 16 ? 24 : (gs.vol_steps == 24 ? 32 : 16)
+                    fmt.printf("volumetric steps: %d\n", gs.vol_steps)
                 case SDL.K_1: gs.reflect_amount = 1
                 case SDL.K_2: gs.reflect_amount = 2
                 case SDL.K_3: gs.reflect_amount = 3
