@@ -90,17 +90,16 @@ Chunk :: struct {
 LOAD_RADIUS_XZ  :: 56   // must stay < CHUNKS_W/2 (=64) so a chunk and its ring-twin never coexist
 LOAD_RADIUS_Y   :: 7
 
-// Cave band. Below CAVE_FLOOR_Y everything is solid stone (skippable fast
-// path). Caves are carved by a 3D noise lobe between CAVE_FLOOR_Y and
-// (surface - CAVE_TOP_MARGIN), so they never break the visible surface.
-CAVE_FLOOR_Y    :: -224         // a few chunks above WORLD_Y_MIN (-256)
+// Cave band. Below CAVE_FLOOR_Y everything is solid stone via the no-noise
+// fast path. Caves are carved by a 3D noise lobe only between CAVE_FLOOR_Y
+// and (surface - CAVE_TOP_MARGIN). Keeping the floor shallow (-64 vs the old
+// -224) is the dominant generation-cost lever: the proven ~92%-of-fill cave
+// 3D-noise now runs over a ~160-voxel band instead of ~320, ~halving it,
+// with zero new control flow / streaming risk. Deep digging hits solid stone
+// below -64 (acceptable; deeper caves would need on-demand vertical gen).
+CAVE_FLOOR_Y    :: -64
 CAVE_TOP_MARGIN :: 6            // keep caves this far below the surface
 CAVE_THRESHOLD  :: 0.32         // higher = fewer/smaller caves
-
-// PROFILING A/B: when true, the per-voxel cave 3D-noise is replaced by a
-// constant (no caves). Compare Terrain_Fill totals true-vs-false to isolate
-// exactly how much of the fill cost is the cave noise. Set back to false.
-PROF_NO_CAVE_NOISE :: #config(PROF_NO_CAVE_NOISE, false)
 
 // The grass/stone speckle 3D-noise only affects the visible surface skin.
 // Solid voxels deeper than this below the surface are unconditionally Stone
@@ -359,10 +358,7 @@ generate_column_at :: proc(wcx, wcz: int) -> [CHUNKS_H]^Chunk {
                     // Solid. Carve caves with a 3D noise lobe inside the cave
                     // band (deep enough below the surface, above the floor).
                     if wy > f64(CAVE_FLOOR_Y) && wy < grass_level - CAVE_TOP_MARGIN {
-                        cave: f32 = 0.0
-                        when !PROF_NO_CAVE_NOISE {
-                            cave = noise.noise_3d_improve_xy(7, {wx * 0.04, wy * 0.05, wz * 0.04})
-                        }
+                        cave := noise.noise_3d_improve_xy(7, {wx * 0.04, wy * 0.05, wz * 0.04})
                         if cave > CAVE_THRESHOLD {
                             chunk.voxels[i] = u8(Block_Type.Air)
                             continue
