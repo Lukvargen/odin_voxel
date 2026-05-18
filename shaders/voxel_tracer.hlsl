@@ -31,7 +31,7 @@ cbuffer CameraUniforms : register(b0, space2) {
     int    u_reflect_amount;
     int    u_player_chunk_x;
     int    u_player_chunk_z;
-    float  _pad5;
+    int    u_quality;   // packed: AA = /10 (1..4), shadow_rays = %10 (1 or 3)
 };
 
 // ---- Constants --------------------------------------------------------------
@@ -500,7 +500,9 @@ float4 trace_pixel(float2 pixel, float2 dims) {
                 float3 bitangent = cross(l, tangent);
                 float t0 = trace_shadow_transmittance(shadow_origin, normalize(l));
                 float shadow_factor;
-                if (hit.t < 150.0) {
+                // 3-ray soft shadow only when enabled (u_quality%10==3) AND
+                // near (fog hides far penumbra anyway). Else 1 hard ray.
+                if ((u_quality % 10) == 3 && hit.t < 150.0) {
                     float t1 = trace_shadow_transmittance(shadow_origin, normalize(l + (0.707 * tangent)   * 1.5));
                     float t2 = trace_shadow_transmittance(shadow_origin, normalize(l + (0.707 * bitangent) * 1.5));
                     shadow_factor = (t0 + t1 + t2) / 3.0;
@@ -546,9 +548,12 @@ void main(uint3 id : SV_DispatchThreadID) {
     float2 dims = float2(w, h);
     float2 pixel = float2(id.xy);
 
+    // u_quality packs quality settings: AA = u_quality/10 (1..4),
+    // shadow ray count handled in trace_pixel via u_quality%10.
+    int aa = clamp(u_quality / 10, 1, AA_SAMPLES);
     float4 color = float4(0, 0, 0, 0);
-    for (int s = 0; s < AA_SAMPLES; s++) {
+    for (int s = 0; s < aa; s++) {
         color += trace_pixel(pixel + aa_offsets[s], dims);
     }
-    img_output[int2(id.xy)] = color / float(AA_SAMPLES);
+    img_output[int2(id.xy)] = color / float(aa);
 }

@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:math"
 import "core:math/noise"
+import "core:mem"
 import "core:time"
 
 CHUNK_VOXELS :: 8
@@ -157,6 +158,7 @@ generate_world :: proc(gs: ^Game_State) {
         floor_div(int(gs.camera.pos.y), CHUNK_VOXELS),
         floor_div(int(gs.camera.pos.z), CHUNK_VOXELS),
     }
+    worker_pool_set_player(&gs.pool, gs.player_chunk[0], gs.player_chunk[2])
 
     // Block only on a small radius so the window appears fast; the game loop
     // streams the rest of LOAD_RADIUS_XZ in afterward.
@@ -196,8 +198,11 @@ enqueue_chunks :: proc(gs: ^Game_State) {
     enqueue_radius(gs, LOAD_RADIUS_XZ)
 }
 
-// Upload a chunk into the GPU ring. Called on main thread after chunk is fully built.
-integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, gpu_ready: bool) {
+// Upload a chunk into the GPU ring. Called on main thread after chunk is
+// fully built. `empty` and `mask` are precomputed on the worker (see
+// Chunk_Result) so this does no per-voxel scanning — only pool bookkeeping
+// and two mem.copy.
+integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, empty: bool, mask: ^[MASK_U32_PER_BRICK]u32, gpu_ready: bool) {
     wcx := key[0]; wcy := key[1]; wcz := key[2]
     if key in gs.gpu_loaded { return }
 
@@ -219,12 +224,6 @@ integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, gpu_ready: 
         gs.gpu_index[slot] = -1
     }
 
-    // Decide emptiness from the authoritative chunk source.
-    empty := true
-    for vi in 0 ..< VOXELS_PER_BRICK {
-        if chunk.voxels[vi] != 0 { empty = false; break }
-    }
-
     gs.gpu_loaded[key]       = true
     gs.gpu_chunk_owner[slot] = {i32(wcx), i32(wcz)}
 
@@ -238,14 +237,11 @@ integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, gpu_ready: 
         } else {
             base      := int(pid) * VOXELS_PER_BRICK
             mask_base := int(pid) * MASK_U32_PER_BRICK
-            for m in 0 ..< MASK_U32_PER_BRICK { gs.gpu_voxel_mask[mask_base + m] = 0 }
-            for vi in 0 ..< VOXELS_PER_BRICK {
-                v := chunk.voxels[vi]
-                gs.gpu_voxels[base + vi] = v
-                if v != 0 {
-                    gs.gpu_voxel_mask[mask_base + (vi >> 5)] |= u32(1) << u32(vi & 31)
-                }
-            }
+            // Bulk copies — the per-voxel scan/mask build already ran on the
+            // worker. mem.copy is SIMD memcpy, ~tens of ns vs the old ~520µs
+            // byte loop that was the streaming wall.
+            mem.copy(&gs.gpu_voxels[base], &chunk.voxels[0], VOXELS_PER_BRICK)
+            mem.copy(&gs.gpu_voxel_mask[mask_base], &mask[0], MASK_U32_PER_BRICK * size_of(u32))
             gs.gpu_index[slot] = pid
         }
     }
@@ -258,18 +254,21 @@ integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, gpu_ready: 
 
 // Drain finished columns from the worker pool and integrate them. Each column
 // arrives complete (terrain + trees clipped per chunk), so this just uploads.
-// Max columns integrated on the main thread per frame. Each column is 64
-// chunk integrations (512-voxel scan + pool alloc + GPU dirty-mark), so a
-// burst of completed columns is the streaming spike source. Budgeting it
-// keeps frames smooth; backlog drains over subsequent frames.
-INTEGRATE_BUDGET_PER_FRAME :: 6
+// Max columns integrated on the main thread per frame. The per-voxel scan +
+// mask build now runs on the worker (see Chunk_Result), so a column is just
+// 64×(pool alloc + 512B/64B mem.copy + map ops) — roughly an order of
+// magnitude cheaper than the old ~520µs. Active flight enqueues ~19 cols/
+// frame; 24 keeps the backlog (and the holes-when-moving) from growing while
+// staying well under the old ~3 ms/frame integrate cost. Tune from the
+// Integrate profile zone if needed.
+INTEGRATE_BUDGET_PER_FRAME :: 24
 
 integrate_ready_chunks :: proc(gs: ^Game_State) {
     results := worker_pool_drain_budget(&gs.pool, INTEGRATE_BUDGET_PER_FRAME)
     defer delete(results)
     if len(results) == 0 { return }
     t_int := time.tick_now()
-    for r in results {
+    for &r in results {
         wcx := r.key[0]; wcz := r.key[1]
         probe := [3]int{wcx, 0, wcz}
         if probe in gs.gpu_loaded {
@@ -281,7 +280,7 @@ integrate_ready_chunks :: proc(gs: ^Game_State) {
             wcy := iy + WORLD_CHUNK_Y_MIN
             key := [3]int{wcx, wcy, wcz}
             gs.chunk_map[key] = r.column[iy]
-            integrate_chunk(gs, key, r.column[iy], true)
+            integrate_chunk(gs, key, r.column[iy], r.empty[iy], &r.mask[iy], true)
         }
     }
     profile_add(.Integrate, t_int)

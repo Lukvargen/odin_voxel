@@ -38,6 +38,8 @@ Game_State :: struct {
     // Settings
     light_dir:      [3]f32,
     reflect_amount: i32,
+    aa_samples:     i32,   // anti-alias samples: 1/2/4 (F2 cycles)
+    shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
 
     // Input state
     mouse_locked:        bool,
@@ -52,6 +54,8 @@ main :: proc() {
     gs: Game_State
 
     gs.reflect_amount = 1
+    gs.aa_samples     = 2   // F2 cycles 4->2->1
+    gs.shadow_rays    = 1   // F3 toggles 1<->3 (1=hard, 3=soft near)
     gs.light_dir      = {0.6, 0.8, 0.4}
     gs.camera.pos     = {0, 80, 0}
     gs.camera.yaw     = 0
@@ -120,6 +124,12 @@ main :: proc() {
                     fmt.printf("Cam pos: %.1f %.1f %.1f | yaw %.1f pitch %.1f | fly=%v\n",
                         gs.camera.pos.x, gs.camera.pos.y, gs.camera.pos.z,
                         gs.camera.yaw, gs.camera.pitch, gs.camera.fly_mode)
+                case SDL.K_F2:
+                    gs.aa_samples = gs.aa_samples == 4 ? 2 : (gs.aa_samples == 2 ? 1 : 4)
+                    fmt.printf("AA samples: %d\n", gs.aa_samples)
+                case SDL.K_F3:
+                    gs.shadow_rays = gs.shadow_rays == 3 ? 1 : 3
+                    fmt.printf("shadow rays (near): %d\n", gs.shadow_rays)
                 case SDL.K_1: gs.reflect_amount = 1
                 case SDL.K_2: gs.reflect_amount = 2
                 case SDL.K_3: gs.reflect_amount = 3
@@ -193,6 +203,7 @@ main :: proc() {
         }
         if new_pc != gs.player_chunk {
             gs.player_chunk = new_pc
+            worker_pool_set_player(&gs.pool, new_pc[0], new_pc[2])
             enqueue_chunks(&gs)
         }
 
