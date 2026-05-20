@@ -38,8 +38,8 @@ gpu_init :: proc(gs: ^Game_State) {
     assert(gs.gpu_device != nil, "Failed to create GPU device")
     fmt.println("GPU driver:", SDL.GetGPUDeviceDriver(gs.gpu_device))
 
-    ok := SDL.ClaimWindowForGPUDevice(gs.gpu_device, gs.window)
-    assert(ok, "Failed to claim window for GPU device")
+    // Note: window is claimed by SDL.CreateGPURenderer in ui_init (which
+    // shares this GPU device). Claiming it here would conflict.
 
     // SPIR-V embedded at compile time — no runtime file dependency
     shader_bytes := #load("shaders/voxel_tracer.spv")
@@ -415,31 +415,9 @@ gpu_render :: proc(gs: ^Game_State) {
     SDL.DispatchGPUCompute(p3, TEX_W / 16, TEX_H / 16, 1)
     SDL.EndGPUComputePass(p3)
 
-    // Acquire swapchain and blit out_texture onto it
-    swapchain_tex: ^SDL.GPUTexture
-    sw_w, sw_h: u32
-    if !SDL.WaitAndAcquireGPUSwapchainTexture(cmd, gs.window, &swapchain_tex, &sw_w, &sw_h) {
-        _ = SDL.CancelGPUCommandBuffer(cmd)
-        return
-    }
-    if swapchain_tex == nil {
-        _ = SDL.CancelGPUCommandBuffer(cmd)
-        return
-    }
-
-    SDL.BlitGPUTexture(cmd, SDL.GPUBlitInfo{
-        source = SDL.GPUBlitRegion{
-            texture = gs.out_texture,
-            w = TEX_W, h = TEX_H,
-        },
-        destination = SDL.GPUBlitRegion{
-            texture = swapchain_tex,
-            w = sw_w, h = sw_h,
-        },
-        load_op = .DONT_CARE,
-        filter  = .NEAREST,
-    })
-
+    // Swapchain presentation is owned by the SDL.Renderer in ui.odin
+    // (see ui_build_and_render). It draws out_texture as a fullscreen quad,
+    // then Clay UI on top, then calls SDL.RenderPresent.
     _ = SDL.SubmitGPUCommandBuffer(cmd)
 }
 

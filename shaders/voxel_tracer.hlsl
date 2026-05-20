@@ -127,7 +127,15 @@ float3 tone_map(float3 x) {
 
 // ---- Voxel-level DDA --------------------------------------------------------
 
-HitInfo trace_ray_chunk_voxels(float3 origin, float3 dir, float3 chunk_pos,
+// world_origin: ray pos in WORLD units, used only for the final hit_pos
+//   output (depth/shading) — its far-from-spawn drift is cosmetically
+//   harmless there and pre-existing.
+// local_entry: ray entry pos in VOXEL units within this chunk, [0,8) per
+//   axis, computed precision-safe in the caller. Drives the index, t_max,
+//   and vkey — the precision-critical path.
+// chunk_ic: EXACT integer chunk coords (outer DDA integers, no float floor).
+HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
+                                float3 dir, int3 chunk_ic,
                                 int chunk_i, float3 entry_normal) {
     float t_delta_x = abs(1.0 / dir.x);
     float t_delta_y = abs(1.0 / dir.y);
@@ -141,15 +149,17 @@ HitInfo trace_ray_chunk_voxels(float3 origin, float3 dir, float3 chunk_pos,
     int dir_y = step_y > 0 ? 1 : 0;
     int dir_z = step_z > 0 ? 1 : 0;
 
-    float3 world_chunk_pos = chunk_pos * BRICK_CHUNK_SIZE;
+    // local_entry is already in [0,8) voxel units within the chunk and was
+    // computed without ever forming a giant world float, so floor() is
+    // exact at any distance from spawn. clamp guards a sub-ulp boundary
+    // landing only (not masking drift — there is none here).
+    int x_i = clamp((int)floor(local_entry.x), 0, BRICK_CHUNK_SIZE - 1);
+    int y_i = clamp((int)floor(local_entry.y), 0, BRICK_CHUNK_SIZE - 1);
+    int z_i = clamp((int)floor(local_entry.z), 0, BRICK_CHUNK_SIZE - 1);
 
-    int x_i = (int)floor(origin.x) - (int)world_chunk_pos.x;
-    int y_i = (int)floor(origin.y) - (int)world_chunk_pos.y;
-    int z_i = (int)floor(origin.z) - (int)world_chunk_pos.z;
-
-    float t_max_x = ((x_i + dir_x) - (origin.x - world_chunk_pos.x)) / dir.x;
-    float t_max_y = ((y_i + dir_y) - (origin.y - world_chunk_pos.y)) / dir.y;
-    float t_max_z = ((z_i + dir_z) - (origin.z - world_chunk_pos.z)) / dir.z;
+    float t_max_x = ((x_i + dir_x) - local_entry.x) / dir.x;
+    float t_max_y = ((y_i + dir_y) - local_entry.y) / dir.y;
+    float t_max_z = ((z_i + dir_z) - local_entry.z) / dir.z;
 
     float t = 0.0;
     int i = 0;
@@ -184,19 +194,19 @@ HitInfo trace_ray_chunk_voxels(float3 origin, float3 dir, float3 chunk_pos,
         if (voxel_solid(chunk_i, lvi2)) hit_block_id = load_voxel(global_chunk_i + lvi2);
     }
 
-    float3 hit_pos = origin + dir * t;
+    float3 hit_pos = world_origin + dir * t;
     HitInfo info;
     info.block_id  = hit_block_id;
     info.iterations = i;
     info.t         = t;
     info.normal    = hit_side;
     info.hit_pos   = hit_pos;
-    // Precision-safe voxel key: integer chunk coord (magnitude = world/8, so
-    // exact ~8x farther than a voxel-scale float) * 8 + exact local coords
-    // (0..7). Never reconstructs a giant voxel-scale float, so the per-voxel
-    // hash stays unique far from spawn instead of collapsing to one color.
-    int3 chunk_i3 = int3(floor(chunk_pos));
-    info.vkey      = chunk_i3 * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i);
+    // vkey = EXACT integer chunk coord (chunk_ic, from the outer DDA's
+    // integer cell — never a float floor) * 8 + the precision-safe local
+    // voxel index. No giant world float is ever reconstructed on this path,
+    // so the per-voxel hash is stable across a face at ANY distance — fixes
+    // the per-chunk colour seam far from spawn.
+    info.vkey      = chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i);
     return info;
 }
 
@@ -256,8 +266,17 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light) {
             }
             if (ci != -1) {
                 float3 entry_pos = chunk_origin * BRICK_CHUNK_SIZE + dir * t * BRICK_CHUNK_SIZE;
-                HitInfo vhit = trace_ray_chunk_voxels(entry_pos, dir,
-                                                      float3(x_i, y_i, z_i),
+                // Precision-safe local entry: subtract the EXACT int chunk
+                // coords from the ray pos IN CHUNK UNITS (small magnitude),
+                // THEN scale to voxel units. Never reconstructs a giant
+                // world float (entry_pos drifts a full voxel+ far from
+                // spawn → wrong vkey → per-chunk colour seam). chunk_ic is
+                // the outer DDA's exact integers — no float floor needed.
+                int3   chunk_ic    = int3(x_i, y_i, z_i);
+                float3 local_entry = ((chunk_origin + dir * t) - float3(chunk_ic))
+                                     * float(BRICK_CHUNK_SIZE);   // [0,8) per axis
+                HitInfo vhit = trace_ray_chunk_voxels(entry_pos, local_entry, dir,
+                                                      chunk_ic,
                                                       ci, chunk_entry_normal);
                 if (vhit.block_id != 0u) {
                     hit_block_id = vhit.block_id;
@@ -294,23 +313,62 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light) {
 
 // ---- Lighting / AO ----------------------------------------------------------
 
-float compute_ao(float3 p, float3 nrm) {
+// Minecraft-style SMOOTH ambient occlusion. The old version point-sampled
+// 4 neighbours and snapped AO to one of 5 discrete levels per face, so the
+// result stepped hard mid-face where a sample crossed a voxel boundary
+// (the "split shade on one face" artifact). Instead: compute an AO value
+// at each of the face's 4 CORNERS from that corner's 3 touching neighbour
+// cells (two edge-adjacent + the diagonal), then BILINEARLY interpolate
+// across the face using the sub-voxel hit position → a continuous gradient,
+// no steps. `p` is just inside the surface; sub-voxel pos uses frac(hit_pos)
+// (the precision-safe convention proven this session).
+//
+// corner_ao(side1, side2, corner): standard MC rule — if both edge sides
+// are solid the corner is fully occluded; else darken by the count.
+float corner_ao(bool s1, bool s2, bool c) {
+    if (s1 && s2) return 0.0;                       // both sides → max occlusion
+    float n = (s1 ? 1.0 : 0.0) + (s2 ? 1.0 : 0.0) + (c ? 1.0 : 0.0);
+    return 1.0 - n / 3.0;                            // 0..1, 1 = unoccluded
+}
+
+float compute_ao(float3 p, float3 nrm, float3 hit_pos) {
     float3 up      = abs(nrm.y) < 0.9 ? float3(0,1,0) : float3(1,0,0);
     float3 tangent = normalize(cross(up, nrm));
     float3 bitang  = cross(nrm, tangent);
 
-    float3 d0 = normalize(nrm + tangent);
-    float3 d1 = normalize(nrm - tangent);
-    float3 d2 = normalize(nrm + bitang);
-    float3 d3 = normalize(nrm - bitang);
+    // Sub-voxel position within the face, in tangent/bitangent axes, [0,1).
+    // frac(hit_pos) is the precision-safe sub-voxel coord (same convention
+    // the grass-band shading uses). Project onto the (axis-aligned) frame.
+    float3 fr = frac(hit_pos);
+    float fu = saturate(dot(fr, abs(tangent)));
+    float fv = saturate(dot(fr, abs(bitang)));
 
-    int hits = 0;
-    if (sample_voxel(p + d0) != 0u) hits++;
-    if (sample_voxel(p + d1) != 0u) hits++;
-    if (sample_voxel(p + d2) != 0u) hits++;
-    if (sample_voxel(p + d3) != 0u) hits++;
-    return 1.0 - (float(hits) / 4.0) * 0.35;
+    // Neighbour occupancy around the hit voxel, on the face plane.
+    // pT/nT = ±tangent edge, pB/nB = ±bitangent edge, c** = diagonals.
+    bool pT = sample_voxel(p + tangent)            != 0u;
+    bool nT = sample_voxel(p - tangent)            != 0u;
+    bool pB = sample_voxel(p + bitang)             != 0u;
+    bool nB = sample_voxel(p - bitang)             != 0u;
+    bool pp = sample_voxel(p + tangent + bitang)   != 0u;
+    bool pn = sample_voxel(p + tangent - bitang)   != 0u;
+    bool np = sample_voxel(p - tangent + bitang)   != 0u;
+    bool nn = sample_voxel(p - tangent - bitang)   != 0u;
+
+    // AO at the 4 face corners (fu,fv ∈ {0,1}) from their 3 touching cells.
+    float a00 = corner_ao(nT, nB, nn);   // (-t,-b)
+    float a10 = corner_ao(pT, nB, pn);   // (+t,-b)
+    float a01 = corner_ao(nT, pB, np);   // (-t,+b)
+    float a11 = corner_ao(pT, pB, pp);   // (+t,+b)
+
+    // Bilinear interpolate across the face → continuous, no mid-face step.
+    float ao = lerp(lerp(a00, a10, fu), lerp(a01, a11, fu), fv);
+
+    // Keep the original ~0.35 max darkening strength/feel.
+    // Max darkening strength (subtle). 0.35 was near-invisible, 0.65 a bit
+    // strong; 0.45 = present but understated soft corner shading.
+    return 1.0 - (1.0 - ao) * 0.45;
 }
+
 
 
 // ---- Main -------------------------------------------------------------------
@@ -417,7 +475,7 @@ float4 trace_pixel(float2 pixel, float2 dims, out float prim_depth) {
                 hit_color.rgb += transmitted * back_light * sun_tint();
             }
 
-            float ao = (i == 0) ? compute_ao(hit_point + surf_normal * epsilon, surf_normal) : 1.0;
+            float ao = (i == 0) ? compute_ao(hit_point + surf_normal * epsilon, surf_normal, hit_point) : 1.0;
             hit_color.xyz *= lighting * ao;
             hit_color = apply_fog(hit_color, hit.t, dir);
             pixel_color = lerp(pixel_color, hit_color, reflection_amount);

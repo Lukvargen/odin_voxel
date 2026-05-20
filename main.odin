@@ -54,6 +54,9 @@ Game_State :: struct {
     right_held:          bool,
     space_last_press_ms: u64,
     jump_pressed:        bool, // single-frame jump signal
+
+    // UI
+    ui: UI_State,
 }
 
 main :: proc() {
@@ -77,7 +80,7 @@ main :: proc() {
     }
     defer SDL.Quit()
 
-    gs.window = SDL.CreateWindow("Voxel Raytracer", TEX_W, TEX_H, {})
+    gs.window = SDL.CreateWindow("Voxel Raytracer", TEX_W, TEX_H, {.RESIZABLE})
     if gs.window == nil {
         fmt.eprintln("CreateWindow failed:", SDL.GetError())
         return
@@ -92,6 +95,10 @@ main :: proc() {
     generate_world(&gs)
     gpu_init(&gs)
     defer gpu_destroy(&gs)
+
+    ui_init(&gs)
+    defer ui_shutdown(&gs)
+    gs_ui_left_pressed_state = &gs.ui
 
     // Lock mouse at start
     _ = SDL.SetWindowRelativeMouseMode(gs.window, true)
@@ -127,6 +134,10 @@ main :: proc() {
                     quit = true
                 case SDL.K_TAB:
                     gs.mouse_locked = !gs.mouse_locked
+                    _ = SDL.SetWindowRelativeMouseMode(gs.window, gs.mouse_locked)
+                case SDL.K_O:
+                    gs.ui.options_open = !gs.ui.options_open
+                    gs.mouse_locked = !gs.ui.options_open
                     _ = SDL.SetWindowRelativeMouseMode(gs.window, gs.mouse_locked)
                 case SDL.K_F1:
                     fmt.printf("Cam pos: %.1f %.1f %.1f | yaw %.1f pitch %.1f | fly=%v\n",
@@ -167,17 +178,26 @@ main :: proc() {
                 if gs.mouse_locked {
                     mouse_dx += event.motion.xrel
                     mouse_dy += event.motion.yrel
+                } else {
+                    gs.ui.mouse_pos = {event.motion.x, event.motion.y}
                 }
 
             case .MOUSE_BUTTON_DOWN:
                 if gs.mouse_locked {
                     if event.button.button == 1 { gs.left_held  = true }
                     if event.button.button == 3 { gs.right_held = true }
+                } else {
+                    gs.ui.mouse_pos = {event.button.x, event.button.y}
+                    if event.button.button == 1 {
+                        gs.ui.mouse_left_down    = true
+                        gs.ui.mouse_left_pressed = true
+                    }
                 }
 
             case .MOUSE_BUTTON_UP:
                 if event.button.button == 1 { gs.left_held  = false }
                 if event.button.button == 3 { gs.right_held = false }
+                if event.button.button == 1 { gs.ui.mouse_left_down = false }
             }
         }
 
@@ -249,6 +269,7 @@ main :: proc() {
 
         flush_gpu_uploads(&gs)
         gpu_render(&gs)
+        ui_build_and_render(&gs, dt)
 
         gs.prof_frames += 1
         if gs.prof_frames >= 300 {
