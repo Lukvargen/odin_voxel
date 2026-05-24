@@ -46,6 +46,9 @@ Game_State :: struct {
     shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
     vol_enabled:    bool,  // volumetric god rays on/off (F4)
     vol_steps:      i32,   // volumetric march steps: 16/24/32 (F5 cycles)
+    render_scale:   i32,   // internal-resolution divisor (1/2/4); pixel-art look
+    render_w:       i32,   // = TEX_W / render_scale  (current scene texture size)
+    render_h:       i32,   // = TEX_H / render_scale
 
     // Input state
     mouse_locked:        bool,
@@ -67,6 +70,9 @@ main :: proc() {
     gs.shadow_rays    = 1   // F3 toggles 1<->3 (1=hard, 3=soft near)
     gs.vol_enabled    = true // F4 toggles volumetric god rays
     gs.vol_steps      = 16   // measured: 16 = 55 FPS (~baseline), 24/32 cost more for little visual gain. F5 cycles 16/24/32
+    gs.render_scale   = RENDER_SCALE // 1 = full-res, 2/4 = pixel-art (options screen)
+    gs.render_w       = TEX_W / gs.render_scale
+    gs.render_h       = TEX_H / gs.render_scale
     gs.light_dir      = {0.6, 0.8, 0.4}
     gs.camera.pos     = {0, 80, 0}
     gs.camera.yaw     = 0

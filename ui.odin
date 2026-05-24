@@ -82,19 +82,9 @@ ui_init :: proc(gs: ^Game_State) {
     ui_load_font(ui, FONT_ID_TITLE, 22, "resources/Roboto.ttf")
 
     // Wrap the compute-output GPU texture as an SDL.Texture so the Renderer
-    // can sample it as a fullscreen quad each frame.
-    props := SDL.CreateProperties()
-    SDL.SetPointerProperty(props, SDL.PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, gs.out_texture)
-    SDL.SetNumberProperty(props, SDL.PROP_TEXTURE_CREATE_ACCESS_NUMBER, i64(SDL.TextureAccess.STATIC))
-    SDL.SetNumberProperty(props, SDL.PROP_TEXTURE_CREATE_WIDTH_NUMBER,  TEX_W)
-    SDL.SetNumberProperty(props, SDL.PROP_TEXTURE_CREATE_HEIGHT_NUMBER, TEX_H)
-    ui.out_tex = SDL.CreateTextureWithProperties(ui.renderer_data.renderer, props)
-    SDL.DestroyProperties(props)
-    if ui.out_tex == nil {
-        fmt.eprintln("CreateTextureWithProperties(gpu_texture) failed:", SDL.GetError())
-    } else {
-        SDL.SetTextureScaleMode(ui.out_tex, .LINEAR)
-    }
+    // can sample it as a fullscreen quad each frame. Lives in its own proc so
+    // gpu_set_render_scale can rebuild it when the render resolution changes.
+    ui_rewrap_out_texture(gs)
 
     clay.SetMaxElementCount(8192)
     sz: c.size_t = c.size_t(clay.MinMemorySize())
@@ -107,6 +97,30 @@ ui_init :: proc(gs: ^Game_State) {
     clay.SetMeasureTextFunction(ui_measure_text, &ui.renderer_data.fonts)
 
     ui.initialized = true
+}
+
+// (Re)wrap the GPU out_texture as an SDL.Texture sized to the current render
+// resolution, with nearest-neighbor upscale (crisp pixel-art look — switch to
+// .LINEAR for a smoothed upscale). Destroys any previous wrap first, so this is
+// safe to call after gpu_set_render_scale recreates out_texture.
+ui_rewrap_out_texture :: proc(gs: ^Game_State) {
+    ui := &gs.ui
+    if ui.out_tex != nil {
+        SDL.DestroyTexture(ui.out_tex)
+        ui.out_tex = nil
+    }
+    props := SDL.CreateProperties()
+    SDL.SetPointerProperty(props, SDL.PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, gs.out_texture)
+    SDL.SetNumberProperty(props, SDL.PROP_TEXTURE_CREATE_ACCESS_NUMBER, i64(SDL.TextureAccess.STATIC))
+    SDL.SetNumberProperty(props, SDL.PROP_TEXTURE_CREATE_WIDTH_NUMBER,  i64(gs.render_w))
+    SDL.SetNumberProperty(props, SDL.PROP_TEXTURE_CREATE_HEIGHT_NUMBER, i64(gs.render_h))
+    ui.out_tex = SDL.CreateTextureWithProperties(ui.renderer_data.renderer, props)
+    SDL.DestroyProperties(props)
+    if ui.out_tex == nil {
+        fmt.eprintln("CreateTextureWithProperties(gpu_texture) failed:", SDL.GetError())
+    } else {
+        SDL.SetTextureScaleMode(ui.out_tex, .NEAREST)
+    }
 }
 
 ui_shutdown :: proc(gs: ^Game_State) {
@@ -303,6 +317,19 @@ options_panel_layout :: proc(gs: ^Game_State) {
             if opt_button("Vs16", "16", gs.vol_steps == 16) { gs.vol_steps = 16 }
             if opt_button("Vs24", "24", gs.vol_steps == 24) { gs.vol_steps = 24 }
             if opt_button("Vs32", "32", gs.vol_steps == 32) { gs.vol_steps = 32 }
+        }
+
+        // Render scale row — internal resolution / pixel-art look. Changing
+        // it recreates the scene textures (gpu_set_render_scale).
+        if clay.UI(clay.ID("RowScale"))({
+            layout = { childGap = 8, childAlignment = {y = .Center},
+                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
+        }) {
+            opt_row(fmt.tprintf("Render scale: %dx (%dx%d)", gs.render_scale, gs.render_w, gs.render_h))
+            if clay.UI(clay.ID("RsSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
+            if opt_button("Rs1", "1x", gs.render_scale == 1) { gpu_set_render_scale(gs, 1) }
+            if opt_button("Rs2", "2x", gs.render_scale == 2) { gpu_set_render_scale(gs, 2) }
+            if opt_button("Rs4", "4x", gs.render_scale == 4) { gpu_set_render_scale(gs, 4) }
         }
 
         clay.TextDynamic("press O to close", clay.TextConfig({

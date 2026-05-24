@@ -9,6 +9,14 @@ import SDL "vendor:sdl3"
 TEX_W :: 800
 TEX_H :: 800
 
+// Default internal render scale (divisor of the window resolution). The scene
+// is ray traced into a (TEX_W/scale)×(TEX_H/scale) texture and upscaled to the
+// window. scale > 1 trades resolution for a large primary-ray-cost saving (and
+// a deliberate pixel-art look with nearest-neighbor display). The live value is
+// gs.render_scale, changeable at runtime via gpu_set_render_scale (1/2/4 only,
+// so render_w stays a multiple of the 16-wide threadgroup).
+RENDER_SCALE :: 2
+
 // Matches cbuffer CameraUniforms in voxel_tracer.hlsl.
 // Each float3 is padded to float4 (cbuffer std140 rules).
 Camera_Uniform :: struct #packed {
@@ -30,6 +38,73 @@ Camera_Uniform :: struct #packed {
     _padq0:           f32,
     _padq1:           f32,
     _padq2:           f32,
+}
+
+// (Re)create the scene color, depth, and half-res volumetric textures at the
+// current internal render resolution (gs.render_w/h). The caller owns the
+// lifetime of any previous textures (release them first, or use
+// gpu_set_render_scale which does). Buffers and pipelines are untouched.
+gpu_create_scene_textures :: proc(gs: ^Game_State) {
+    // Output storage texture (compute writes here each frame). Allocated at the
+    // internal render resolution; the SDL renderer upscales it to the window.
+    gs.out_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
+        type                 = .D2,
+        format               = .R32G32B32A32_FLOAT,
+        usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
+        width                = u32(gs.render_w),
+        height               = u32(gs.render_h),
+        layer_count_or_depth = 1,
+        num_levels           = 1,
+    })
+    assert(gs.out_texture != nil, "Failed to create output texture")
+
+    // Per-pixel primary-hit distance (R32F). Consumed by the volumetric
+    // composite for depth-aware upscale and march-length clamping.
+    gs.depth_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
+        type                 = .D2,
+        format               = .R32_FLOAT,
+        usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
+        width                = u32(gs.render_w),
+        height               = u32(gs.render_h),
+        layer_count_or_depth = 1,
+        num_levels           = 1,
+    })
+    assert(gs.depth_texture != nil, "Failed to create depth texture")
+
+    // Half-res volumetric inscatter. Written by the volumetric pass
+    // (storage write), read by composite (RO storage texture / .SAMPLER).
+    gs.vol_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
+        type                 = .D2,
+        format               = .R32G32B32A32_FLOAT,
+        usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
+        width                = u32(gs.render_w / 2),
+        height               = u32(gs.render_h / 2),
+        layer_count_or_depth = 1,
+        num_levels           = 1,
+    })
+    assert(gs.vol_texture != nil, "Failed to create volumetric texture")
+}
+
+// Switch the internal render resolution at runtime. `scale` must be 1/2/4 so
+// render_w stays a multiple of the 16-wide threadgroup. Waits for the GPU to
+// idle, releases the old scene textures + the wrapped SDL texture, recreates
+// them at the new size, and rebuilds the UI texture wrap. No-op if unchanged.
+gpu_set_render_scale :: proc(gs: ^Game_State, scale: i32) {
+    if scale == gs.render_scale { return }
+    if scale != 1 && scale != 2 && scale != 4 { return }
+
+    _ = SDL.WaitForGPUIdle(gs.gpu_device)
+
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.vol_texture)
+
+    gs.render_scale = scale
+    gs.render_w     = TEX_W / scale
+    gs.render_h     = TEX_H / scale
+
+    gpu_create_scene_textures(gs)
+    ui_rewrap_out_texture(gs) // re-point the SDL texture at the new out_texture
 }
 
 gpu_init :: proc(gs: ^Game_State) {
@@ -89,43 +164,9 @@ gpu_init :: proc(gs: ^Game_State) {
     })
     assert(gs.comp_pipeline != nil, "Failed to create composite pipeline")
 
-    // Output storage texture (compute writes here each frame)
-    gs.out_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
-        type                 = .D2,
-        format               = .R32G32B32A32_FLOAT,
-        usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
-        width                = TEX_W,
-        height               = TEX_H,
-        layer_count_or_depth = 1,
-        num_levels           = 1,
-    })
-    assert(gs.out_texture != nil, "Failed to create output texture")
-
-    // Per-pixel primary-hit distance (R32F). Consumed by the volumetric
-    // composite for depth-aware upscale and march-length clamping.
-    gs.depth_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
-        type                 = .D2,
-        format               = .R32_FLOAT,
-        usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
-        width                = TEX_W,
-        height               = TEX_H,
-        layer_count_or_depth = 1,
-        num_levels           = 1,
-    })
-    assert(gs.depth_texture != nil, "Failed to create depth texture")
-
-    // Half-res volumetric inscatter. Written by the volumetric pass
-    // (storage write), read by composite (RO storage texture / .SAMPLER).
-    gs.vol_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
-        type                 = .D2,
-        format               = .R32G32B32A32_FLOAT,
-        usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
-        width                = TEX_W / 2,
-        height               = TEX_H / 2,
-        layer_count_or_depth = 1,
-        num_levels           = 1,
-    })
-    assert(gs.vol_texture != nil, "Failed to create volumetric texture")
+    // Scene color/depth/volumetric textures, sized to the current internal
+    // render resolution (gs.render_w/h). Recreated on render-scale change.
+    gpu_create_scene_textures(gs)
 
     // GPU buffers for voxel data (read-only in compute).
     // gpu_voxels is 1 byte/voxel; the shader reads it as StructuredBuffer<uint>
@@ -388,10 +429,17 @@ gpu_render :: proc(gs: ^Game_State) {
         { texture = gs.out_texture,   cycle = true },
         { texture = gs.depth_texture, cycle = true },
     }
+    // Threadgroup counts at the current render resolution (ceil-divide by the
+    // 16×16 group; shaders guard out-of-range threads so over-dispatch is safe).
+    groups_x  := u32((gs.render_w + 15) / 16)
+    groups_y  := u32((gs.render_h + 15) / 16)
+    hgroups_x := u32((gs.render_w/2 + 15) / 16)
+    hgroups_y := u32((gs.render_h/2 + 15) / 16)
+
     p1 := SDL.BeginGPUComputePass(cmd, raw_data(rw_main[:]), 2, nil, 0)
     SDL.BindGPUComputePipeline(p1, gs.pipeline)
     SDL.BindGPUComputeStorageBuffers(p1, 0, raw_data(ro_bufs[:]), 4)
-    SDL.DispatchGPUCompute(p1, TEX_W / 16, TEX_H / 16, 1)
+    SDL.DispatchGPUCompute(p1, groups_x, groups_y, 1)
     SDL.EndGPUComputePass(p1)
 
     // --- Pass 2: half-res volumetric march → vol_texture ---
@@ -402,7 +450,7 @@ gpu_render :: proc(gs: ^Game_State) {
     vol_ro_tex := [1]^SDL.GPUTexture{ gs.depth_texture }
     SDL.BindGPUComputeStorageTextures(p2, 0, raw_data(vol_ro_tex[:]), 1)
     SDL.BindGPUComputeStorageBuffers(p2, 0, raw_data(ro_bufs[:]), 4)
-    SDL.DispatchGPUCompute(p2, (TEX_W/2 + 15) / 16, (TEX_H/2 + 15) / 16, 1)
+    SDL.DispatchGPUCompute(p2, hgroups_x, hgroups_y, 1)
     SDL.EndGPUComputePass(p2)
 
     // --- Pass 3: composite (bilateral upscale + add) → out_texture ---
@@ -412,7 +460,7 @@ gpu_render :: proc(gs: ^Game_State) {
     SDL.BindGPUComputePipeline(p3, gs.comp_pipeline)
     comp_ro_tex := [2]^SDL.GPUTexture{ gs.vol_texture, gs.depth_texture }
     SDL.BindGPUComputeStorageTextures(p3, 0, raw_data(comp_ro_tex[:]), 2)
-    SDL.DispatchGPUCompute(p3, TEX_W / 16, TEX_H / 16, 1)
+    SDL.DispatchGPUCompute(p3, groups_x, groups_y, 1)
     SDL.EndGPUComputePass(p3)
 
     // Swapchain presentation is owned by the SDL.Renderer in ui.odin
@@ -425,6 +473,7 @@ gpu_destroy :: proc(gs: ^Game_State) {
     _ = SDL.WaitForGPUIdle(gs.gpu_device)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.vol_texture)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.voxel_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.index_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.owner_buf)
