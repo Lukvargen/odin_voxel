@@ -25,8 +25,8 @@ cbuffer CameraUniforms : register(b0, space2) {
     int    u_player_chunk_z;
     int    u_quality;
     int    u_vol;
-    float  _padq0;
-    float  _padq1;
+    int    u_gi_frame_index;
+    int    u_gi_enabled;
     float  _padq2;
 };
 

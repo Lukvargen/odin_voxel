@@ -35,8 +35,8 @@ Camera_Uniform :: struct #packed {
     player_chunk_z:   i32,
     quality:          i32,   // packed: AA*10 + shadow_rays
     vol:              i32,   // packed: enabled*100 + steps (0/16/24/32)
-    _padq0:           f32,
-    _padq1:           f32,
+    gi_frame_index:   i32,
+    gi_enabled:       i32,
     _padq2:           f32,
 }
 
@@ -83,6 +83,20 @@ gpu_create_scene_textures :: proc(gs: ^Game_State) {
         num_levels           = 1,
     })
     assert(gs.vol_texture != nil, "Failed to create volumetric texture")
+
+    // Ping-pong irradiance history for GI accumulation (RGB irradiance + A sample count).
+    for i in 0..<2 {
+        gs.gi_texture[i] = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
+            type                 = .D2,
+            format               = .R16G16B16A16_FLOAT,
+            usage                = {.COMPUTE_STORAGE_WRITE, .COMPUTE_STORAGE_READ},
+            width                = u32(gs.render_w),
+            height               = u32(gs.render_h),
+            layer_count_or_depth = 1,
+            num_levels           = 1,
+        })
+        assert(gs.gi_texture[i] != nil, "Failed to create GI texture")
+    }
 }
 
 // Switch the internal render resolution at runtime. `scale` must be 1/2/4 so
@@ -98,6 +112,10 @@ gpu_set_render_scale :: proc(gs: ^Game_State, scale: i32) {
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.vol_texture)
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi_texture[0])
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi_texture[1])
+    gs.gi_ping        = 0
+    gs.gi_frame_index = 0
 
     gs.render_scale = scale
     gs.render_w     = TEX_W / scale
@@ -120,16 +138,17 @@ gpu_init :: proc(gs: ^Game_State) {
     shader_bytes := #load("shaders/voxel_tracer.spv")
 
     pipeline_info := SDL.GPUComputePipelineCreateInfo{
-        code                         = raw_data(shader_bytes),
-        code_size                    = len(shader_bytes),
-        entrypoint                   = "main",
-        format                       = {.SPIRV},
-        num_readonly_storage_buffers = 4, // voxel_chunk (t0), chunk_index (t1), chunk_owner (t2), voxel_mask (t3)
-        num_readwrite_storage_textures = 2, // img_output (u0), depth_output (u1)
-        num_uniform_buffers          = 1, // CameraUniforms (b0)
-        threadcount_x                = 16,
-        threadcount_y                = 16,
-        threadcount_z                = 1,
+        code                           = raw_data(shader_bytes),
+        code_size                      = len(shader_bytes),
+        entrypoint                     = "main",
+        format                         = {.SPIRV},
+        num_readonly_storage_textures  = 1, // gi_history_read (t0)
+        num_readonly_storage_buffers   = 4, // voxel_chunk (t1), chunk_index (t2), chunk_owner (t3), voxel_mask (t4)
+        num_readwrite_storage_textures = 3, // img_output (u0), depth_output (u1), gi_history_write (u2)
+        num_uniform_buffers            = 1, // CameraUniforms (b0)
+        threadcount_x                  = 16,
+        threadcount_y                  = 16,
+        threadcount_z                  = 1,
     }
     gs.pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, pipeline_info)
     assert(gs.pipeline != nil, "Failed to create compute pipeline")
@@ -419,16 +438,13 @@ gpu_render :: proc(gs: ^Game_State) {
         player_chunk_z  = i32(gs.player_chunk[2]),
         quality         = gs.aa_samples * 10 + gs.shadow_rays,
         vol             = (gs.vol_enabled ? 100 : 0) + gs.vol_steps,
+        gi_frame_index  = gs.gi_frame_index,
+        gi_enabled      = gs.gi_enabled ? 1 : 0,
     }
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
     ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}
 
-    // --- Pass 1: main raytrace → out_texture (+ depth_texture) ---
-    rw_main := [2]SDL.GPUStorageTextureReadWriteBinding{
-        { texture = gs.out_texture,   cycle = true },
-        { texture = gs.depth_texture, cycle = true },
-    }
     // Threadgroup counts at the current render resolution (ceil-divide by the
     // 16×16 group; shaders guard out-of-range threads so over-dispatch is safe).
     groups_x  := u32((gs.render_w + 15) / 16)
@@ -436,11 +452,23 @@ gpu_render :: proc(gs: ^Game_State) {
     hgroups_x := u32((gs.render_w/2 + 15) / 16)
     hgroups_y := u32((gs.render_h/2 + 15) / 16)
 
-    p1 := SDL.BeginGPUComputePass(cmd, raw_data(rw_main[:]), 2, nil, 0)
+    // --- Pass 1: main raytrace → out_texture (+ depth_texture + gi_history_write) ---
+    gi_read  := gs.gi_ping
+    gi_write := 1 - gs.gi_ping
+    rw_main := [3]SDL.GPUStorageTextureReadWriteBinding{
+        { texture = gs.out_texture,           cycle = true },
+        { texture = gs.depth_texture,         cycle = true },
+        { texture = gs.gi_texture[gi_write],  cycle = true },
+    }
+    gi_ro_tex := [1]^SDL.GPUTexture{ gs.gi_texture[gi_read] }
+
+    p1 := SDL.BeginGPUComputePass(cmd, raw_data(rw_main[:]), 3, nil, 0)
     SDL.BindGPUComputePipeline(p1, gs.pipeline)
+    SDL.BindGPUComputeStorageTextures(p1, 0, raw_data(gi_ro_tex[:]), 1)
     SDL.BindGPUComputeStorageBuffers(p1, 0, raw_data(ro_bufs[:]), 4)
     SDL.DispatchGPUCompute(p1, groups_x, groups_y, 1)
     SDL.EndGPUComputePass(p1)
+    gs.gi_ping = gi_write
 
     // --- Pass 2: half-res volumetric march → vol_texture ---
     // Reads depth (RO storage tex, t0) + voxel buffers (t1..t4).
@@ -474,6 +502,8 @@ gpu_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.vol_texture)
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi_texture[0])
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi_texture[1])
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.voxel_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.index_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.owner_buf)

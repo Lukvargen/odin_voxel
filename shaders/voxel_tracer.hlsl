@@ -3,16 +3,18 @@
 
 // ---- Bindings ---------------------------------------------------------------
 // SPIR-V/SDL3 space0 order: (sampled tex) → RO storage tex → RO storage buf.
-// This pass has NO RO storage textures, so the 4 voxel buffers are t0..t3.
-// RW textures (set 1): img_output (u0), depth_output (u1). Shared
-// constants/functions come from voxel_common.hlsl AFTER these decls.
-StructuredBuffer<uint>     voxel_chunk : register(t0, space0);
-StructuredBuffer<int>      chunk_index : register(t1, space0);
-StructuredBuffer<int2>     chunk_owner : register(t2, space0);
-StructuredBuffer<uint>     voxel_mask  : register(t3, space0);
+// RO storage tex (t0): gi_history_read. RO storage bufs (t1..t4): voxel data.
+// RW textures (set 1): img_output (u0), depth_output (u1), gi_history_write (u2).
+// Shared constants/functions come from voxel_common.hlsl AFTER these decls.
+Texture2D<float4>          gi_history_read  : register(t0, space0);
+StructuredBuffer<uint>     voxel_chunk      : register(t1, space0);
+StructuredBuffer<int>      chunk_index      : register(t2, space0);
+StructuredBuffer<int2>     chunk_owner      : register(t3, space0);
+StructuredBuffer<uint>     voxel_mask       : register(t4, space0);
 
-RWTexture2D<float4>        img_output   : register(u0, space1);
-RWTexture2D<float>         depth_output : register(u1, space1); // primary-hit dist, 1e30 = sky
+RWTexture2D<float4>        img_output        : register(u0, space1);
+RWTexture2D<float>         depth_output      : register(u1, space1); // primary-hit dist, 1e30 = sky
+RWTexture2D<float4>        gi_history_write  : register(u2, space1);
 
 cbuffer CameraUniforms : register(b0, space2) {
     float3 u_cam_pos;
@@ -30,8 +32,8 @@ cbuffer CameraUniforms : register(b0, space2) {
     int    u_player_chunk_z;
     int    u_quality;
     int    u_vol;
-    float  _padq0;
-    float  _padq1;
+    int    u_gi_frame_index;
+    int    u_gi_enabled;
     float  _padq2;
 };
 
@@ -212,7 +214,7 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
 
 // ---- Chunk-level DDA --------------------------------------------------------
 
-HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light) {
+HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters = RAY_ITERATIONS) {
     float t_delta_x = abs(1.0 / dir.x);
     float t_delta_y = abs(1.0 / dir.y);
     float t_delta_z = abs(1.0 / dir.z);
@@ -245,7 +247,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light) {
 
     int ring_w = CHUNK_COUNT_WIDTH;
 
-    while (i < RAY_ITERATIONS) {
+    while (i < max_iters) {
         i++;
         if (t > RAY_MAX_LENGTH / float(BRICK_CHUNK_SIZE)) break;
 
@@ -371,6 +373,64 @@ float compute_ao(float3 p, float3 nrm, float3 hit_pos) {
 
 
 
+// ---- GI ---------------------------------------------------------------------
+
+float3 voxel_albedo(uint block_id, int3 vkey) {
+    float3 jitter = hash33i(vkey) * 2.0 - 1.0;
+    if      (block_id == BLOCK_GRASS)  return clamp(float3(0.13,0.55,0.08) + jitter*float3(0.04,0.08,0.03), 0.0, 1.0);
+    else if (block_id == BLOCK_LOG)    return clamp(float3(0.38,0.22,0.09) + jitter*float3(0.06,0.05,0.03), 0.0, 1.0);
+    else if (block_id == BLOCK_LEAVES) return clamp(float3(0.12,0.45,0.07) + jitter*float3(0.05,0.12,0.04), 0.0, 1.0);
+    else                               return clamp(float3(0.55,0.55,0.55) + jitter*float3(0.07,0.06,0.06), 0.0, 1.0);
+}
+
+// Single GI ray: returns incoming radiance from gi_dir.
+// If sky: return sky color. If surface: return that surface's lit color (shadow-tested).
+float3 trace_gi_ray(float3 origin, float3 gi_dir) {
+    HitInfo hit1 = trace_ray_chunk(origin, gi_dir, false, 32);
+    if (hit1.block_id == 0u) return sky_color(gi_dir).rgb;
+
+    float3 N1      = hit1.normal;
+    float3 albedo1 = voxel_albedo(hit1.block_id, hit1.vkey);
+
+    // Direct sun at bounce surface — use a proper shadow ray from the air voxel center.
+    // This correctly returns 0 for occluded bounce surfaces (caves stay dark).
+    float3 shad_origin = float3(hit1.vkey) + float3(0.5, 0.5, 0.5) + N1;
+    float  ndl1        = max(0.0, dot(N1, light_dir_normalized));
+    float  shad1       = trace_shadow_transmittance(shad_origin, light_dir_normalized);
+    float3 radiance    = albedo1 * ndl1 * shad1 * 2.5;
+
+    // Sky ambient at bounce: check if the bounce point can see sky straight up.
+    // Using +Y avoids side-face normals immediately hitting adjacent geometry.
+    float3 sky_up = float3(0, 1, 0);
+    HitInfo hit2 = trace_ray_chunk(shad_origin, sky_up, false, 64);
+    if (hit2.block_id == 0u)
+        radiance += sky_color(sky_up).rgb * albedo1 * 0.5;
+
+    return radiance;
+}
+
+// Fire GI_DIRS_USED fixed Fibonacci directions, return average cosine-weighted irradiance.
+// origin: center of the first air voxel above surface = float3(hit_vkey) + 0.5 + normal.
+// The checkerboard fix: all 8 directions are purely a function of the surface normal (N),
+// not the voxel position — so adjacent voxels with the same normal get identical GI.
+#define GI_DIRS_USED 8
+float3 compute_gi(float3 origin, float3 N) {
+    // TBN built from N only — same result for every voxel with the same face normal.
+    // Because voxels only have 6 axis-aligned normals, TBN is identical per face direction.
+    float3 T, B;
+    build_tbn(N, T, B);
+    float3 irr    = float3(0,0,0);
+    float  weight = 0.0;
+    for (int i = 0; i < GI_DIRS_USED; i++) {
+        float3 local_dir = fibonacci_hemisphere(uint(i), GI_DIRS_USED);
+        float3 world_dir = local_dir.x * T + local_dir.y * N + local_dir.z * B;
+        float  cos_w     = local_dir.y; // cos(theta) in tangent space
+        irr    += trace_gi_ray(origin, world_dir) * cos_w;
+        weight += cos_w;
+    }
+    return irr / max(weight, 0.001);
+}
+
 // ---- Main -------------------------------------------------------------------
 
 #define AA_SAMPLES 4
@@ -383,7 +443,7 @@ static const float2 aa_offsets[4] = {
     float2(-0.125,  0.375),
 };
 
-float4 trace_pixel(float2 pixel, float2 dims, out float prim_depth) {
+float4 trace_pixel(float2 pixel, float2 dims, out float prim_depth, float3 gi_irr) {
     float3 origin = u_cam_pos;
     float nx = (pixel.x * 2.0 - dims.x) / dims.x;
     float ny = -(pixel.y * 2.0 - dims.y) / dims.y;
@@ -454,17 +514,33 @@ float4 trace_pixel(float2 pixel, float2 dims, out float prim_depth) {
                 float3 bitangent = cross(l, tangent);
                 float t0 = trace_shadow_transmittance(shadow_origin, normalize(l));
                 float shadow_factor;
-                // 3-ray soft shadow only when enabled (u_quality%10==3) AND
-                // near (fog hides far penumbra anyway). Else 1 hard ray.
-                if ((u_quality % 10) == 3 && hit.t < 150.0) {
-                    float t1 = trace_shadow_transmittance(shadow_origin, normalize(l + (0.707 * tangent)   * 1.5));
-                    float t2 = trace_shadow_transmittance(shadow_origin, normalize(l + (0.707 * bitangent) * 1.5));
-                    shadow_factor = (t0 + t1 + t2) / 3.0;
+                // Soft shadow: 5-tap Poisson disc within a small sun cone (~3 deg radius).
+                // spread = tan(3 deg) ~= 0.052. Only fires near penumbra edges (t0 in (0,1)).
+                if ((u_quality % 10) == 3 && hit.t < 150.0 && t0 > 0.01 && t0 < 0.99) {
+                    static const float2 disk[4] = {
+                        float2( 0.0,    1.0),
+                        float2( 0.866, -0.5),
+                        float2(-0.866, -0.5),
+                        float2( 0.0,   -0.3),
+                    };
+                    float spread = 0.052; // tan(3 deg)
+                    float acc = t0;
+                    for (int k = 0; k < 4; k++) {
+                        float3 jitter = (disk[k].x * tangent + disk[k].y * bitangent) * spread;
+                        acc += trace_shadow_transmittance(shadow_origin, normalize(l + jitter));
+                    }
+                    shadow_factor = acc / 5.0;
                 } else {
                     shadow_factor = t0;
                 }
                 float n_dot_l = dot(surf_normal, l);
-                lighting = 0.35 + (n_dot_l > 0.0 ? n_dot_l * shadow_factor : 0.0);
+                // GI on:  use computed irradiance as ambient (caves dark, sky-lit surfaces bright)
+                // GI off: no ambient (pure direct only) so you can see exactly what GI adds
+                float ambient = (i == 0 && u_gi_enabled != 0)
+                    ? dot(gi_irr, float3(0.299, 0.587, 0.114))
+                    : 0.0;
+                float sun_direct = n_dot_l > 0.0 ? n_dot_l * shadow_factor * 2.5 : 0.0;
+                lighting = ambient + sun_direct;
             }
 
             // Leaf backlit glow: when sun is behind leaves, tint toward warm yellow-green
@@ -500,18 +576,40 @@ void main(uint3 id : SV_DispatchThreadID) {
     uint w, h;
     img_output.GetDimensions(w, h);
     float2 dims = float2(w, h);
-    float2 pixel = float2(id.xy);
+    int2   ipix = int2(id.xy);
+    if (id.x >= w || id.y >= h) return;
 
-    // u_quality packs quality settings: AA = u_quality/10 (1..4),
-    // shadow ray count handled in trace_pixel via u_quality%10.
+    // 1. Compute GI: fire all GI_DIRS_USED fixed Fibonacci directions this frame.
+    // Deterministic per surface normal — no history, no noise, perfectly stable.
+    float3 gi_irr = float3(0.35, 0.35, 0.35);
+    if (u_gi_enabled != 0) {
+        float2 pf  = float2(ipix);
+        float  nx  = (pf.x * 2.0 - dims.x) / dims.x;
+        float  ny  = -(pf.y * 2.0 - dims.y) / dims.y;
+        float3 dir = normalize(u_cam_fwd + nx * u_cam_right + ny * u_cam_up);
+        HitInfo primary = trace_ray_chunk(u_cam_pos, dir, false);
+        if (primary.block_id != 0u) {
+            // Push 1 full voxel along the normal from the exact hit point.
+            // Using hit_pos (continuous) keeps the origin smooth across voxel boundaries,
+            // preventing per-voxel checkerboard discontinuities.
+            float3 gi_origin = primary.hit_pos + primary.normal * 1.0;
+            gi_irr = compute_gi(gi_origin, primary.normal);
+        }
+    }
+
+    // 2. AA loop — u_quality packs: AA = u_quality/10, shadow mode = u_quality%10
     int aa = clamp(u_quality / 10, 1, AA_SAMPLES);
     float4 color = float4(0, 0, 0, 0);
     float prim_depth = 1e30;
     for (int s = 0; s < aa; s++) {
         float d;
-        color += trace_pixel(pixel + aa_offsets[s], dims, d);
-        if (s == 0) prim_depth = d; // sample-0 depth (avoid AA-edge blending)
+        color += trace_pixel(float2(ipix) + aa_offsets[s], dims, d, gi_irr);
+        if (s == 0) prim_depth = d;
     }
-    img_output[int2(id.xy)]   = color / float(aa);
-    depth_output[int2(id.xy)] = prim_depth;
+    color /= float(aa);
+
+    // History textures are still bound (pipeline requires them) but unused in this mode.
+    img_output[ipix]        = color;
+    depth_output[ipix]      = prim_depth;
+    gi_history_write[ipix]  = float4(0,0,0,0);
 }

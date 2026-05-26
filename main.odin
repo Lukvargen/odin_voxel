@@ -4,6 +4,7 @@ import "core:fmt"
 import SDL "vendor:sdl3"
 
 DOUBLE_TAP_MS :: u64(300)
+GI_DIRS       :: i32(128) // must match #define GI_DIRS in voxel_common.hlsl
 
 Game_State :: struct {
     // SDL3
@@ -34,6 +35,8 @@ Game_State :: struct {
     out_texture:   ^SDL.GPUTexture,
     depth_texture: ^SDL.GPUTexture,
     vol_texture:   ^SDL.GPUTexture,   // half-res volumetric inscatter
+    gi_texture:    [2]^SDL.GPUTexture, // ping-pong GI irradiance history
+    gi_ping:       int,                // index of current READ buffer
     voxel_buf:   ^SDL.GPUBuffer,
     index_buf:   ^SDL.GPUBuffer,
     owner_buf:   ^SDL.GPUBuffer,
@@ -46,6 +49,8 @@ Game_State :: struct {
     shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
     vol_enabled:    bool,  // volumetric god rays on/off (F4)
     vol_steps:      i32,   // volumetric march steps: 16/24/32 (F5 cycles)
+    gi_enabled:     bool,  // global illumination on/off (F6)
+    gi_frame_index: i32,   // current Fibonacci direction index (0..GI_DIRS-1)
     render_scale:   i32,   // internal-resolution divisor (1/2/4); pixel-art look
     render_w:       i32,   // = TEX_W / render_scale  (current scene texture size)
     render_h:       i32,   // = TEX_H / render_scale
@@ -70,6 +75,9 @@ main :: proc() {
     gs.shadow_rays    = 1   // F3 toggles 1<->3 (1=hard, 3=soft near)
     gs.vol_enabled    = true // F4 toggles volumetric god rays
     gs.vol_steps      = 16   // measured: 16 = 55 FPS (~baseline), 24/32 cost more for little visual gain. F5 cycles 16/24/32
+    gs.gi_enabled     = true // F6 toggles GI; converges over GI_DIRS frames
+    gs.gi_frame_index = 0
+    gs.gi_ping        = 0
     gs.render_scale   = RENDER_SCALE // 1 = full-res, 2/4 = pixel-art (options screen)
     gs.render_w       = TEX_W / gs.render_scale
     gs.render_h       = TEX_H / gs.render_scale
@@ -161,6 +169,11 @@ main :: proc() {
                 case SDL.K_F5:
                     gs.vol_steps = gs.vol_steps == 16 ? 24 : (gs.vol_steps == 24 ? 32 : 16)
                     fmt.printf("volumetric steps: %d\n", gs.vol_steps)
+                case SDL.K_F6:
+                    gs.gi_enabled = !gs.gi_enabled
+                    gs.gi_frame_index = 0 // restart accumulation on toggle
+                    gs.gi_ping        = 0
+                    fmt.printf("GI: %v\n", gs.gi_enabled)
                 case SDL.K_1: gs.reflect_amount = 1
                 case SDL.K_2: gs.reflect_amount = 2
                 case SDL.K_3: gs.reflect_amount = 3
@@ -276,6 +289,10 @@ main :: proc() {
         flush_gpu_uploads(&gs)
         gpu_render(&gs)
         ui_build_and_render(&gs, dt)
+
+        if gs.gi_enabled {
+            gs.gi_frame_index = (gs.gi_frame_index + 1) % GI_DIRS
+        }
 
         gs.prof_frames += 1
         if gs.prof_frames >= 300 {

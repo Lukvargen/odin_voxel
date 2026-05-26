@@ -24,6 +24,24 @@
 
 #define LEAF_TRANSMIT 0.35
 
+#define GI_DIRS 128
+#define PI      3.14159265359
+
+// i-th cosine-weighted hemisphere direction around +Y (Fibonacci spiral).
+// Transform to world space via TBN: dir.x*T + dir.y*N + dir.z*B
+float3 fibonacci_hemisphere(uint i, uint N) {
+    float phi       = 2.0 * PI * frac(float(i) * 0.6180339887);
+    float cos_theta = 1.0 - (float(i) + 0.5) / float(N);
+    float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
+    return float3(cos(phi) * sin_theta, cos_theta, sin(phi) * sin_theta);
+}
+
+void build_tbn(float3 N, out float3 T, out float3 B) {
+    float3 up = abs(N.y) < 0.9 ? float3(0,1,0) : float3(1,0,0);
+    T = normalize(cross(up, N));
+    B = cross(N, T);
+}
+
 // Required globals each including shader MUST declare before the include:
 //   StructuredBuffer<uint> voxel_chunk;   StructuredBuffer<int>  chunk_index;
 //   StructuredBuffer<int2> chunk_owner;   StructuredBuffer<uint> voxel_mask;
