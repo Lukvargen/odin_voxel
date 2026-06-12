@@ -309,7 +309,6 @@ options_panel_layout :: proc(gs: ^Game_State) {
             if opt_button("GIOff", "off", !gs.gi_enabled) {
                 gs.gi_enabled     = false
                 gs.gi_frame_index = 0
-                gs.gi_ping        = 0
             }
         }
 

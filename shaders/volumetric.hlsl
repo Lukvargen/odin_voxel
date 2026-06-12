@@ -35,7 +35,11 @@ cbuffer CameraUniforms : register(b0, space2) {
     int    u_vol;
     int    u_gi_frame_index;
     int    u_gi_enabled;
-    float  _padq2;
+    float  u_gi_alpha;
+    int3   u_gi_cache_origin;
+    int    u_gi_epoch;
+    float  u_time;
+    float3 _pad6;
 };
 
 #include "voxel_common.hlsl"

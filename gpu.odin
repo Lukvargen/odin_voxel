@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:math"
 import "core:mem"
 import "core:slice"
 import "core:time"
@@ -9,13 +10,23 @@ import SDL "vendor:sdl3"
 TEX_W :: 800
 TEX_H :: 800
 
+// GI irradiance cache (must match the defines in voxel_common.hlsl).
+// Camera-centered toroidal volume of GI_GRID_N^3 cells, GI_CELL_SIZE voxels
+// each; 7 uints per cell (6 packed face irradiances + validity).
+GI_CELL_SIZE      :: 2
+GI_GRID_N         :: 128
+GI_CELL_UINTS     :: 7
+GI_UPDATE_BUDGET  :: 32768 // cells re-estimated per frame
+GI_SWEEP_FRAMES   :: i32(GI_GRID_N * GI_GRID_N * GI_GRID_N / GI_UPDATE_BUDGET) // full refresh period (64)
+GI_CACHE_BUF_SIZE :: GI_GRID_N * GI_GRID_N * GI_GRID_N * GI_CELL_UINTS * size_of(u32)
+
 // Default internal render scale (divisor of the window resolution). The scene
 // is ray traced into a (TEX_W/scale)×(TEX_H/scale) texture and upscaled to the
 // window. scale > 1 trades resolution for a large primary-ray-cost saving (and
 // a deliberate pixel-art look with nearest-neighbor display). The live value is
 // gs.render_scale, changeable at runtime via gpu_set_render_scale (1/2/4 only,
 // so render_w stays a multiple of the 16-wide threadgroup).
-RENDER_SCALE :: 2
+RENDER_SCALE :: 1
 
 // Matches cbuffer CameraUniforms in voxel_tracer.hlsl.
 // Each float3 is padded to float4 (cbuffer std140 rules).
@@ -35,9 +46,21 @@ Camera_Uniform :: struct #packed {
     player_chunk_z:   i32,
     quality:          i32,   // packed: AA*10 + shadow_rays
     vol:              i32,   // packed: enabled*100 + steps (0/16/24/32)
-    gi_frame_index:   i32,
+    gi_frame_index:   i32,   // cache sweep counter, [0, GI_SWEEP_FRAMES)
     gi_enabled:       i32,
-    _padq2:           f32,
+    gi_alpha:         f32,   // blend-rate FLOOR (0 normal; ~0.6 after light/edit changes)
+    gi_cache_origin:  [3]i32, // clipmap volume origin, in cache cells
+    gi_epoch:         i32,   // completed-sweep counter (rotates ray sets)
+    time:             f32,   // seconds — cloud drift
+    _pad6:            [3]f32,
+}
+
+// Matches cbuffer ClearBox in gi_clear.hlsl (world-cell box, max exclusive).
+Gi_Clear_Box :: struct #packed {
+    box_min: [3]i32,
+    _p0:     i32,
+    box_max: [3]i32,
+    _p1:     i32,
 }
 
 // (Re)create the scene color, depth, and half-res volumetric textures at the
@@ -47,10 +70,11 @@ Camera_Uniform :: struct #packed {
 gpu_create_scene_textures :: proc(gs: ^Game_State) {
     // Output storage texture (compute writes here each frame). Allocated at the
     // internal render resolution; the SDL renderer upscales it to the window.
+    // RGBA16F: tone-mapped/HDR scene color fits comfortably, half the bandwidth.
     gs.out_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
         type                 = .D2,
-        format               = .R32G32B32A32_FLOAT,
-        usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
+        format               = .R16G16B16A16_FLOAT,
+        usage                = {.COMPUTE_STORAGE_WRITE, .COMPUTE_STORAGE_READ, .SAMPLER}, // READ: bloom prefilter samples it
         width                = u32(gs.render_w),
         height               = u32(gs.render_h),
         layer_count_or_depth = 1,
@@ -75,7 +99,7 @@ gpu_create_scene_textures :: proc(gs: ^Game_State) {
     // (storage write), read by composite (RO storage texture / .SAMPLER).
     gs.vol_texture = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
         type                 = .D2,
-        format               = .R32G32B32A32_FLOAT,
+        format               = .R16G16B16A16_FLOAT,
         usage                = {.COMPUTE_STORAGE_WRITE, .SAMPLER},
         width                = u32(gs.render_w / 2),
         height               = u32(gs.render_h / 2),
@@ -84,18 +108,19 @@ gpu_create_scene_textures :: proc(gs: ^Game_State) {
     })
     assert(gs.vol_texture != nil, "Failed to create volumetric texture")
 
-    // Ping-pong irradiance history for GI accumulation (RGB irradiance + A sample count).
+    // Half-res bloom ping-pong: prefilter -> a, blur H a -> b, blur V b -> a;
+    // composite reads a.
     for i in 0..<2 {
-        gs.gi_texture[i] = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
+        gs.bloom_texture[i] = SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
             type                 = .D2,
             format               = .R16G16B16A16_FLOAT,
-            usage                = {.COMPUTE_STORAGE_WRITE, .COMPUTE_STORAGE_READ},
-            width                = u32(gs.render_w),
-            height               = u32(gs.render_h),
+            usage                = {.COMPUTE_STORAGE_WRITE, .COMPUTE_STORAGE_READ, .SAMPLER},
+            width                = u32(gs.render_w / 2),
+            height               = u32(gs.render_h / 2),
             layer_count_or_depth = 1,
             num_levels           = 1,
         })
-        assert(gs.gi_texture[i] != nil, "Failed to create GI texture")
+        assert(gs.bloom_texture[i] != nil, "Failed to create bloom texture")
     }
 }
 
@@ -112,10 +137,8 @@ gpu_set_render_scale :: proc(gs: ^Game_State, scale: i32) {
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.vol_texture)
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi_texture[0])
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi_texture[1])
-    gs.gi_ping        = 0
-    gs.gi_frame_index = 0
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[0])
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[1])
 
     gs.render_scale = scale
     gs.render_w     = TEX_W / scale
@@ -142,9 +165,8 @@ gpu_init :: proc(gs: ^Game_State) {
         code_size                      = len(shader_bytes),
         entrypoint                     = "main",
         format                         = {.SPIRV},
-        num_readonly_storage_textures  = 1, // gi_history_read (t0)
-        num_readonly_storage_buffers   = 4, // voxel_chunk (t1), chunk_index (t2), chunk_owner (t3), voxel_mask (t4)
-        num_readwrite_storage_textures = 3, // img_output (u0), depth_output (u1), gi_history_write (u2)
+        num_readonly_storage_buffers   = 5, // voxel_chunk (t0), chunk_index (t1), chunk_owner (t2), voxel_mask (t3), gi_cache (t4)
+        num_readwrite_storage_textures = 2, // img_output (u0), depth_output (u1)
         num_uniform_buffers            = 1, // CameraUniforms (b0)
         threadcount_x                  = 16,
         threadcount_y                  = 16,
@@ -176,12 +198,67 @@ gpu_init :: proc(gs: ^Game_State) {
         code_size                      = len(comp_bytes),
         entrypoint                     = "main",
         format                         = {.SPIRV},
-        num_readonly_storage_textures  = 2, // vol_input (t0), depth_input (t1)
+        num_readonly_storage_textures  = 3, // vol_input (t0), depth_input (t1), bloom_input (t2)
         num_readwrite_storage_textures = 1, // img_output (u0)
         num_uniform_buffers            = 1,
         threadcount_x = 16, threadcount_y = 16, threadcount_z = 1,
     })
     assert(gs.comp_pipeline != nil, "Failed to create composite pipeline")
+
+    // Bloom passes: prefilter (scene -> half-res highlights), then the
+    // separable gaussian compiled twice with the direction baked in.
+    bloom_pipeline :: proc(gs: ^Game_State, bytes: []u8) -> ^SDL.GPUComputePipeline {
+        return SDL.CreateGPUComputePipeline(gs.gpu_device, SDL.GPUComputePipelineCreateInfo{
+            code                           = raw_data(bytes),
+            code_size                      = len(bytes),
+            entrypoint                     = "main",
+            format                         = {.SPIRV},
+            num_readonly_storage_textures  = 1, // source (t0)
+            num_readwrite_storage_textures = 1, // dest (u0)
+            threadcount_x = 16, threadcount_y = 16, threadcount_z = 1,
+        })
+    }
+    gs.bloom_pre_pipeline = bloom_pipeline(gs, #load("shaders/bloom_prefilter.spv"))
+    assert(gs.bloom_pre_pipeline != nil, "Failed to create bloom prefilter pipeline")
+    gs.bloom_h_pipeline = bloom_pipeline(gs, #load("shaders/bloom_blur_h.spv"))
+    assert(gs.bloom_h_pipeline != nil, "Failed to create bloom blur H pipeline")
+    gs.bloom_v_pipeline = bloom_pipeline(gs, #load("shaders/bloom_blur_v.spv"))
+    assert(gs.bloom_v_pipeline != nil, "Failed to create bloom blur V pipeline")
+
+    // GI cache update pass: voxel buffers RO + cache RW, 1D dispatch.
+    giu_bytes := #load("shaders/gi_update.spv")
+    gs.gi_update_pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, SDL.GPUComputePipelineCreateInfo{
+        code                          = raw_data(giu_bytes),
+        code_size                     = len(giu_bytes),
+        entrypoint                    = "main",
+        format                        = {.SPIRV},
+        num_readonly_storage_buffers  = 4, // voxel buffers (t0..t3)
+        num_readwrite_storage_buffers = 1, // gi_cache (u0)
+        num_uniform_buffers           = 1,
+        threadcount_x = 256, threadcount_y = 1, threadcount_z = 1,
+    })
+    assert(gs.gi_update_pipeline != nil, "Failed to create GI update pipeline")
+
+    // GI cache clear pass: cache RW + its own ClearBox cbuffer.
+    gic_bytes := #load("shaders/gi_clear.spv")
+    gs.gi_clear_pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, SDL.GPUComputePipelineCreateInfo{
+        code                          = raw_data(gic_bytes),
+        code_size                     = len(gic_bytes),
+        entrypoint                    = "main",
+        format                        = {.SPIRV},
+        num_readwrite_storage_buffers = 1, // gi_cache (u0)
+        num_uniform_buffers           = 1,
+        threadcount_x = 4, threadcount_y = 4, threadcount_z = 4,
+    })
+    assert(gs.gi_clear_pipeline != nil, "Failed to create GI clear pipeline")
+
+    // GI irradiance cache (~56 MB). Written by gi_update/gi_clear, read by
+    // the tracer; never uploaded from the CPU.
+    gs.gi_cache_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
+        usage = {.COMPUTE_STORAGE_READ, .COMPUTE_STORAGE_WRITE},
+        size  = GI_CACHE_BUF_SIZE,
+    })
+    assert(gs.gi_cache_buf != nil, "Failed to create GI cache buffer")
 
     // Scene color/depth/volumetric textures, sized to the current internal
     // render resolution (gs.render_w/h). Recreated on render-scale change.
@@ -419,11 +496,61 @@ gpu_upload_buffer :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawptr, si
     _ = SDL.SubmitGPUCommandBuffer(cmd)
 }
 
+// Zero all GI cache cells in a world-cell box (max exclusive). Pushes the
+// ClearBox cbuffer at uniform slot 0 — callers must push CameraUniforms
+// AFTERWARD for the passes that need it.
+gi_dispatch_clear :: proc(gs: ^Game_State, cmd: ^SDL.GPUCommandBuffer, bmin, bmax: [3]i32) {
+    if bmin.x >= bmax.x || bmin.y >= bmax.y || bmin.z >= bmax.z { return }
+    box := Gi_Clear_Box{box_min = bmin, box_max = bmax}
+    SDL.PushGPUComputeUniformData(cmd, 0, &box, size_of(box))
+    rw := SDL.GPUStorageBufferReadWriteBinding{buffer = gs.gi_cache_buf}
+    p := SDL.BeginGPUComputePass(cmd, nil, 0, &rw, 1)
+    SDL.BindGPUComputePipeline(p, gs.gi_clear_pipeline)
+    SDL.DispatchGPUCompute(p,
+        u32(bmax.x - bmin.x + 3) / 4,
+        u32(bmax.y - bmin.y + 3) / 4,
+        u32(bmax.z - bmin.z + 3) / 4)
+    SDL.EndGPUComputePass(p)
+}
+
 gpu_render :: proc(gs: ^Game_State) {
     cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
     if cmd == nil { return }
 
-    // Push per-frame uniform data (camera + light + reflect count)
+    // --- GI clipmap origin tracking + invalidation -------------------------
+    // Volume is centered on the camera; when it shifts, the slabs of cells
+    // that ENTER the volume alias (toroidally) to stale far-side data and
+    // must be zeroed before anything samples them this frame.
+    n :: i32(GI_GRID_N)
+    new_origin := [3]i32{
+        i32(math.floor(gs.camera.pos.x / GI_CELL_SIZE)) - n / 2,
+        i32(math.floor(gs.camera.pos.y / GI_CELL_SIZE)) - n / 2,
+        i32(math.floor(gs.camera.pos.z / GI_CELL_SIZE)) - n / 2,
+    }
+    if !gs.gi_cache_valid {
+        gi_dispatch_clear(gs, cmd, new_origin, new_origin + n)
+        gs.gi_cache_valid = true
+    } else if new_origin != gs.gi_cache_origin {
+        d := new_origin - gs.gi_cache_origin
+        if abs(d.x) >= n || abs(d.y) >= n || abs(d.z) >= n {
+            gi_dispatch_clear(gs, cmd, new_origin, new_origin + n) // teleport
+        } else {
+            lo := new_origin
+            hi := new_origin + n
+            // Entering slab per moved axis (full cross-section of the new
+            // volume; overlap between axes double-clears harmlessly).
+            if d.x > 0 { gi_dispatch_clear(gs, cmd, {hi.x - d.x, lo.y, lo.z}, hi) }
+            if d.x < 0 { gi_dispatch_clear(gs, cmd, lo, {lo.x - d.x, hi.y, hi.z}) }
+            if d.y > 0 { gi_dispatch_clear(gs, cmd, {lo.x, hi.y - d.y, lo.z}, hi) }
+            if d.y < 0 { gi_dispatch_clear(gs, cmd, lo, {hi.x, lo.y - d.y, hi.z}) }
+            if d.z > 0 { gi_dispatch_clear(gs, cmd, {lo.x, lo.y, hi.z - d.z}, hi) }
+            if d.z < 0 { gi_dispatch_clear(gs, cmd, lo, {hi.x, hi.y, lo.z - d.z}) }
+        }
+    }
+    gs.gi_cache_origin = new_origin
+
+    // Push per-frame uniform data (camera + light + GI cache state). Must
+    // come after the clear dispatches (they overwrite uniform slot 0).
     fwd, right, up := camera_basis(gs.camera)
     render_pos := gs.camera.pos
     render_pos.y += gs.camera.step_visual_offset
@@ -440,10 +567,26 @@ gpu_render :: proc(gs: ^Game_State) {
         vol             = (gs.vol_enabled ? 100 : 0) + gs.vol_steps,
         gi_frame_index  = gs.gi_frame_index,
         gi_enabled      = gs.gi_enabled ? 1 : 0,
+        gi_alpha        = gs.gi_alpha_boost_frames > 0 ? 0.6 : 0.0, // floor; shader uses max(1/(n+1), floor)
+        gi_cache_origin = new_origin,
+        gi_epoch        = gs.gi_epoch,
+        time            = f32(SDL.GetTicks()) / 1000.0,
     }
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
     ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}
+    // The tracer additionally reads the GI cache (t4).
+    ro_bufs_tracer := [5]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.gi_cache_buf}
+
+    // --- Pass 0: GI cache progressive update (skipped while GI is off) -----
+    if gs.gi_enabled {
+        rw_gi := SDL.GPUStorageBufferReadWriteBinding{buffer = gs.gi_cache_buf}
+        p0 := SDL.BeginGPUComputePass(cmd, nil, 0, &rw_gi, 1)
+        SDL.BindGPUComputePipeline(p0, gs.gi_update_pipeline)
+        SDL.BindGPUComputeStorageBuffers(p0, 0, raw_data(ro_bufs[:]), 4)
+        SDL.DispatchGPUCompute(p0, GI_UPDATE_BUDGET / 256, 1, 1)
+        SDL.EndGPUComputePass(p0)
+    }
 
     // Threadgroup counts at the current render resolution (ceil-divide by the
     // 16×16 group; shaders guard out-of-range threads so over-dispatch is safe).
@@ -452,23 +595,17 @@ gpu_render :: proc(gs: ^Game_State) {
     hgroups_x := u32((gs.render_w/2 + 15) / 16)
     hgroups_y := u32((gs.render_h/2 + 15) / 16)
 
-    // --- Pass 1: main raytrace → out_texture (+ depth_texture + gi_history_write) ---
-    gi_read  := gs.gi_ping
-    gi_write := 1 - gs.gi_ping
-    rw_main := [3]SDL.GPUStorageTextureReadWriteBinding{
-        { texture = gs.out_texture,           cycle = true },
-        { texture = gs.depth_texture,         cycle = true },
-        { texture = gs.gi_texture[gi_write],  cycle = true },
+    // --- Pass 1: main raytrace → out_texture (+ depth_texture) ---
+    rw_main := [2]SDL.GPUStorageTextureReadWriteBinding{
+        { texture = gs.out_texture,   cycle = true },
+        { texture = gs.depth_texture, cycle = true },
     }
-    gi_ro_tex := [1]^SDL.GPUTexture{ gs.gi_texture[gi_read] }
 
-    p1 := SDL.BeginGPUComputePass(cmd, raw_data(rw_main[:]), 3, nil, 0)
+    p1 := SDL.BeginGPUComputePass(cmd, raw_data(rw_main[:]), 2, nil, 0)
     SDL.BindGPUComputePipeline(p1, gs.pipeline)
-    SDL.BindGPUComputeStorageTextures(p1, 0, raw_data(gi_ro_tex[:]), 1)
-    SDL.BindGPUComputeStorageBuffers(p1, 0, raw_data(ro_bufs[:]), 4)
+    SDL.BindGPUComputeStorageBuffers(p1, 0, raw_data(ro_bufs_tracer[:]), 5)
     SDL.DispatchGPUCompute(p1, groups_x, groups_y, 1)
     SDL.EndGPUComputePass(p1)
-    gs.gi_ping = gi_write
 
     // --- Pass 2: half-res volumetric march → vol_texture ---
     // Reads depth (RO storage tex, t0) + voxel buffers (t1..t4).
@@ -481,13 +618,31 @@ gpu_render :: proc(gs: ^Game_State) {
     SDL.DispatchGPUCompute(p2, hgroups_x, hgroups_y, 1)
     SDL.EndGPUComputePass(p2)
 
-    // --- Pass 3: composite (bilateral upscale + add) → out_texture ---
-    // Reads vol (t0) + depth (t1) as RO storage textures; RW out_texture.
+    // --- Pass 2b-d: bloom (half-res) — prefilter → blur H → blur V ---------
+    // prefilter: scene → bloom[0]; H: bloom[0] → bloom[1]; V: bloom[1] → bloom[0].
+    {
+        bloom_pass :: proc(cmd: ^SDL.GPUCommandBuffer, pipeline: ^SDL.GPUComputePipeline,
+            src: ^SDL.GPUTexture, dst: ^SDL.GPUTexture, gx, gy: u32) {
+            rw := SDL.GPUStorageTextureReadWriteBinding{texture = dst, cycle = true}
+            p := SDL.BeginGPUComputePass(cmd, &rw, 1, nil, 0)
+            SDL.BindGPUComputePipeline(p, pipeline)
+            ro := src
+            SDL.BindGPUComputeStorageTextures(p, 0, &ro, 1)
+            SDL.DispatchGPUCompute(p, gx, gy, 1)
+            SDL.EndGPUComputePass(p)
+        }
+        bloom_pass(cmd, gs.bloom_pre_pipeline, gs.out_texture,      gs.bloom_texture[0], hgroups_x, hgroups_y)
+        bloom_pass(cmd, gs.bloom_h_pipeline,   gs.bloom_texture[0], gs.bloom_texture[1], hgroups_x, hgroups_y)
+        bloom_pass(cmd, gs.bloom_v_pipeline,   gs.bloom_texture[1], gs.bloom_texture[0], hgroups_x, hgroups_y)
+    }
+
+    // --- Pass 3: composite (vol upscale + bloom add + tonemap) → out_texture ---
+    // Reads vol (t0) + depth (t1) + bloom (t2) as RO storage textures; RW out_texture.
     rw_comp := SDL.GPUStorageTextureReadWriteBinding{ texture = gs.out_texture, cycle = false }
     p3 := SDL.BeginGPUComputePass(cmd, &rw_comp, 1, nil, 0)
     SDL.BindGPUComputePipeline(p3, gs.comp_pipeline)
-    comp_ro_tex := [2]^SDL.GPUTexture{ gs.vol_texture, gs.depth_texture }
-    SDL.BindGPUComputeStorageTextures(p3, 0, raw_data(comp_ro_tex[:]), 2)
+    comp_ro_tex := [3]^SDL.GPUTexture{ gs.vol_texture, gs.depth_texture, gs.bloom_texture[0] }
+    SDL.BindGPUComputeStorageTextures(p3, 0, raw_data(comp_ro_tex[:]), 3)
     SDL.DispatchGPUCompute(p3, groups_x, groups_y, 1)
     SDL.EndGPUComputePass(p3)
 
@@ -502,13 +657,21 @@ gpu_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.vol_texture)
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi_texture[0])
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi_texture[1])
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[0])
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[1])
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.voxel_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.index_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.owner_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.mask_buf)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.gi_cache_buf)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.vol_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.comp_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.gi_update_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.gi_clear_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_pre_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_h_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_v_pipeline)
     SDL.ReleaseWindowFromGPUDevice(gs.gpu_device, gs.window)
     SDL.DestroyGPUDevice(gs.gpu_device)
 }

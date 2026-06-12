@@ -4,7 +4,6 @@ import "core:fmt"
 import SDL "vendor:sdl3"
 
 DOUBLE_TAP_MS :: u64(300)
-GI_DIRS       :: i32(128) // must match #define GI_DIRS in voxel_common.hlsl
 
 Game_State :: struct {
     // SDL3
@@ -29,18 +28,30 @@ Game_State :: struct {
     prof_frames:     int,
 
     // GPU resources
-    pipeline:      ^SDL.GPUComputePipeline,
-    vol_pipeline:  ^SDL.GPUComputePipeline,
-    comp_pipeline: ^SDL.GPUComputePipeline,
+    pipeline:           ^SDL.GPUComputePipeline,
+    vol_pipeline:       ^SDL.GPUComputePipeline,
+    comp_pipeline:      ^SDL.GPUComputePipeline,
+    gi_update_pipeline: ^SDL.GPUComputePipeline,
+    gi_clear_pipeline:  ^SDL.GPUComputePipeline,
+    bloom_pre_pipeline: ^SDL.GPUComputePipeline,
+    bloom_h_pipeline:   ^SDL.GPUComputePipeline,
+    bloom_v_pipeline:   ^SDL.GPUComputePipeline,
     out_texture:   ^SDL.GPUTexture,
     depth_texture: ^SDL.GPUTexture,
-    vol_texture:   ^SDL.GPUTexture,   // half-res volumetric inscatter
-    gi_texture:    [2]^SDL.GPUTexture, // ping-pong GI irradiance history
-    gi_ping:       int,                // index of current READ buffer
-    voxel_buf:   ^SDL.GPUBuffer,
-    index_buf:   ^SDL.GPUBuffer,
-    owner_buf:   ^SDL.GPUBuffer,
-    mask_buf:    ^SDL.GPUBuffer,
+    vol_texture:   ^SDL.GPUTexture,    // half-res volumetric inscatter
+    bloom_texture: [2]^SDL.GPUTexture, // half-res bloom ping-pong
+    voxel_buf:    ^SDL.GPUBuffer,
+    index_buf:    ^SDL.GPUBuffer,
+    owner_buf:    ^SDL.GPUBuffer,
+    mask_buf:     ^SDL.GPUBuffer,
+    gi_cache_buf: ^SDL.GPUBuffer,     // world-space irradiance cache (clipmap)
+
+    // GI cache bookkeeping (see gpu_render)
+    gi_cache_origin:      [3]i32,  // clipmap volume origin, in cache cells
+    gi_cache_valid:       bool,    // false until the initial full clear
+    gi_alpha_boost_frames: i32,    // >0: high blend floor (light changed / edit / GI re-enabled)
+    gi_prev_light_dir:    [3]f32,  // for light-change detection
+    gi_epoch:             i32,     // completed sweeps (rotates per-visit ray sets)
 
     // Settings
     light_dir:      [3]f32,
@@ -72,16 +83,16 @@ main :: proc() {
 
     gs.reflect_amount = 1
     gs.aa_samples     = 2   // F2 cycles 4->2->1
-    gs.shadow_rays    = 1   // F3 toggles 1<->3 (1=hard, 3=soft near)
+    gs.shadow_rays    = 3   // F3 toggles 1<->3 (1=hard, 3=soft near); soft is cheap since the two-level shadow DDA
     gs.vol_enabled    = true // F4 toggles volumetric god rays
     gs.vol_steps      = 16   // measured: 16 = 55 FPS (~baseline), 24/32 cost more for little visual gain. F5 cycles 16/24/32
-    gs.gi_enabled     = true // F6 toggles GI; converges over GI_DIRS frames
+    gs.gi_enabled     = true // F6 toggles GI; cache converges over a sweep (~GI_SWEEP_FRAMES frames)
     gs.gi_frame_index = 0
-    gs.gi_ping        = 0
     gs.render_scale   = RENDER_SCALE // 1 = full-res, 2/4 = pixel-art (options screen)
     gs.render_w       = TEX_W / gs.render_scale
     gs.render_h       = TEX_H / gs.render_scale
     gs.light_dir      = {0.6, 0.8, 0.4}
+    gs.gi_prev_light_dir = gs.light_dir
     gs.camera.pos     = {0, 80, 0}
     gs.camera.yaw     = 0
     gs.camera.pitch   = -20
@@ -171,8 +182,8 @@ main :: proc() {
                     fmt.printf("volumetric steps: %d\n", gs.vol_steps)
                 case SDL.K_F6:
                     gs.gi_enabled = !gs.gi_enabled
-                    gs.gi_frame_index = 0 // restart accumulation on toggle
-                    gs.gi_ping        = 0
+                    gs.gi_frame_index = 0
+                    if gs.gi_enabled { gs.gi_alpha_boost_frames = GI_SWEEP_FRAMES } // fast refresh of the stale cache
                     fmt.printf("GI: %v\n", gs.gi_enabled)
                 case SDL.K_1: gs.reflect_amount = 1
                 case SDL.K_2: gs.reflect_amount = 2
@@ -283,15 +294,30 @@ main :: proc() {
                     if refresh_chunk_index(&gs, slot) { gs.index_dirty = true }
                     append(&gs.dirty_slots, slot)
                 }
+                // Geometry changed: raise the GI blend floor for a sweep so
+                // the cache relights the edit promptly instead of nudging
+                // toward it at the steady-state 1/32 rate.
+                gs.gi_alpha_boost_frames = GI_SWEEP_FRAMES
             }
         }
+
+        // Light direction changed (Ctrl+look)? Boost the cache EMA so the new
+        // lighting overwrites stale irradiance within one sweep instead of
+        // slowly blending toward it.
+        dl := gs.light_dir - gs.gi_prev_light_dir
+        if abs(dl.x) + abs(dl.y) + abs(dl.z) > 0.0005 {
+            gs.gi_alpha_boost_frames = GI_SWEEP_FRAMES
+        }
+        gs.gi_prev_light_dir = gs.light_dir
+        if gs.gi_alpha_boost_frames > 0 { gs.gi_alpha_boost_frames -= 1 }
 
         flush_gpu_uploads(&gs)
         gpu_render(&gs)
         ui_build_and_render(&gs, dt)
 
         if gs.gi_enabled {
-            gs.gi_frame_index = (gs.gi_frame_index + 1) % GI_DIRS
+            gs.gi_frame_index = (gs.gi_frame_index + 1) % GI_SWEEP_FRAMES
+            if gs.gi_frame_index == 0 { gs.gi_epoch += 1 }
         }
 
         gs.prof_frames += 1
