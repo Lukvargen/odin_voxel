@@ -12,7 +12,9 @@ Texture2D<float4>   bloom_input: register(t2, space0); // half-res blurred highl
 
 RWTexture2D<float4> img_output : register(u0, space1); // full-res scene color (in/out)
 
-#define BLOOM_INTENSITY 0.35
+#define BLOOM_INTENSITY   0.35
+#define GRADE_SATURATION  1.05
+#define GRADE_CONTRAST    1.04
 
 cbuffer CameraUniforms : register(b0, space2) {
     float3 u_cam_pos;
@@ -36,7 +38,16 @@ cbuffer CameraUniforms : register(b0, space2) {
     int3   u_gi_cache_origin;
     int    u_gi_epoch;
     float  u_time;
-    float3 _pad6;
+    int    u_light_count;
+    float  u_exposure;
+    float  u_fog_density;
+    float  u_cave_factor;
+    float  u_sun_intensity;
+    float2 _pad7;
+    int3   u_gi_region_min;
+    int    u_gi_region_mode;
+    int3   u_gi_region_dims;
+    float  u_gi_region_alpha;
 };
 
 // ACES filmic tone mapping (approximation by Krzysztof Narkowicz)
@@ -100,5 +111,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     }
 
     float4 c = img_output[p];
-    img_output[p] = float4(tone_map(c.rgb + inscatter + bloom * BLOOM_INTENSITY), c.a);
+    float3 c2 = tone_map((c.rgb + inscatter + bloom * BLOOM_INTENSITY) * u_exposure);
+    // Gentle grade: slight saturation push + contrast S-curve around mid-gray.
+    float lum = dot(c2, float3(0.2126, 0.7152, 0.0722));
+    c2 = lerp(lum.xxx, c2, GRADE_SATURATION);
+    c2 = saturate((c2 - 0.5) * GRADE_CONTRAST + 0.5);
+    img_output[p] = float4(c2, c.a);
 }

@@ -82,6 +82,7 @@ Block_Type :: enum u8 {
     Stone  = 2,
     Log    = 3,
     Leaves = 4,
+    Torch  = 5,   // emissive — feeds the point-light list (lights.odin)
 }
 
 Chunk :: struct {
@@ -741,10 +742,11 @@ raycast_voxel :: proc(gs: ^Game_State, origin, dir: [3]f32, max_dist: f32) -> (h
 
 BRUSH_RADIUS :: 5
 
-// Sets all voxels within a sphere of BRUSH_RADIUS around center to `block`.
-// Marks each affected chunk slot in `dirty`.
-edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^map[int]bool) {
-    r :: BRUSH_RADIUS
+// Sets all voxels within a sphere of `radius` around center to `block`
+// (radius 0 = single voxel, used for torch placement). Marks each affected
+// chunk slot in `dirty`.
+edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^map[int]bool, radius := BRUSH_RADIUS) {
+    r := radius
     for dz in -r ..= r {
         for dy in -r ..= r {
             for dx in -r ..= r {

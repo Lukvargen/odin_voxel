@@ -45,6 +45,16 @@ Game_State :: struct {
     owner_buf:    ^SDL.GPUBuffer,
     mask_buf:     ^SDL.GPUBuffer,
     gi_cache_buf: ^SDL.GPUBuffer,     // world-space irradiance cache (clipmap)
+    light_buf:    ^SDL.GPUBuffer,     // point-light list (lights.odin)
+    entity_buf:   ^SDL.GPUBuffer,     // SDF entity list (entities.odin)
+
+    // Emissive blocks (canonical CPU set; chunk-streaming independent).
+    // Value = placement time in seconds (drives the intensity ease-in).
+    torch_voxels: map[[3]int]f32,
+    dying_lights: [dynamic]Dying_Light, // removed torches fading out
+    brush_radius:  int,  // edit sphere radius, 0 = single voxel (Ctrl+scroll)
+    left_pressed:  bool, // single-frame press edges — with Ctrl held a click
+    right_pressed: bool, // performs exactly one edit instead of repeating
 
     // GI cache bookkeeping (see gpu_render)
     gi_cache_origin:      [3]i32,  // clipmap volume origin, in cache cells
@@ -52,6 +62,9 @@ Game_State :: struct {
     gi_alpha_boost_frames: i32,    // >0: high blend floor (light changed / edit / GI re-enabled)
     gi_prev_light_dir:    [3]f32,  // for light-change detection
     gi_epoch:             i32,     // completed sweeps (rotates per-visit ray sets)
+    gi_region_frames:     i32,     // >0: priority re-estimation of the region box each frame
+    gi_region_min:        [3]i32,  // priority box, world-cell coords
+    gi_region_max:        [3]i32,
 
     // Settings
     light_dir:      [3]f32,
@@ -65,6 +78,17 @@ Game_State :: struct {
     render_scale:   i32,   // internal-resolution divisor (1/2/4); pixel-art look
     render_w:       i32,   // = TEX_W / render_scale  (current scene texture size)
     render_h:       i32,   // = TEX_H / render_scale
+    exposure:       f32,   // pre-tonemap multiplier (options panel)
+    fog_density:    f32,   // base distance-fog density (options panel)
+    cave_factor:    f32,   // 0 surface .. 1 deep underground, smoothed per frame
+    sun_intensity:  f32,   // sun direct-light multiplier
+    selected_block: Block_Type, // hotbar selection (keys 1-5)
+    light_count:    i32,   // active point lights uploaded this frame
+
+    // SDF entities (entities.odin)
+    entities:         [dynamic]Entity,
+    entity_count:     i32,  // entities uploaded this frame
+    entities_enabled: bool, // options panel toggle
 
     // Input state
     mouse_locked:        bool,
@@ -92,6 +116,12 @@ main :: proc() {
     gs.render_w       = TEX_W / gs.render_scale
     gs.render_h       = TEX_H / gs.render_scale
     gs.light_dir      = {0.6, 0.8, 0.4}
+    gs.exposure       = 1.0
+    gs.fog_density    = 0.0012
+    gs.sun_intensity  = 1.9
+    gs.selected_block = .Stone
+    gs.brush_radius   = BRUSH_RADIUS
+    gs.entities_enabled = true
     gs.gi_prev_light_dir = gs.light_dir
     gs.camera.pos     = {0, 80, 0}
     gs.camera.yaw     = 0
@@ -120,6 +150,8 @@ main :: proc() {
     generate_world(&gs)
     gpu_init(&gs)
     defer gpu_destroy(&gs)
+    entities_init(&gs)
+    defer delete(gs.entities)
 
     ui_init(&gs)
     defer ui_shutdown(&gs)
@@ -143,7 +175,10 @@ main :: proc() {
         move_fwd, move_back, move_left, move_right: bool
         run_fast, run_ultra: bool
         mouse_dx, mouse_dy: f32
-        gs.jump_pressed = false
+        wheel_dy: f32
+        gs.jump_pressed  = false
+        gs.left_pressed  = false
+        gs.right_pressed = false
         quit := false
 
         event: SDL.Event
@@ -185,11 +220,13 @@ main :: proc() {
                     gs.gi_frame_index = 0
                     if gs.gi_enabled { gs.gi_alpha_boost_frames = GI_SWEEP_FRAMES } // fast refresh of the stale cache
                     fmt.printf("GI: %v\n", gs.gi_enabled)
-                case SDL.K_1: gs.reflect_amount = 1
-                case SDL.K_2: gs.reflect_amount = 2
-                case SDL.K_3: gs.reflect_amount = 3
-                case SDL.K_4: gs.reflect_amount = 4
-                case SDL.K_5: gs.reflect_amount = 5
+                // Hotbar: block selection for left-click placement.
+                // (Reflection bounces moved to the options panel.)
+                case SDL.K_1: gs.selected_block = .Stone
+                case SDL.K_2: gs.selected_block = .Grass
+                case SDL.K_3: gs.selected_block = .Log
+                case SDL.K_4: gs.selected_block = .Leaves
+                case SDL.K_5: gs.selected_block = .Torch
                 case SDL.K_SPACE:
                     if !event.key.repeat {
                         press_time := SDL.GetTicks()
@@ -212,10 +249,13 @@ main :: proc() {
                     gs.ui.mouse_pos = {event.motion.x, event.motion.y}
                 }
 
+            case .MOUSE_WHEEL:
+                wheel_dy += event.wheel.y
+
             case .MOUSE_BUTTON_DOWN:
                 if gs.mouse_locked {
-                    if event.button.button == 1 { gs.left_held  = true }
-                    if event.button.button == 3 { gs.right_held = true }
+                    if event.button.button == 1 { gs.left_held  = true; gs.left_pressed  = true }
+                    if event.button.button == 3 { gs.right_held = true; gs.right_pressed = true }
                 } else {
                     gs.ui.mouse_pos = {event.button.x, event.button.y}
                     if event.button.button == 1 {
@@ -247,16 +287,33 @@ main :: proc() {
             gs.jump_pressed = true // reuse as move_up in fly
         }
 
-        // Light dir: Ctrl + look direction
-        if gs.mouse_locked && kb[SDL.Scancode.LCTRL] {
+        // Light dir: hold L + look direction. (Moved off Ctrl — Ctrl now
+        // modifies edits: Ctrl+scroll = brush radius, Ctrl+click = single.)
+        if gs.mouse_locked && kb[SDL.Scancode.L] {
             fwd := camera_forward(gs.camera)
             gs.light_dir = fwd
+        }
+
+        // Ctrl+scroll: edit brush radius (0 = single voxel).
+        ctrl_held := bool(kb[SDL.Scancode.LCTRL])
+        if ctrl_held && wheel_dy != 0 {
+            gs.brush_radius = clamp(gs.brush_radius + (wheel_dy > 0 ? 1 : -1), 0, 8)
         }
 
         if gs.mouse_locked {
             camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, dt,
                 move_fwd, move_back, move_left, move_right, gs.jump_pressed,
                 run_fast, run_ultra)
+        }
+
+        // Underground-ness (0 surface .. 1 deep below): drives cave darkness
+        // and cave fog in the shaders. Smoothed ~0.5 s so moving through a
+        // cave mouth reads as eye adaptation instead of a pop.
+        {
+            surface := surface_height_at(int(gs.camera.pos.x), int(gs.camera.pos.z))
+            depth_below := f32(surface) - gs.camera.pos.y
+            target := clamp((depth_below - 6.0) / 18.0, 0.0, 1.0)
+            gs.cave_factor += (target - gs.cave_factor) * min(1.0, dt * 2.0)
         }
 
         // Enqueue new chunks when crossing a chunk boundary
@@ -274,30 +331,65 @@ main :: proc() {
         // Integrate finished chunks from worker threads
         integrate_ready_chunks(&gs)
 
-        if gs.mouse_locked && (gs.left_held || gs.right_held) {
+        // Edits. The brush radius is user-set (Ctrl+scroll, 0 = single voxel)
+        // and applies to place AND break. Ctrl turns either button into a
+        // single-shot (one edit per press — e.g. Ctrl+right with brush 0 is
+        // a clean torch pickup); without Ctrl, holding repeats per frame.
+        left_edit  := ctrl_held ? gs.left_pressed  : gs.left_held
+        right_edit := ctrl_held ? gs.right_pressed : gs.right_held
+        if gs.mouse_locked && (left_edit || right_edit) {
             fwd := camera_forward(gs.camera)
             hit, nrm, hit_ok := raycast_voxel(&gs, gs.camera.pos, fwd, 200)
             if hit_ok {
                 target: [3]int
                 block: Block_Type
-                if gs.left_held {
+                if left_edit {
                     target = {hit[0] + nrm[0], hit[1] + nrm[1], hit[2] + nrm[2]}
-                    block  = .Stone
+                    block  = gs.selected_block
                 } else {
                     target = hit
                     block  = .Air
                 }
-                dirty: map[int]bool
-                defer delete(dirty)
-                edit_sphere(&gs, target, block, &dirty)
-                for slot in dirty {
-                    if refresh_chunk_index(&gs, slot) { gs.index_dirty = true }
-                    append(&gs.dirty_slots, slot)
+                // Torch placement stays a single voxel regardless of brush
+                // (a sphere of emitters would blow past MAX_LIGHTS) and one
+                // per click (held-repeat would restart the intensity ease-in
+                // every frame).
+                radius  := gs.brush_radius
+                do_edit := true
+                if block == .Torch {
+                    radius  = 0
+                    do_edit = gs.left_pressed
                 }
-                // Geometry changed: raise the GI blend floor for a sweep so
-                // the cache relights the edit promptly instead of nudging
-                // toward it at the steady-state 1/32 rate.
-                gs.gi_alpha_boost_frames = GI_SWEEP_FRAMES
+                if do_edit {
+                    dirty: map[int]bool
+                    defer delete(dirty)
+                    edit_sphere(&gs, target, block, &dirty, radius)
+                    // Keep the emissive set in sync: any torch inside the
+                    // edited sphere was just overwritten (break OR place).
+                    removed := lights_remove_in_sphere(&gs, target, radius)
+                    if block == .Torch {
+                        lights_add(&gs, target)
+                    }
+                    // Torch set changed → re-estimate the GI region at high
+                    // priority so the lighting crossfades smoothly instead of
+                    // ghosting (EMA-only) or popping dark (hard clear).
+                    if block == .Torch || removed > 0 {
+                        lights_queue_gi_region(&gs, target, radius)
+                    }
+                    for slot in dirty {
+                        if refresh_chunk_index(&gs, slot) { gs.index_dirty = true }
+                        append(&gs.dirty_slots, slot)
+                    }
+                    // Geometry changed: raise the GI blend floor for a sweep
+                    // so the cache relights the edit promptly instead of
+                    // nudging toward it at the steady-state 1/32 rate.
+                    // Single-voxel edits skip this — their lighting impact is
+                    // local (torches get the priority-region burst); the
+                    // global boost would just churn the whole cache.
+                    if radius > 0 {
+                        gs.gi_alpha_boost_frames = GI_SWEEP_FRAMES
+                    }
+                }
             }
         }
 
@@ -312,6 +404,8 @@ main :: proc() {
         if gs.gi_alpha_boost_frames > 0 { gs.gi_alpha_boost_frames -= 1 }
 
         flush_gpu_uploads(&gs)
+        lights_update(&gs)
+        entities_update(&gs, dt)
         gpu_render(&gs)
         ui_build_and_render(&gs, dt)
 

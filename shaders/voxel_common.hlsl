@@ -21,6 +21,16 @@
 #define BLOCK_STONE  2u
 #define BLOCK_LOG    3u
 #define BLOCK_LEAVES 4u
+#define BLOCK_TORCH  5u
+
+// Radiance a block's surface emits on its own (0 = not emissive). Added to
+// shading UNLIT (not multiplied by lighting/AO) and picked up by GI rays.
+// Bright enough to pass BLOOM_THRESHOLD so emissive blocks glow. Future
+// emissive blocks (lava, glowstone) slot in here.
+float3 block_emission(uint id) {
+    if (id == BLOCK_TORCH) return float3(1.0, 0.55, 0.22) * 6.0;
+    return float3(0.0, 0.0, 0.0);
+}
 
 #define LEAF_TRANSMIT 0.35
 
@@ -175,8 +185,13 @@ float3 safe_dir(float3 d) {
 // Per-voxel shadow walk through one occupied chunk. local_entry is the ray
 // entry pos in voxel units within the chunk, [0,8) per axis. Returns the
 // transmittance factor for this chunk (0 = fully blocked, leaves attenuate
-// by LEAF_TRANSMIT per voxel crossed).
-float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir) {
+// by LEAF_TRANSMIT per voxel crossed). max_len (voxel units from entry)
+// stops the walk at a point-light's position — without it the walk overruns
+// the chunk-level max_t check and reports occlusion from the light's own
+// voxel or geometry behind it (chunk-alignment-dependent "lights only one
+// direction" bug). Emissive voxels never occlude: they ARE the light, and
+// stacked torches must not shadow each other.
+float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float max_len = 1e30) {
     float t_delta_x = abs(1.0 / dir.x);
     float t_delta_y = abs(1.0 / dir.y);
     float t_delta_z = abs(1.0 / dir.z);
@@ -204,13 +219,15 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir) {
     // the step that exits this chunk lands on the next chunk's entry voxel).
     for (int i = 0; i <= 23; i++) {
         if (i > 0) {
+            float t_enter;
             if (t_max_x < t_max_y && t_max_x < t_max_z) {
-                x_i += step_x; t_max_x += t_delta_x;
+                t_enter = t_max_x; x_i += step_x; t_max_x += t_delta_x;
             } else if (t_max_y < t_max_z) {
-                y_i += step_y; t_max_y += t_delta_y;
+                t_enter = t_max_y; y_i += step_y; t_max_y += t_delta_y;
             } else {
-                z_i += step_z; t_max_z += t_delta_z;
+                t_enter = t_max_z; z_i += step_z; t_max_z += t_delta_z;
             }
+            if (t_enter > max_len) break;
             if (x_i < 0 || y_i < 0 || z_i < 0 ||
                 x_i >= BRICK_CHUNK_SIZE || y_i >= BRICK_CHUNK_SIZE || z_i >= BRICK_CHUNK_SIZE)
                 break;
@@ -218,7 +235,9 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir) {
         int lvi = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
         if (voxel_solid(chunk_i, lvi)) {
             uint bid = load_voxel(base + lvi);
-            if (bid == BLOCK_LEAVES) {
+            if (block_emission(bid).x > 0.0) {
+                // emissive: transparent to shadow rays
+            } else if (bid == BLOCK_LEAVES) {
                 factor *= LEAF_TRANSMIT;
                 if (factor < 0.01) return 0.0;
             } else {
@@ -234,7 +253,13 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir) {
 // Two-level DDA: steps the 8x-coarser chunk grid and only descends to the
 // per-voxel walk inside occupied (index != -1) chunks — empty air is skipped
 // a whole chunk at a time instead of voxel-by-voxel.
-float trace_shadow_transmittance(float3 origin, float3 dir) {
+// max_t (world units) lets point-light shadow rays stop short of the light —
+// without it they'd march past the emitter and report occlusion from geometry
+// BEHIND it (and hit the solid torch voxel itself). Default keeps the sun /
+// volumetric call sites unchanged. The per-voxel walk inside the final chunk
+// can overrun max_t slightly; callers stop ~0.9 short of the light so this
+// is not visible.
+float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MAX_LENGTH) {
     dir = safe_dir(dir);
 
     float t_delta_x = abs(1.0 / dir.x);
@@ -265,7 +290,7 @@ float trace_shadow_transmittance(float3 origin, float3 dir) {
 
     // Worst-case diagonal within RAY_MAX_LENGTH crosses ~3*128 chunks.
     for (int i = 0; i < 512; i++) {
-        if (t > RAY_MAX_LENGTH / float(BRICK_CHUNK_SIZE)) break;
+        if (t > max_t / float(BRICK_CHUNK_SIZE)) break;
 
         int ry = y_i - WORLD_CHUNK_Y_MIN;
         if (ry < 0 || ry >= GPU_CHUNKS_HEIGHT) {
@@ -289,7 +314,10 @@ float trace_shadow_transmittance(float3 origin, float3 dir) {
                 int3   chunk_ic    = int3(x_i, y_i, z_i);
                 float3 local_entry = ((chunk_origin + dir * t) - float3(chunk_ic))
                                      * float(BRICK_CHUNK_SIZE);
-                transmittance *= shadow_chunk_transmit(ci, local_entry, dir);
+                // Remaining ray budget in voxel units from this chunk's entry
+                // (max_t is world==voxel units; t is in chunk units).
+                transmittance *= shadow_chunk_transmit(ci, local_entry, dir,
+                                                       max_t - t * float(BRICK_CHUNK_SIZE));
                 if (transmittance < 0.01) return 0.0;
             }
         }
@@ -304,6 +332,69 @@ float trace_shadow_transmittance(float3 origin, float3 dir) {
     }
     return transmittance;
 }
+
+// ---- Point lights (torches) ---------------------------------------------------
+// Only for shaders that declare a `point_lights` StructuredBuffer<float4>
+// (2 float4s per light: [0].xyz pos / .w radius, [1].rgb premultiplied HDR
+// color) — define HAS_POINT_LIGHTS before including this file.
+#ifdef HAS_POINT_LIGHTS
+
+// Windowed inverse-square falloff (UE-style): smooth cutoff at the radius,
+// physical 1/d² inside, +1 in the denominator clamps the near-zero blowup.
+float3 point_light_contrib(float4 pos_radius, float3 color, float3 p, float3 n,
+                           out float out_dist, out float3 out_L) {
+    out_dist = 0.0;
+    out_L    = float3(0, 0, 0);
+    float3 d     = pos_radius.xyz - p;
+    float  dist2 = dot(d, d);
+    float  R     = pos_radius.w;
+    if (dist2 > R * R) return float3(0, 0, 0);
+    float dist = sqrt(max(dist2, 1e-6));
+    float3 L   = d / dist;
+    float ndl  = dot(n, L);
+    if (ndl <= 0.0) return float3(0, 0, 0);
+    float ratio = dist / R;
+    float r2    = ratio * ratio;
+    float win   = saturate(1.0 - r2 * r2);
+    win *= win;
+    out_dist = dist;
+    out_L    = L;
+    return color * (ndl * win / (dist2 + 1.0));
+}
+
+// Unshadowed sum — used by gi_update at ray hit points (deterministic VPL-style
+// injection; bounce-magnitude light, so wall leaks are invisible in practice).
+float3 point_lights_unshadowed(float3 p, float3 n) {
+    float3 acc = float3(0, 0, 0);
+    for (int li = 0; li < u_light_count; li++) {
+        float dist; float3 L;
+        acc += point_light_contrib(point_lights[li * 2], point_lights[li * 2 + 1].rgb, p, n, dist, L);
+    }
+    return acc;
+}
+
+// Shadowed sum — per-pixel direct lighting in the tracer. The shadow ray stops
+// 0.9 short of the light center so it neither hits the solid emissive voxel
+// nor reports occlusion from geometry behind the light.
+float3 point_lights_direct(float3 p, float3 n) {
+    float3 acc = float3(0, 0, 0);
+    for (int li = 0; li < u_light_count; li++) {
+        float dist; float3 L;
+        float3 contrib = point_light_contrib(point_lights[li * 2], point_lights[li * 2 + 1].rgb, p, n, dist, L);
+        if (max(contrib.r, max(contrib.g, contrib.b)) < 0.004) continue; // negligible → skip shadow ray
+        float transmit = trace_shadow_transmittance(p + n * 0.01, L, dist - 0.9);
+#ifdef HAS_SDF_ENTITIES
+        // Entities block torch light too (defined only in the tracer; the
+        // gi_update/volumetric passes compile without entity data).
+        transmit *= entity_shadow_transmittance(p + n * 0.01, L, dist - 0.9);
+#endif
+        contrib *= transmit;
+        acc += contrib;
+    }
+    return acc;
+}
+
+#endif // HAS_POINT_LIGHTS
 
 // ---- Sky / albedo (pass-agnostic: take normalized light dir as arg) ---------
 
@@ -335,15 +426,15 @@ float fbm2(float2 p) {
 #define CLOUD_COVER  0.48   // fbm threshold (higher = fewer clouds)
 #define CLOUD_DRIFT  float2(0.004, 0.0015) // uv/sec — slow so the GI cache keeps up
 
-float3 sky_color_d(float3 dir, float3 Ln) {
+float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt) {
     float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     float elev = clamp(Ln.y, 0.0, 1.0);
     float3 horizon = lerp(float3(0.90, 0.55, 0.25), float3(0.75, 0.85, 1.0), smoothstep(0.0, 0.3, elev));
     float3 zenith  = lerp(float3(0.20, 0.10, 0.05), float3(0.10, 0.35, 0.80), smoothstep(0.0, 0.4, elev));
     float3 sky = lerp(horizon, zenith, pow(t, 0.6));
     float sun_dot  = dot(normalize(dir), Ln);
-    float sun_disc = smoothstep(0.9985, 0.9995, sun_dot);
-    float sun_glow = smoothstep(0.960,  0.9985, sun_dot) * 0.4;
+    float sun_disc = smoothstep(0.9985, 0.9995, sun_dot) * disc_amt;
+    float sun_glow = smoothstep(0.960,  0.9985, sun_dot) * 0.4 * glow_amt;
     sky = lerp(sky, sun_tint_d(Ln), sun_disc + sun_glow * 0.6);
 
     // Cloud layer, drawn over the disc (sun behind cloud = dimmed). Project
@@ -362,11 +453,24 @@ float3 sky_color_d(float3 dir, float3 Ln) {
     return sky;
 }
 
+// Sky as seen directly (miss rays): full sun disc + glow.
+float3 sky_color_d(float3 dir, float3 Ln) {
+    return sky_color_impl(dir, Ln, 1.0, 1.0);
+}
+
+// Sky as a FOG color (blended onto hit geometry): the sharp disc would read
+// as the sun rendering in front of fogged mountains, so drop it and halve
+// the broad glow (forward-scatter halo through haze is plausible; a hard
+// circle is not).
+float3 sky_color_fog_d(float3 dir, float3 Ln) {
+    return sky_color_impl(dir, Ln, 0.0, 0.5);
+}
+
 float3 voxel_albedo(uint block_id, int3 vkey) {
     float3 jitter = hash33i(vkey) * 2.0 - 1.0;
-    if      (block_id == BLOCK_GRASS)  return clamp(float3(0.13,0.55,0.08) + jitter*float3(0.04,0.08,0.03), 0.0, 1.0);
+    if      (block_id == BLOCK_GRASS)  return clamp(float3(0.16,0.42,0.10) + jitter*float3(0.04,0.06,0.03), 0.0, 1.0);
     else if (block_id == BLOCK_LOG)    return clamp(float3(0.38,0.22,0.09) + jitter*float3(0.06,0.05,0.03), 0.0, 1.0);
-    else if (block_id == BLOCK_LEAVES) return clamp(float3(0.12,0.45,0.07) + jitter*float3(0.05,0.12,0.04), 0.0, 1.0);
+    else if (block_id == BLOCK_LEAVES) return clamp(float3(0.13,0.38,0.09) + jitter*float3(0.05,0.10,0.04), 0.0, 1.0);
     else                               return clamp(float3(0.55,0.55,0.55) + jitter*float3(0.07,0.06,0.06), 0.0, 1.0);
 }
 
@@ -575,6 +679,14 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
 // (selects the ambient-cube face). Falls back to GI_FALLBACK where the cache
 // has no data, and fades to it near the volume edge. Cells inside solids hold
 // valid zeros, so creases darken naturally.
+// Cave-aware ambient floor: above ground the constant fallback keeps warmup
+// and out-of-cache areas lit; deep underground it collapses to near-black so
+// caves are genuinely dark until a light is brought in. Real cache data
+// (skylight at cave mouths) always wins over the fallback.
+float gi_fallback_amount() {
+    return GI_FALLBACK * lerp(1.0, 0.06, u_cave_factor);
+}
+
 float3 sample_gi_cache(float3 pos, float3 n) {
     float3 cellf = pos / float(GI_CELL_SIZE) - 0.5;
     int3   c0    = int3(floor(cellf));
@@ -606,7 +718,7 @@ float3 sample_gi_cache(float3 pos, float3 n) {
         wsum += w;
     }
 
-    float3 fallback = float3(GI_FALLBACK, GI_FALLBACK, GI_FALLBACK);
+    float3 fallback = gi_fallback_amount().xxx;
     if (wsum < 1e-4) return fallback * GI_AMBIENT_SCALE;
     float3 irr = sum / wsum;
 

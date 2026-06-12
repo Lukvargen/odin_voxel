@@ -210,6 +210,8 @@ hud_layout :: proc(gs: ^Game_State) {
         loaded  := len(gs.gpu_loaded)
         pending := worker_pool_pending_count(&gs.pool)
         hud_text(fmt.tprintf("chunks: %d loaded / %d pending", loaded, pending))
+        hud_text(fmt.tprintf("block:  %v (keys 1-5)", gs.selected_block))
+        hud_text(fmt.tprintf("brush:  %d (ctrl+scroll, ctrl+click = single)", gs.brush_radius))
 
         if !ui.options_open {
             hud_text("press O for options")
@@ -323,6 +325,17 @@ options_panel_layout :: proc(gs: ^Game_State) {
             if opt_button("VolOff", "off", !gs.vol_enabled) { gs.vol_enabled = false }
         }
 
+        // SDF entities row
+        if clay.UI(clay.ID("RowEntities"))({
+            layout = { childGap = 8, childAlignment = {y = .Center},
+                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
+        }) {
+            opt_row(fmt.tprintf("Entities: %v", gs.entities_enabled))
+            if clay.UI(clay.ID("EntSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
+            if opt_button("EntOn",  "on",  gs.entities_enabled)  { gs.entities_enabled = true  }
+            if opt_button("EntOff", "off", !gs.entities_enabled) { gs.entities_enabled = false }
+        }
+
         // Volumetric steps row
         if clay.UI(clay.ID("RowVolSteps"))({
             layout = { childGap = 8, childAlignment = {y = .Center},
@@ -346,6 +359,39 @@ options_panel_layout :: proc(gs: ^Game_State) {
             if opt_button("Rs1", "1x", gs.render_scale == 1) { gpu_set_render_scale(gs, 1) }
             if opt_button("Rs2", "2x", gs.render_scale == 2) { gpu_set_render_scale(gs, 2) }
             if opt_button("Rs4", "4x", gs.render_scale == 4) { gpu_set_render_scale(gs, 4) }
+        }
+
+        // Exposure row — pre-tonemap brightness multiplier
+        if clay.UI(clay.ID("RowExposure"))({
+            layout = { childGap = 8, childAlignment = {y = .Center},
+                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
+        }) {
+            opt_row(fmt.tprintf("Exposure: %.2f", gs.exposure))
+            if clay.UI(clay.ID("ExpSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
+            if opt_button("ExpDn", "-", true) { gs.exposure = max(gs.exposure / 1.12, 0.25) }
+            if opt_button("ExpUp", "+", true) { gs.exposure = min(gs.exposure * 1.12, 4.0) }
+        }
+
+        // Fog density row — base distance-fog density
+        if clay.UI(clay.ID("RowFog"))({
+            layout = { childGap = 8, childAlignment = {y = .Center},
+                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
+        }) {
+            opt_row(fmt.tprintf("Fog: %.4f", gs.fog_density))
+            if clay.UI(clay.ID("FogSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
+            if opt_button("FogDn", "-", true) { gs.fog_density = max(gs.fog_density / 1.3, 0.0003) }
+            if opt_button("FogUp", "+", true) { gs.fog_density = min(gs.fog_density * 1.3, 0.006) }
+        }
+
+        // Reflection bounces row (moved off keys 1-5, which are now the hotbar)
+        if clay.UI(clay.ID("RowBounces"))({
+            layout = { childGap = 8, childAlignment = {y = .Center},
+                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
+        }) {
+            opt_row(fmt.tprintf("Bounces: %d", gs.reflect_amount))
+            if clay.UI(clay.ID("BncSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
+            if opt_button("BncDn", "-", true) { gs.reflect_amount = max(gs.reflect_amount - 1, 1) }
+            if opt_button("BncUp", "+", true) { gs.reflect_amount = min(gs.reflect_amount + 1, 5) }
         }
 
         clay.TextDynamic("press O to close", clay.TextConfig({

@@ -19,6 +19,11 @@ GI_CELL_UINTS     :: 7
 GI_UPDATE_BUDGET  :: 32768 // cells re-estimated per frame
 GI_SWEEP_FRAMES   :: i32(GI_GRID_N * GI_GRID_N * GI_GRID_N / GI_UPDATE_BUDGET) // full refresh period (64)
 GI_CACHE_BUF_SIZE :: GI_GRID_N * GI_GRID_N * GI_GRID_N * GI_CELL_UINTS * size_of(u32)
+GI_REGION_FRAMES  :: i32(60)   // priority-region burst length (torch place/break);
+                               // outlasts the light intensity fades (lights.odin)
+GI_REGION_ALPHA   :: f32(0.15) // blend floor per region update — low enough that
+                               // per-frame estimate noise averages out across the
+                               // burst (0.85^60 ≈ 0 residual)
 
 // Default internal render scale (divisor of the window resolution). The scene
 // is ray traced into a (TEX_W/scale)×(TEX_H/scale) texture and upscaled to the
@@ -52,7 +57,17 @@ Camera_Uniform :: struct #packed {
     gi_cache_origin:  [3]i32, // clipmap volume origin, in cache cells
     gi_epoch:         i32,   // completed-sweep counter (rotates ray sets)
     time:             f32,   // seconds — cloud drift
-    _pad6:            [3]f32,
+    light_count:      i32,   // active point lights (0 = none)
+    exposure:         f32,   // pre-tonemap multiplier
+    fog_density:      f32,   // base distance-fog density
+    cave_factor:      f32,   // 0 surface .. 1 deep underground (CPU-smoothed)
+    sun_intensity:    f32,   // sun direct-light multiplier (was hardcoded 2.5)
+    entity_count:     i32,   // active SDF entities uploaded this frame (entities.odin)
+    _pad7:            f32,
+    gi_region_min:    [3]i32, // priority re-estimation box (cells; mode != 0)
+    gi_region_mode:   i32,    // 0 = normal sweep, 1 = region re-estimation
+    gi_region_dims:   [3]i32,
+    gi_region_alpha:  f32,    // blend floor for region updates
 }
 
 // Matches cbuffer ClearBox in gi_clear.hlsl (world-cell box, max exclusive).
@@ -165,7 +180,7 @@ gpu_init :: proc(gs: ^Game_State) {
         code_size                      = len(shader_bytes),
         entrypoint                     = "main",
         format                         = {.SPIRV},
-        num_readonly_storage_buffers   = 5, // voxel_chunk (t0), chunk_index (t1), chunk_owner (t2), voxel_mask (t3), gi_cache (t4)
+        num_readonly_storage_buffers   = 7, // voxel_chunk (t0), chunk_index (t1), chunk_owner (t2), voxel_mask (t3), gi_cache (t4), point_lights (t5), sdf_entities (t6)
         num_readwrite_storage_textures = 2, // img_output (u0), depth_output (u1)
         num_uniform_buffers            = 1, // CameraUniforms (b0)
         threadcount_x                  = 16,
@@ -184,7 +199,7 @@ gpu_init :: proc(gs: ^Game_State) {
         entrypoint                     = "main",
         format                         = {.SPIRV},
         num_readonly_storage_textures  = 1, // depth_input (t0)
-        num_readonly_storage_buffers   = 4, // voxel buffers (t1..t4)
+        num_readonly_storage_buffers   = 5, // voxel buffers (t1..t4), point_lights (t5)
         num_readwrite_storage_textures = 1, // vol_output (u0)
         num_uniform_buffers            = 1,
         threadcount_x = 16, threadcount_y = 16, threadcount_z = 1,
@@ -232,7 +247,7 @@ gpu_init :: proc(gs: ^Game_State) {
         code_size                     = len(giu_bytes),
         entrypoint                    = "main",
         format                        = {.SPIRV},
-        num_readonly_storage_buffers  = 4, // voxel buffers (t0..t3)
+        num_readonly_storage_buffers  = 5, // voxel buffers (t0..t3), point_lights (t4)
         num_readwrite_storage_buffers = 1, // gi_cache (u0)
         num_uniform_buffers           = 1,
         threadcount_x = 256, threadcount_y = 1, threadcount_z = 1,
@@ -259,6 +274,20 @@ gpu_init :: proc(gs: ^Game_State) {
         size  = GI_CACHE_BUF_SIZE,
     })
     assert(gs.gi_cache_buf != nil, "Failed to create GI cache buffer")
+
+    // Point-light list (torches). Tiny; re-uploaded whenever lights exist.
+    gs.light_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
+        usage = {.COMPUTE_STORAGE_READ},
+        size  = LIGHT_BUF_SIZE,
+    })
+    assert(gs.light_buf != nil, "Failed to create light buffer")
+
+    // SDF entity list (entities.odin). Tiny; re-uploaded whenever entities exist.
+    gs.entity_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
+        usage = {.COMPUTE_STORAGE_READ},
+        size  = ENTITY_BUF_SIZE,
+    })
+    assert(gs.entity_buf != nil, "Failed to create entity buffer")
 
     // Scene color/depth/volumetric textures, sized to the current internal
     // render resolution (gs.render_w/h). Recreated on render-scale change.
@@ -571,19 +600,57 @@ gpu_render :: proc(gs: ^Game_State) {
         gi_cache_origin = new_origin,
         gi_epoch        = gs.gi_epoch,
         time            = f32(SDL.GetTicks()) / 1000.0,
+        light_count     = gs.light_count,
+        exposure        = gs.exposure,
+        fog_density     = gs.fog_density,
+        cave_factor     = gs.cave_factor,
+        sun_intensity   = gs.sun_intensity,
+        entity_count    = gs.entity_count,
     }
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
-    ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}
-    // The tracer additionally reads the GI cache (t4).
-    ro_bufs_tracer := [5]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.gi_cache_buf}
+    // Shared by gi_update + volumetric: voxel buffers + point lights last.
+    ro_bufs := [5]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.light_buf}
+    // The tracer additionally reads the GI cache (t4), lights (t5) and the
+    // SDF entity list (t6).
+    ro_bufs_tracer := [7]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.gi_cache_buf, gs.light_buf, gs.entity_buf}
 
     // --- Pass 0: GI cache progressive update (skipped while GI is off) -----
     if gs.gi_enabled {
+        // Priority region burst (torch placed/removed): re-estimate every
+        // cell of the box THIS frame with a raised blend floor, so torch
+        // lighting crossfades in/out over ~GI_REGION_FRAMES frames instead
+        // of popping (hard clear) or ghosting (sweep-rate EMA).
+        if gs.gi_region_frames > 0 {
+            lo := new_origin
+            hi := new_origin + n
+            bmin := [3]i32{max(gs.gi_region_min.x, lo.x), max(gs.gi_region_min.y, lo.y), max(gs.gi_region_min.z, lo.z)}
+            bmax := [3]i32{min(gs.gi_region_max.x, hi.x), min(gs.gi_region_max.y, hi.y), min(gs.gi_region_max.z, hi.z)}
+            dims := bmax - bmin
+            if dims.x > 0 && dims.y > 0 && dims.z > 0 {
+                runiform := uniform
+                runiform.gi_region_mode  = 1
+                runiform.gi_region_min   = bmin
+                runiform.gi_region_dims  = dims
+                runiform.gi_region_alpha = GI_REGION_ALPHA
+                SDL.PushGPUComputeUniformData(cmd, 0, &runiform, size_of(runiform))
+                cells := u32(dims.x * dims.y * dims.z)
+                rw_gi_r := SDL.GPUStorageBufferReadWriteBinding{buffer = gs.gi_cache_buf}
+                pr := SDL.BeginGPUComputePass(cmd, nil, 0, &rw_gi_r, 1)
+                SDL.BindGPUComputePipeline(pr, gs.gi_update_pipeline)
+                SDL.BindGPUComputeStorageBuffers(pr, 0, raw_data(ro_bufs[:]), 5)
+                SDL.DispatchGPUCompute(pr, (cells + 255) / 256, 1, 1)
+                SDL.EndGPUComputePass(pr)
+                // Restore the normal (mode 0) uniforms for all later passes.
+                SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
+            }
+            gs.gi_region_frames -= 1
+        }
+
         rw_gi := SDL.GPUStorageBufferReadWriteBinding{buffer = gs.gi_cache_buf}
         p0 := SDL.BeginGPUComputePass(cmd, nil, 0, &rw_gi, 1)
         SDL.BindGPUComputePipeline(p0, gs.gi_update_pipeline)
-        SDL.BindGPUComputeStorageBuffers(p0, 0, raw_data(ro_bufs[:]), 4)
+        SDL.BindGPUComputeStorageBuffers(p0, 0, raw_data(ro_bufs[:]), 5)
         SDL.DispatchGPUCompute(p0, GI_UPDATE_BUDGET / 256, 1, 1)
         SDL.EndGPUComputePass(p0)
     }
@@ -603,7 +670,7 @@ gpu_render :: proc(gs: ^Game_State) {
 
     p1 := SDL.BeginGPUComputePass(cmd, raw_data(rw_main[:]), 2, nil, 0)
     SDL.BindGPUComputePipeline(p1, gs.pipeline)
-    SDL.BindGPUComputeStorageBuffers(p1, 0, raw_data(ro_bufs_tracer[:]), 5)
+    SDL.BindGPUComputeStorageBuffers(p1, 0, raw_data(ro_bufs_tracer[:]), 7)
     SDL.DispatchGPUCompute(p1, groups_x, groups_y, 1)
     SDL.EndGPUComputePass(p1)
 
@@ -614,7 +681,7 @@ gpu_render :: proc(gs: ^Game_State) {
     SDL.BindGPUComputePipeline(p2, gs.vol_pipeline)
     vol_ro_tex := [1]^SDL.GPUTexture{ gs.depth_texture }
     SDL.BindGPUComputeStorageTextures(p2, 0, raw_data(vol_ro_tex[:]), 1)
-    SDL.BindGPUComputeStorageBuffers(p2, 0, raw_data(ro_bufs[:]), 4)
+    SDL.BindGPUComputeStorageBuffers(p2, 0, raw_data(ro_bufs[:]), 5)
     SDL.DispatchGPUCompute(p2, hgroups_x, hgroups_y, 1)
     SDL.EndGPUComputePass(p2)
 
@@ -664,6 +731,8 @@ gpu_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.owner_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.mask_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.gi_cache_buf)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.light_buf)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.entity_buf)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.vol_pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.comp_pipeline)
