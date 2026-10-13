@@ -41,7 +41,7 @@ Camera_Uniform :: struct #packed {
     cave_factor:    f32,   // 0 surface .. 1 deep underground (CPU-smoothed)
     sun_intensity:  f32,   // sun direct-light multiplier
     far_enabled:    i32,
-    ent_debug:      i32,   // bench: 1 = skip entity view rays, 2 = skip entity shadows
+    ent_debug:      i32,   // bench: 1 = skip entity view rays, 2 = skip entity shadows, 4 = no cumulus
     _pad5:          f32,
     near_circle:    [4]f32, // near (voxel) region: XZ center, radius in voxels, unused
     thermals:       [MAX_SKY_THERMALS][4]f32, // cumulus over thermals: XZ centre at cloud base, radius, strength

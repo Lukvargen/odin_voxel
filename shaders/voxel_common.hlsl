@@ -349,20 +349,21 @@ float fbm2(float2 p) {
 // into the haze with distance. Returns colour + coverage.
 #define CUMULUS_BASE 240.0
 float4 cumulus(float3 ro, float3 dir, float3 Ln) {
-    if (u_thermal_count.x == 0 || abs(dir.y) < 0.01) return float4(0, 0, 0, 0);
+    if (u_thermal_count.x == 0 || (u_ent_debug & 4) != 0 || abs(dir.y) < 0.01) return float4(0, 0, 0, 0);
     float t = (CUMULUS_BASE - ro.y) / dir.y;
     if (t <= 0.0) return float4(0, 0, 0, 0);
     float2 p = ro.xz + dir.xz * t;
-    float den = 0.0;
+    // Nearest cloud first (cheap), then one noise evaluation for the edge.
+    float best = 2.0;
+    float2 seed = float2(0, 0);
     for (int i = 0; i < u_thermal_count.x; i++) {
         float4 th = u_thermals[i];
-        float2 d = p - th.xy;
-        float dd = dot(d, d);
-        if (dd > th.z * th.z * 2.0) continue;
-        float n = fbm2(p * 0.03 + th.xy * 0.013);
-        float k = 1.0 - sqrt(dd) / th.z + (n - 0.5) * 1.1;
-        den = max(den, smoothstep(0.0, 0.45, k));
+        float r = length(p - th.xy) / th.z;
+        if (r < best) { best = r; seed = th.xy; }
     }
+    if (best >= 1.45) return float4(0, 0, 0, 0);
+    float n = fbm2(p * 0.03 + seed * 0.013);
+    float den = smoothstep(0.0, 0.45, 1.0 - best + (n - 0.5) * 1.1);
     if (den <= 0.0) return float4(0, 0, 0, 0);
     float3 lit  = float3(1.03, 1.01, 0.97) * lerp(float3(1, 1, 1), sun_tint_d(Ln), 0.3);
     float3 base = float3(0.66, 0.70, 0.79);

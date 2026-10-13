@@ -198,8 +198,9 @@ bench_entity_cost :: proc(gs: ^Game_State) {
         {"no entity view rays", true,  1},
         {"no entity shadows",   true,  2},
         {"neither (traversal setup only)", true, 3},
+        {"no cumulus clouds",   true,  4},
     }
-    best: [5]f64
+    best: [6]f64
     for &b in best { b = 1e9 }
     for _ in 0 ..< 6 {
         for c, i in cfgs {

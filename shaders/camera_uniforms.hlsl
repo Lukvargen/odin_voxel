@@ -24,7 +24,7 @@ cbuffer CameraUniforms : register(b0, space2) {
     float  u_cave_factor;
     float  u_sun_intensity;
     int    u_far_enabled;
-    int    u_ent_debug;      // bench: 1 = skip entity view rays, 2 = skip entity shadows
+    int    u_ent_debug;      // bench: 1 = skip entity view rays, 2 = skip entity shadows, 4 = no cumulus
     float  _pad5;
     float4 u_near_circle;    // near (voxel) region: XZ center, radius in voxels, unused
     float4 u_thermals[16];   // cumulus over thermals: XZ centre at cloud base, radius, strength (MAX_SKY_THERMALS)
