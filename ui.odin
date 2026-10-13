@@ -209,7 +209,7 @@ hud_layout :: proc(gs: ^Game_State) {
 
         pending := worker_pool_pending_count(&gs.pool)
         hud_text(fmt.tprintf("columns: %d loaded / %d pending", len(gs.columns), pending))
-        hud_text(fmt.tprintf("block:  %v (keys 1-5)", gs.selected_block))
+        hud_text(fmt.tprintf("block:  %v (keys 1-0)", gs.selected_block))
         hud_text(fmt.tprintf("brush:  %d (ctrl+scroll, ctrl+click = single)", gs.brush_radius))
 
         if !ui.options_open {

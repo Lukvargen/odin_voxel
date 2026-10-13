@@ -110,12 +110,37 @@ WORLD_Y_MIN       :: WORLD_CHUNK_Y_MIN * CHUNK_VOXELS                 // -256
 WORLD_Y_MAX       :: (WORLD_CHUNK_Y_MIN + CHUNKS_H) * CHUNK_VOXELS    // +256
 
 Block_Type :: enum u8 {
-    Air    = 0,
-    Grass  = 1,
-    Stone  = 2,
-    Log    = 3,
-    Leaves = 4,
-    Torch  = 5,   // emissive: block light source (light.odin)
+    Air           = 0,
+    Grass         = 1,
+    Stone         = 2,
+    Log           = 3,
+    Leaves        = 4,
+    Torch         = 5,   // emissive: block light source (light.odin)
+    Dirt          = 6,
+    Sand          = 7,
+    Sandstone     = 8,
+    Snow          = 9,
+    Ice           = 10,
+    Water         = 11,  // not solid; seen through (shaders), lets sky light in
+    Gravel        = 12,
+    Terracotta    = 13,  // banded by height in the shader
+    Red_Sand      = 14,
+    Coal_Ore      = 15,
+    Iron_Ore      = 16,
+    Gold_Ore      = 17,
+    Spruce_Log    = 18,
+    Spruce_Leaves = 19,
+    Cactus        = 20,
+    // Must stay below 32: the far LOD stores block ids in 5 bits.
+}
+
+// Blocks the player and entities collide with.
+block_solid :: #force_inline proc(b: u8) -> bool {
+    return b != u8(Block_Type.Air) && b != u8(Block_Type.Water)
+}
+
+block_is_leaves :: #force_inline proc(b: u8) -> bool {
+    return b == u8(Block_Type.Leaves) || b == u8(Block_Type.Spruce_Leaves)
 }
 
 // One 8x8x8 chunk. Uniform chunks (all air, all stone) keep no voxel array.
@@ -149,13 +174,14 @@ chunk_set_voxel :: proc(c: ^Chunk, vi: int, v: u8) -> bool {
     return true
 }
 
-// Drop the voxel array of a chunk that became uniform. Only air and plain
-// opaque blocks can be uniform: the shader treats a uniform chunk as one
-// solid box, which would be wrong for see-through leaves or emitters.
+// Drop the voxel array of a chunk that became uniform. Only air, water and
+// plain opaque blocks can be uniform: the shader treats a uniform chunk as
+// one solid box (rays inside water skip it whole), which would be wrong for
+// see-through leaves or emitters.
 chunk_compact :: proc(c: ^Chunk) {
     if c.voxels == nil { return }
     first := c.voxels[0]
-    if first != 0 && (!block_opaque(first) || block_emission(first) > 0) { return }
+    if first != 0 && first != u8(Block_Type.Water) && (!block_opaque(first) || block_emission(first) > 0) { return }
     for v in c.voxels { if v != first { return } }
     free(c.voxels)
     c.voxels = nil
@@ -196,14 +222,9 @@ LOAD_RADIUS_Y   :: 7
 // with zero new control flow / streaming risk. Deep digging hits solid stone
 // below -64 (acceptable; deeper caves would need on-demand vertical gen).
 CAVE_FLOOR_Y    :: -64
+CAVE_CEIL_Y     :: 110          // mountains are solid above this (ravines still cut in)
 CAVE_TOP_MARGIN :: 6            // keep caves this far below the surface
 CAVE_THRESHOLD  :: 0.32         // higher = fewer/smaller caves
-
-// The grass/stone speckle 3D-noise only affects the visible surface skin.
-// Solid voxels deeper than this below the surface are unconditionally Stone
-// (no noise) — they're only ever seen as a cave wall, which reads as stone
-// anyway. Cave carving keeps full per-voxel noise (future ores live there).
-SURFACE_SKIN :: 6
 
 // Floor division — rounds toward -inf, unlike Odin's / which truncates toward zero.
 floor_div :: proc(a, b: int) -> int {
@@ -228,7 +249,7 @@ ring_slot :: proc(wcx, wcy, wcz: int) -> int {
 }
 
 // Initialise flat CPU/GPU arrays, then block until the visible radius is loaded.
-// Chunks are complete (terrain + trees) the moment generate_chunk_at returns,
+// Chunks are complete (terrain + trees) the moment generate_column_at returns,
 // so there is no separate tree pass and no cross-chunk bookkeeping.
 generate_world :: proc(gs: ^Game_State) {
     t0 := time.now()
@@ -401,91 +422,88 @@ streaming_idle :: proc(gs: ^Game_State) -> bool {
 }
 
 // Generate an entire XZ column: all CHUNKS_H Y chunks at world chunk coord
-// (wcx, *, wcz). Terrain noise and the tree scan run once for the whole column
-// instead of once per Y chunk — eliminating the 16× redundancy that dominated
-// streaming cost. Chunks that end up uniform keep no voxel array.
+// (wcx, *, wcz). Terrain (terrain.odin) is sampled once per voxel column, so
+// the vertical fill is table lookups plus cave noise; chunks that are all
+// air, all water or all stone skip the per-voxel fill entirely.
 generate_column_at :: proc(wcx, wcz: int) -> ^Column {
     column := new(Column)
 
     gx := wcx * CHUNK_VOXELS
     gz := wcz * CHUNK_VOXELS
 
-    // Surface height for the 8×8 footprint — computed once, reused for all Y.
-    // Track min/max so whole Y-chunks above the surface (all air) or far below
-    // it (all solid stone, no caves) can be skipped without a voxel fill.
+    // Terrain for the footprint plus a 1-voxel border (for slopes).
     t_noise := time.tick_now()
-    grass_cache: [CHUNK_VOXELS * CHUNK_VOXELS]f64
-    surf_min := f64(1e30)
-    surf_max := f64(-1e30)
+    G :: CHUNK_VOXELS + 2
+    samples: [G * G]Terrain_Sample
+    terrain_grid(gx - 1, gz - 1, G, G, samples[:])
+    N :: CHUNK_VOXELS * CHUNK_VOXELS
+    height: [N]int
+    layers: [N]Surface_Layers
+    surf_min, surf_max, deep_min := max(int), min(int), max(int)
     for z in 0 ..< CHUNK_VOXELS {
         for x in 0 ..< CHUNK_VOXELS {
-            wx := f64(gx + x)
-            wz := f64(gz + z)
-            n0 := f64(noise.noise_2d(2, {wx / 600.0, wz / 600.0})) * 0.5 + 0.5
-            n1 := f64(noise.noise_2d(0, {wx / 280.0, wz / 280.0})) * 0.5 + 0.5
-            n2 := f64(noise.noise_2d(1, {wx / 70.0,  wz / 70.0}))  * 0.5 + 0.5
-            height := n0 * 0.45 + n1 * n0 * 0.45 + n2 * 0.10
-            s := 10.0 + height * 90.0
-            grass_cache[x + z * CHUNK_VOXELS] = s
-            if s < surf_min { surf_min = s }
-            if s > surf_max { surf_max = s }
+            si := (x + 1) + (z + 1) * G
+            s := samples[si]
+            slope := terrain_slope(s.height, samples[si - 1].height, samples[si + 1].height,
+                                   samples[si - G].height, samples[si + G].height)
+            i := x + z * CHUNK_VOXELS
+            height[i] = s.height
+            layers[i] = surface_layers(s, slope)
+            surf_min = min(surf_min, s.height)
+            surf_max = max(surf_max, s.height)
+            deep_min = min(deep_min, s.height - layers[i].filler_depth)
         }
     }
+    top_max := surf_min < SEA_LEVEL ? max(surf_max, SEA_LEVEL) : surf_max
     profile_add(.Terrain_Noise, t_noise)
 
     t_fill := time.tick_now()
     for iy in 0 ..< CHUNKS_H {
         chunk := &column.chunks[iy]
-        wcy := iy + WORLD_CHUNK_Y_MIN
-        gy  := wcy * CHUNK_VOXELS         // world voxel Y of this chunk's base
-        cy0 := f64(gy)
-        cy1 := f64(gy + CHUNK_VOXELS)     // exclusive top
+        gy  := (iy + WORLD_CHUNK_Y_MIN) * CHUNK_VOXELS // world voxel Y of this chunk's base
+        gy1 := gy + CHUNK_VOXELS                       // exclusive top
 
-        // Fast path 1: chunk entirely above the highest surface → all Air
-        // (the zeroed fill).
-        if cy0 >= surf_max { continue }
-
-        // Fast path 2: chunk entirely below the cave band → solid Stone, no
-        // per-voxel noise needed.
-        if cy1 <= f64(CAVE_FLOOR_Y) {
+        // Uniform chunks: all air above everything, all water between the
+        // highest ground and the (maybe frozen) top layer of the sea, all
+        // stone below the surface layers where no caves are carved.
+        if gy >= top_max { continue }
+        if gy >= surf_max && gy1 <= SEA_LEVEL - 1 {
+            chunk.fill = u8(Block_Type.Water)
+            continue
+        }
+        if gy1 <= deep_min && (gy1 <= CAVE_FLOOR_Y || gy >= CAVE_CEIL_Y) {
             chunk.fill = u8(Block_Type.Stone)
             continue
         }
         chunk.voxels = new([VOXELS_PER_BRICK]u8)
 
-        // Mixed chunk: per-voxel terrain + cave carve.
         for z in 0 ..< CHUNK_VOXELS {
-            for y in 0 ..< CHUNK_VOXELS {
-                for x in 0 ..< CHUNK_VOXELS {
-                    wx := f64(gx + x)
-                    wy := f64(gy + y)
-                    wz := f64(gz + z)
-                    grass_level := grass_cache[x + z * CHUNK_VOXELS]
-                    i := x + y * CHUNK_VOXELS + z * CHUNK_VOXELS * CHUNK_VOXELS
-                    if wy >= grass_level {
-                        chunk.voxels[i] = u8(Block_Type.Air)
-                        continue
-                    }
-                    // Solid. Carve caves with a 3D noise lobe inside the cave
-                    // band (deep enough below the surface, above the floor).
-                    if wy > f64(CAVE_FLOOR_Y) && wy < grass_level - CAVE_TOP_MARGIN {
-                        cave := noise.noise_3d_improve_xy(7, {wx * 0.04, wy * 0.05, wz * 0.04})
-                        if cave > CAVE_THRESHOLD {
-                            chunk.voxels[i] = u8(Block_Type.Air)
-                            continue
+            for x in 0 ..< CHUNK_VOXELS {
+                ci := x + z * CHUNK_VOXELS
+                h  := height[ci]
+                l  := layers[ci]
+                cave_top := min(h - CAVE_TOP_MARGIN, CAVE_CEIL_Y)
+                for y in 0 ..< CHUNK_VOXELS {
+                    wy := gy + y
+                    b: Block_Type
+                    switch {
+                    case wy >= h:
+                        if wy < SEA_LEVEL {
+                            b = l.frozen && wy == SEA_LEVEL - 1 ? .Ice : .Water
                         }
+                    case wy > CAVE_FLOOR_Y && wy < cave_top &&
+                         noise.noise_3d_improve_xy(7, {f64(gx + x) * 0.04, f64(wy) * 0.05, f64(gz + z) * 0.04}) > CAVE_THRESHOLD:
+                        // cave: air
+                    case wy == h - 1:
+                        b = l.top
+                    case wy >= h - l.filler_depth:
+                        b = l.filler
+                    case wy > CAVE_FLOOR_Y && wy < CAVE_CEIL_Y:
+                        b = ore_at(gx + x, wy, gz + z)
+                    case:
+                        b = .Stone
                     }
-                    // Deeper than the surface skin: unconditionally Stone, no
-                    // noise (only ever seen as a cave wall = stone anyway).
-                    if wy < grass_level - SURFACE_SKIN {
-                        chunk.voxels[i] = u8(Block_Type.Stone)
-                        continue
-                    }
-                    // Surface skin: grass with the stone-speckle 3D-noise.
-                    chunk.voxels[i] = u8(Block_Type.Grass)
-                    if noise.noise_3d_improve_xy(0, {wx * 0.05, wy * 0.05, wz * 0.05}) > 0.4 {
-                        chunk.voxels[i] = u8(Block_Type.Stone)
-                    }
+                    chunk.voxels[x + y * CHUNK_VOXELS + z * CHUNK_VOXELS * CHUNK_VOXELS] = u8(b)
                 }
             }
         }
@@ -498,10 +516,10 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
     t_scan := time.tick_now()
     for wz in gz - TREE_VOXEL_REACH ..< gz + CHUNK_VOXELS + TREE_VOXEL_REACH {
         for wx in gx - TREE_VOXEL_REACH ..< gx + CHUNK_VOXELS + TREE_VOXEL_REACH {
-            if !should_place_tree(wx, wz) { continue }
-            surface_y := surface_height_at(wx, wz) - 1 // top solid voxel
+            kind, base := tree_at(wx, wz)
+            if kind == .None { continue }
             t_gen := time.tick_now()
-            generate_tree(&tgt, wx, surface_y + 1, wz, wx * 1000 + wz)
+            generate_tree_kind(&tgt, kind, wx, base, wz)
             profile_add(.Tree_Generate, t_gen)
         }
     }
@@ -510,20 +528,7 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
     return column
 }
 
-// Tree-band bounds derived from the height formula and tree dimensions.
-TREE_MIN_SURFACE_Y :: 10                              // surface_height_at min
-TREE_MAX_HEIGHT    :: 60                              // trunk + branch + crown reach
-TREE_MAX_TOP_Y     :: 100 + TREE_MAX_HEIGHT           // surface max + tree reach
-
-// Same height formula as generate_chunk_at — pure noise, no chunk lookup needed.
-surface_height_at :: proc(wx, wz: int) -> int {
-    fwx := f64(wx); fwz := f64(wz)
-    n0 := f64(noise.noise_2d(2, {fwx / 600.0, fwz / 600.0})) * 0.5 + 0.5
-    n1 := f64(noise.noise_2d(0, {fwx / 280.0, fwz / 280.0})) * 0.5 + 0.5
-    n2 := f64(noise.noise_2d(1, {fwx / 70.0,  fwz / 70.0}))  * 0.5 + 0.5
-    h  := n0 * 0.45 + n1 * n0 * 0.45 + n2 * 0.10
-    return int(10.0 + h * 90.0)
-}
+TREE_MAX_HEIGHT :: 60 // big oak: trunk + branch + crown reach above the base
 
 // Where generate_tree writes: a full XZ column being generated (all CHUNKS_H
 // Y chunks share one tree scan, writes clipped to the column's 8-voxel
@@ -574,19 +579,20 @@ tree_hash :: proc(x, z, seed: int) -> f64 {
     return f64(h & 0xFFFFFF) / f64(0x1000000)
 }
 
-// Place leaves without overwriting logs. Clipped to the footprint.
-place_leaves :: proc(t: ^Tree_Target, wx, wy, wz: int) {
+// Place leaves only into air or other leaves, never over logs or ground.
+// Clipped to the footprint.
+place_leaves :: proc(t: ^Tree_Target, wx, wy, wz: int, block := Block_Type.Leaves) {
     lx := wx - t.ox; lz := wz - t.oz
     if lx < 0 || lx >= t.size { return }
     if lz < 0 || lz >= t.size { return }
-    if t.far != nil { far_record(t.far, lx, wy, lz, u8(Block_Type.Leaves)); return }
+    if t.far != nil { far_record(t.far, lx, wy, lz, u8(block)); return }
     wcy := floor_div(wy, CHUNK_VOXELS)
     iy  := chunk_y_index(wcy)
     if iy < 0 { return }
     ly := wy - wcy * CHUNK_VOXELS
     vi := lx + ly*CHUNK_VOXELS + lz*CHUNK_VOXELS*CHUNK_VOXELS
-    if chunk_voxel(&t.col.chunks[iy], vi) != u8(Block_Type.Log) {
-        chunk_set_voxel(&t.col.chunks[iy], vi, u8(Block_Type.Leaves))
+    if v := chunk_voxel(&t.col.chunks[iy], vi); v == 0 || block_is_leaves(v) {
+        chunk_set_voxel(&t.col.chunks[iy], vi, u8(block))
     }
 }
 
@@ -780,10 +786,110 @@ generate_tree :: proc(tgt: ^Tree_Target, bx, by, bz: int, rng_seed: int) {
     place_crown(tgt, tip_x, tip_y, tip_z, crown_r, crown_ry, crown_r, rng_seed + 9999)
 }
 
-should_place_tree :: proc(wx, wz: int) -> bool {
-    h := tree_hash(wx, wz, 42)
-    // ~1 tree per 30×30 area on average
-    return h < (1.0 / (30.0 * 30.0))
+generate_tree_kind :: proc(tgt: ^Tree_Target, kind: Tree_Kind, bx, by, bz: int) {
+    seed := bx * 1000 + bz
+    switch kind {
+    case .None:
+    case .Oak:       generate_tree(tgt, bx, by, bz, seed)
+    case .Small_Oak: generate_small_oak(tgt, bx, by, bz, seed)
+    case .Bush:      generate_bush(tgt, bx, by, bz, seed)
+    case .Spruce:    generate_spruce(tgt, bx, by, bz, seed)
+    case .Cactus:    generate_cactus(tgt, bx, by, bz, seed)
+    }
+}
+
+@(private="file")
+tree_rand :: proc(rng: ^int, lo, hi: f64) -> f64 {
+    rng^ += 1
+    return lo + tree_hash(rng^, rng^ * 7, 13) * (hi - lo)
+}
+
+// A Minecraft-sized oak: a one-voxel trunk and a lumpy round crown.
+generate_small_oak :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 6, by, bz - 6, bx + 6, by + 16, bz + 6) { return }
+    rng := seed
+    h := int(tree_rand(&rng, 5, 9))
+    for y in 0 ..< h { set_voxel_world(tgt, bx, by + y, bz, .Log) }
+    r := tree_rand(&rng, 2.6, 3.6)
+    place_crown(tgt, f64(bx), f64(by + h), f64(bz), r, r * 0.8, r, seed + 5)
+    place_crown(tgt, f64(bx) + tree_rand(&rng, -1.5, 1.5), f64(by + h) - 1.5, f64(bz) + tree_rand(&rng, -1.5, 1.5),
+                r * 0.8, r * 0.6, r * 0.8, seed + 6)
+}
+
+// A low leafy clump around a stub of trunk.
+generate_bush :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 4, by, bz - 4, bx + 4, by + 4, bz + 4) { return }
+    rng := seed
+    set_voxel_world(tgt, bx, by, bz, .Log)
+    r := tree_rand(&rng, 1.6, 2.4)
+    place_crown(tgt, f64(bx), f64(by) + 0.8, f64(bz), r, r * 0.65, r, seed + 3)
+}
+
+// Spruce: a straight trunk (2x2 when tall) under tiers of needles that
+// narrow toward a pointed top.
+generate_spruce :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 7, by, bz - 7, bx + 8, by + 30, bz + 8) { return }
+    rng := seed
+    h := int(tree_rand(&rng, 9, 24))
+    thick := h >= 17
+    for y in 0 ..< h {
+        set_voxel_world(tgt, bx, by + y, bz, .Spruce_Log)
+        if thick {
+            set_voxel_world(tgt, bx + 1, by + y, bz, .Spruce_Log)
+            set_voxel_world(tgt, bx, by + y, bz + 1, .Spruce_Log)
+            set_voxel_world(tgt, bx + 1, by + y, bz + 1, .Spruce_Log)
+        }
+    }
+    cx := f64(bx) + (thick ? 1.0 : 0.5)
+    cz := f64(bz) + (thick ? 1.0 : 0.5)
+    y0   := by + int(tree_rand(&rng, 2, 4))
+    top  := by + h + 1
+    rmax := tree_rand(&rng, 3.2, 4.2) + (thick ? 1.5 : 0)
+    tier := tree_rand(&rng, 2.6, 3.6)
+    for y in y0 ..= top {
+        f := f64(y - y0) / f64(top - y0)   // 0 at the lowest tier .. 1 at the tip
+        k := f64(top - y) / tier
+        in_tier := k - math.floor(k)       // 0 at a tier's top .. 1 at its flared base
+        r  := rmax * (1 - f) * (0.55 + 0.45 * in_tier) + (thick ? 1.1 : 0.6)
+        ir := int(math.ceil(r)) + 1
+        for dz in -ir ..= ir {
+            for dx in -ir ..= ir {
+                wx := int(math.floor(cx)) + dx
+                wz := int(math.floor(cz)) + dz
+                ddx := f64(wx) + 0.5 - cx
+                ddz := f64(wz) + 0.5 - cz
+                rr := r + tree_hash(wx, wz, seed + y) * 0.9 - 0.3
+                if ddx*ddx + ddz*ddz <= rr * rr {
+                    place_leaves(tgt, wx, y, wz, .Spruce_Leaves)
+                }
+            }
+        }
+    }
+    place_leaves(tgt, int(math.floor(cx)), top + 1, int(math.floor(cz)), .Spruce_Leaves)
+}
+
+// Cactus: a green column, sometimes with an arm or two.
+generate_cactus :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 3, by, bz - 3, bx + 3, by + 8, bz + 3) { return }
+    rng := seed
+    h := int(tree_rand(&rng, 3, 7))
+    for y in 0 ..< h { set_voxel_world(tgt, bx, by + y, bz, .Cactus) }
+    DIRS :: [4][2]int{{1, 0}, {0, 1}, {-1, 0}, {0, -1}}
+    dirs := DIRS
+    first := int(tree_rand(&rng, 0, 4))
+    for a in 0 ..< 2 {
+        if h < 4 || tree_rand(&rng, 0, 1) < 0.5 { continue }
+        d := dirs[(first + a * 2) & 3] // arms on opposite sides
+        ay := by + int(tree_rand(&rng, 1, f64(h - 2)))
+        set_voxel_world(tgt, bx + d.x, ay, bz + d.y, .Cactus)
+        arm := int(tree_rand(&rng, 1, 3))
+        for y in 0 ..= arm { set_voxel_world(tgt, bx + 2*d.x, ay + y, bz + 2*d.y, .Cactus) }
+    }
+}
+
+// True if the voxel blocks movement (water does not).
+solid_at :: proc(gs: ^Game_State, wx, wy, wz: int) -> bool {
+    return block_solid(u8(get_voxel(gs, wx, wy, wz)))
 }
 
 get_voxel :: proc(gs: ^Game_State, wx, wy, wz: int) -> u32 {
@@ -819,7 +925,7 @@ raycast_voxel :: proc(gs: ^Game_State, origin, dir: [3]f32, max_dist: f32) -> (h
     nx, ny, nz := 0, 0, 0
 
     for t := 0.0; t < f64(max_dist); {
-        if get_voxel(gs, xi, yi, zi) != 0 {
+        if block_solid(u8(get_voxel(gs, xi, yi, zi))) {
             return {xi, yi, zi}, {nx, ny, nz}, true
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {

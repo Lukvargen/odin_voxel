@@ -17,7 +17,7 @@ import "core:time"
 // Light is not saved; it is recomputed on load.
 
 SAVE_DIR          :: "saves/world"
-SAVE_MAGIC        :: "VXC1"
+SAVE_MAGIC        :: "VXC2" // VXC1 saves predate biome terrain and are ignored
 AUTOSAVE_INTERVAL :: 30 * time.Second
 COLUMN_VOXELS     :: CHUNKS_H * VOXELS_PER_BRICK
 

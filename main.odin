@@ -2,6 +2,8 @@ package main
 
 import "core:fmt"
 import "core:os"
+import "core:strconv"
+import "core:strings"
 import "core:time"
 import SDL "vendor:sdl3"
 
@@ -83,7 +85,7 @@ Game_State :: struct {
     fog_density:    f32,   // base distance-fog density (options panel)
     cave_factor:    f32,   // 0 surface .. 1 deep underground, smoothed per frame
     sun_intensity:  f32,   // sun direct-light multiplier
-    selected_block: Block_Type, // hotbar selection (keys 1-5)
+    selected_block: Block_Type, // hotbar selection (keys 1-0)
 
     // SDF entities (entities.odin)
     entities:         [dynamic]Entity,
@@ -124,7 +126,21 @@ main :: proc() {
     gs.brush_radius   = BRUSH_RADIUS
     gs.entities_enabled = true
     gs.far_enabled      = true
-    gs.camera.pos     = {0, 80, 0}
+    gs.camera.pos     = find_spawn()
+    if bench {
+        // bench [quick] [at=x,z] [shot_dir]
+        for a in os.args[2:] {
+            switch {
+            case a == "quick": bench_quick = true
+            case strings.has_prefix(a, "at="):
+                xz := strings.split(a[3:], ",", context.temp_allocator)
+                x, _ := strconv.parse_int(xz[0])
+                z, _ := strconv.parse_int(xz[1])
+                gs.camera.pos = {f32(x) + 0.5, f32(surface_height_at(x, z)) + 3, f32(z) + 0.5}
+            case: bench_shot_dir = a
+            }
+        }
+    }
     gs.camera.yaw     = 0
     gs.camera.pitch   = -20
     gs.camera.fly_mode = false // start in walk mode
@@ -161,9 +177,6 @@ main :: proc() {
     defer delete(gs.entities)
 
     if bench {
-        for a in os.args[2:] {
-            if a == "quick" { bench_quick = true } else { bench_shot_dir = a }
-        }
         bench_run(&gs)
         return
     }
@@ -233,10 +246,15 @@ main :: proc() {
                 // Hotbar: block selection for left-click placement.
                 // (Reflection bounces moved to the options panel.)
                 case SDL.K_1: gs.selected_block = .Stone
-                case SDL.K_2: gs.selected_block = .Grass
-                case SDL.K_3: gs.selected_block = .Log
-                case SDL.K_4: gs.selected_block = .Leaves
-                case SDL.K_5: gs.selected_block = .Torch
+                case SDL.K_2: gs.selected_block = .Dirt
+                case SDL.K_3: gs.selected_block = .Grass
+                case SDL.K_4: gs.selected_block = .Sand
+                case SDL.K_5: gs.selected_block = .Sandstone
+                case SDL.K_6: gs.selected_block = .Log
+                case SDL.K_7: gs.selected_block = .Leaves
+                case SDL.K_8: gs.selected_block = .Snow
+                case SDL.K_9: gs.selected_block = .Terracotta
+                case SDL.K_0: gs.selected_block = .Torch
                 case SDL.K_SPACE:
                     if !event.key.repeat {
                         press_time := SDL.GetTicks()
@@ -299,6 +317,7 @@ main :: proc() {
         if gs.camera.fly_mode && kb[SDL.Scancode.SPACE] {
             gs.jump_pressed = true // reuse as move_up in fly
         }
+        gs.camera.swim_up = kb[SDL.Scancode.SPACE]
 
         // Light dir: hold L + look direction. (Moved off Ctrl — Ctrl now
         // modifies edits: Ctrl+scroll = brush radius, Ctrl+click = single.)

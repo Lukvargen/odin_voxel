@@ -14,6 +14,9 @@ WALK_ACCEL     :: f32(14.0)
 WALK_FRICTION  :: f32(12.0)
 AIR_ACCEL      :: f32(2.5)
 TERMINAL_VEL   :: f32(60.0)
+SWIM_DRAG      :: f32(3.0)   // velocity lost per second in water (fraction)
+SWIM_ACCEL     :: f32(18.0)
+SWIM_UP_ACCEL  :: f32(26.0)  // holding jump in water
 
 STEP_SMOOTH_SPEED :: f32(10.0) // how fast the visual offset catches up (units/sec)
 
@@ -24,6 +27,7 @@ Camera :: struct {
     velocity:          [3]f32,
     fly_mode:          bool,
     on_ground:         bool,
+    swim_up:           bool,   // jump held: swim upward in water
     step_visual_offset: f32,  // negative when stepping up, lerps back to 0
 }
 
@@ -66,7 +70,7 @@ aabb_solid :: proc(gs: ^Game_State, pos: [3]f32) -> bool {
     for iy in min_y ..= max_y {
         for ix in min_x ..= max_x {
             for iz in min_z ..= max_z {
-                if get_voxel(gs, ix, iy, iz) != 0 { return true }
+                if solid_at(gs, ix, iy, iz) { return true }
             }
         }
     }
@@ -140,7 +144,19 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
 
     has_input := wish_len > 0.0001
 
-    if cam.on_ground {
+    // Swimming: body in water. Heavy drag, weak gravity, jump swims up.
+    body := [3]int{int(math.floor(cam.pos.x)), int(math.floor(cam.pos.y - PLAYER_EYE_HEIGHT * 0.5)), int(math.floor(cam.pos.z))}
+    if get_voxel(gs, body.x, body.y, body.z) == u32(Block_Type.Water) {
+        drag := max(1 - SWIM_DRAG * dt, 0)
+        cam.velocity *= drag
+        if has_input {
+            cam.velocity.x += wish_dir.x * SWIM_ACCEL * dt
+            cam.velocity.z += wish_dir.z * SWIM_ACCEL * dt
+        }
+        cam.velocity.y -= GRAVITY * 0.15 * dt
+        if jump || cam.swim_up { cam.velocity.y += SWIM_UP_ACCEL * dt }
+        cam.on_ground = false
+    } else if cam.on_ground {
         // Friction
         horiz_speed := la.length([3]f32{cam.velocity.x, 0, cam.velocity.z})
         if horiz_speed > 0.01 {
@@ -177,8 +193,8 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
         }
     }
 
-    // Gravity
-    cam.velocity.y -= GRAVITY * dt
+    // Gravity (water applies its own above)
+    if get_voxel(gs, body.x, body.y, body.z) != u32(Block_Type.Water) { cam.velocity.y -= GRAVITY * dt }
     if cam.velocity.y < -TERMINAL_VEL { cam.velocity.y = -TERMINAL_VEL }
 
     // Move and resolve collisions axis by axis.

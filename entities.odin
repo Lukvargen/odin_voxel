@@ -69,11 +69,11 @@ entity_kind_bounds :: proc(kind: Entity_Kind) -> (half_xz: f32, height: f32) {
 // a blob stands on cell c when pos.y == c + 1 and occupies the two cells
 // above (it's ~1.2 voxels tall, but 2 cells of headroom reads better).
 
-// Spawn a handful of test entities on the terrain around world origin.
+// Spawn a handful of test entities on the terrain around the player.
 entities_init :: proc(gs: ^Game_State) {
     for i in 0 ..< 10 {
-        x := rand.float32_range(-24, 24)
-        z := rand.float32_range(-24, 24)
+        x := gs.camera.pos.x + rand.float32_range(-24, 24)
+        z := gs.camera.pos.z + rand.float32_range(-24, 24)
         ground := f32(surface_height_at(int(x), int(z))) + 1.0
         kind := i % 3 == 2 ? Entity_Kind.Crystal : Entity_Kind.Blob
         color := [3]f32{0.45, 0.75, 1.0} // crystal: icy blue
@@ -127,32 +127,32 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
 
         // Buried (a block was just placed into the blob): pop up one voxel
         // per frame until clear — same feel as placing a block under a mob.
-        if get_voxel(gs, ix, feet, iz) != 0 {
+        if solid_at(gs, ix, feet, iz) {
             e.pos.y = f32(feet + 1)
             e.vel_y = 0
             continue
         }
 
         // Walk only while standing on something; in the air gravity owns it.
-        supported := get_voxel(gs, ix, feet - 1, iz) != 0 && e.pos.y - f32(feet) < 0.05
+        supported := solid_at(gs, ix, feet - 1, iz) && e.pos.y - f32(feet) < 0.05
         if supported {
             // Local forward is +z; matches rot2(lp.xz, -yaw) in entity_sdf.hlsl.
             dir := [3]f32{-math.sin(e.yaw), 0, math.cos(e.yaw)}
             np := e.pos + dir * (ENTITY_WALK_SPEED * dt)
             nx := int(math.floor(np.x))
             nz := int(math.floor(np.z))
-            if get_voxel(gs, nx, feet, nz) != 0 {
+            if solid_at(gs, nx, feet, nz) {
                 // Solid at feet height ahead: step up one voxel if there's
                 // headroom on both columns, else it's a wall — turn around.
-                if get_voxel(gs, nx, feet+1, nz) == 0 && get_voxel(gs, nx, feet+2, nz) == 0 &&
-                   get_voxel(gs, ix, feet+1, iz) == 0 {
+                if !solid_at(gs, nx, feet+1, nz) && !solid_at(gs, nx, feet+2, nz) &&
+                   !solid_at(gs, ix, feet+1, iz) {
                     np.y = f32(feet + 1)
                     e.pos = np
                 } else {
                     e.wander_yaw = e.yaw + math.PI
                     e.next_think = t + rand.float32_range(0.5, 1.5)
                 }
-            } else if get_voxel(gs, nx, feet+1, nz) != 0 {
+            } else if solid_at(gs, nx, feet+1, nz) {
                 // Head-height block: wall.
                 e.wander_yaw = e.yaw + math.PI
                 e.next_think = t + rand.float32_range(0.5, 1.5)
@@ -170,7 +170,7 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
         landed := false
         for tt := int(math.floor(e.pos.y)); tt >= int(math.floor(ny)); tt -= 1 {
             if f32(tt) > e.pos.y || f32(tt) < ny { continue }
-            if get_voxel(gs, ix, tt - 1, iz) != 0 {
+            if solid_at(gs, ix, tt - 1, iz) {
                 e.pos.y = f32(tt)
                 e.vel_y = 0
                 landed = true

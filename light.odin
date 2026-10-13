@@ -8,7 +8,8 @@ import "core:time"
 //
 // Sky light: 15 straight down through open air from the top of the world,
 // then flood-filled sideways/down, losing 1 per voxel (leaves stop the
-// straight-down rule, so canopies shade the ground below). Block light:
+// straight-down rule, so canopies shade the ground below; water also lets
+// sky light in, losing 1 per voxel of depth). Block light:
 // flood-filled from emitters (torches = TORCH_LIGHT), losing 1 per voxel.
 // Opaque blocks never hold light.
 //
@@ -23,7 +24,7 @@ LIGHT_SKY   :: u8(LIGHT_MAX << 4) // full sky, no block light
 Light_Channel :: enum { Sky, Block }
 
 block_opaque :: #force_inline proc(b: u8) -> bool {
-    return b != u8(Block_Type.Air) && b != u8(Block_Type.Leaves)
+    return b != u8(Block_Type.Air) && !block_is_leaves(b) && b != u8(Block_Type.Water)
 }
 
 block_emission :: #force_inline proc(b: u8) -> u8 {

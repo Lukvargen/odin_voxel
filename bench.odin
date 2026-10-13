@@ -76,8 +76,9 @@ bench_run :: proc(gs: ^Game_State) {
     bench_world_stats(gs)
 
     gs.camera.fly_mode = true
+    spawn := gs.camera.pos
     for v in views {
-        sx := 0; sz := 0
+        sx, sz := int(spawn.x), int(spawn.z)
         surf := f32(surface_height_at(sx, sz))
         gs.camera.pos   = {f32(sx) + 0.5, surf + v.height, f32(sz) + 0.5}
         gs.camera.yaw   = v.yaw

@@ -1,7 +1,6 @@
 package main
 
 import "core:math"
-import "core:math/noise"
 import "core:slice"
 import "core:time"
 import SDL "vendor:sdl3"
@@ -44,6 +43,7 @@ Far_Summary :: struct {
     leaves_hi:  [FAR_CELLS_PER_TILE]int,
     log_lo:     [FAR_CELLS_PER_TILE]int, // lowest / highest log voxel y
     log_hi:     [FAR_CELLS_PER_TILE]int,
+    spruce:     [FAR_CELLS_PER_TILE]bool, // canopy is spruce needles
 }
 
 Far_Job :: struct {
@@ -68,11 +68,12 @@ far_summary_init :: proc(s: ^Far_Summary) {
 far_record :: proc(s: ^Far_Summary, lx, wy, lz: int, b: u8) {
     ci := lx / FAR_CELL + (lz / FAR_CELL) * FAR_TILE_CELLS
     switch b {
-    case u8(Block_Type.Air):
-    case u8(Block_Type.Leaves):
+    case u8(Block_Type.Air), u8(Block_Type.Cactus): // cacti are too thin to show
+    case u8(Block_Type.Leaves), u8(Block_Type.Spruce_Leaves):
         s.leaves_lo[ci] = min(s.leaves_lo[ci], wy)
         s.leaves_hi[ci] = max(s.leaves_hi[ci], wy)
-    case u8(Block_Type.Log):
+        s.spruce[ci] = b == u8(Block_Type.Spruce_Leaves)
+    case u8(Block_Type.Log), u8(Block_Type.Spruce_Log):
         s.log_lo[ci] = min(s.log_lo[ci], wy)
         s.log_hi[ci] = max(s.log_hi[ci], wy)
     case:
@@ -83,8 +84,8 @@ far_record :: proc(s: ^Far_Summary, lx, wy, lz: int, b: u8) {
     }
 }
 
-// GPU cell, 30 bits: ground top (9, above WORLD_Y_MIN), ground block (3),
-// canopy bottom (9), canopy top (9, 0 = no canopy).
+// GPU cell: ground top (9 bits, above WORLD_Y_MIN), ground block (5),
+// canopy bottom (9), canopy height (6, 0 = no canopy), canopy is spruce (1).
 far_pack_cell :: proc(s: ^Far_Summary, ci: int) -> u32 {
     g, gm := s.ground_top[ci], s.ground_mat[ci]
     if g == min(int) { g, gm = WORLD_Y_MIN, u8(Block_Type.Stone) }
@@ -92,6 +93,7 @@ far_pack_cell :: proc(s: ^Far_Summary, ci: int) -> u32 {
     lo, hi := s.leaves_lo[ci], s.leaves_hi[ci] + 1
     // A trunk standing on the ground: a log column up to the crown (branch
     // logs elsewhere are hidden inside the canopy and ignored).
+    leaves := s.spruce[ci] ? u8(Block_Type.Spruce_Leaves) : u8(Block_Type.Leaves)
     if s.log_hi[ci] != min(int) && s.log_lo[ci] <= g + 1 {
         top := s.log_hi[ci] + 1
         if has_canopy { top = min(top, lo) }
@@ -99,19 +101,22 @@ far_pack_cell :: proc(s: ^Far_Summary, ci: int) -> u32 {
     }
     // Leaves down to the ground (a low crown on a slope) are just taller ground.
     if has_canopy && lo <= g {
-        if hi > g { g, gm = hi, u8(Block_Type.Leaves) }
+        if hi > g { g, gm = hi, leaves }
         has_canopy = false
     }
     enc :: proc(y: int) -> u32 { return u32(clamp(y - WORLD_Y_MIN, 0, 511)) }
-    cell := enc(g) | u32(gm & 7) << 9
-    if has_canopy { cell |= enc(lo) << 12 | enc(hi) << 21 }
+    cell := enc(g) | u32(gm & 31) << 9
+    if has_canopy {
+        cell |= enc(lo) << 14 | u32(clamp(hi - lo, 1, 63)) << 23
+        if s.spruce[ci] { cell |= 1 << 29 }
+    }
     return cell
 }
 
 // Highest surface of a packed cell (for the tile's max height).
 far_cell_top :: proc(cell: u32) -> int {
     g := int(cell & 0x1FF) + WORLD_Y_MIN
-    if hi := (cell >> 21) & 0x1FF; hi != 0 { g = max(g, int(hi) + WORLD_Y_MIN) }
+    if ch := (cell >> 23) & 63; ch != 0 { g = max(g, int((cell >> 14) & 0x1FF) + int(ch) + WORLD_Y_MIN) }
     return g
 }
 
@@ -154,33 +159,39 @@ far_tile_compute :: proc(job: Far_Job) -> Far_Result {
     ox := job.key.x * FAR_TILE
     oz := job.key.y * FAR_TILE
 
-    // Terrain: the highest surface voxel in each cell. Generation makes a
-    // voxel solid below the (fractional) surface height, so the top solid
-    // voxel is int(height); caves never reach the surface.
-    top_xz: [FAR_CELLS_PER_TILE][2]int
+    // Terrain: the highest surface voxel in each cell (water counts as
+    // ground at sea level), and its top block. Samples include a 1-voxel
+    // border for slopes, as in generation.
+    G :: FAR_TILE + 2
+    samples := make([]Terrain_Sample, G * G, context.temp_allocator)
+    terrain_grid(ox - 1, oz - 1, G, G, samples)
     for z in 0 ..< FAR_TILE {
         for x in 0 ..< FAR_TILE {
-            y := surface_height_at(ox + x, oz + z)
-            ci := x / FAR_CELL + (z / FAR_CELL) * FAR_TILE_CELLS
-            if y + 1 > s.ground_top[ci] {
-                s.ground_top[ci] = y + 1
-                top_xz[ci] = {ox + x, oz + z}
+            si := (x + 1) + (z + 1) * G
+            t := samples[si]
+            y, mat := t.height, u8(0)
+            if y < SEA_LEVEL {
+                y = SEA_LEVEL
+                mat = u8(surface_layers(t, 0).frozen ? Block_Type.Ice : Block_Type.Water)
             }
+            ci := x / FAR_CELL + (z / FAR_CELL) * FAR_TILE_CELLS
+            if y <= s.ground_top[ci] { continue }
+            if mat == 0 {
+                slope := terrain_slope(t.height, samples[si - 1].height, samples[si + 1].height,
+                                       samples[si - G].height, samples[si + G].height)
+                mat = u8(surface_layers(t, slope).top)
+            }
+            s.ground_top[ci] = y
+            s.ground_mat[ci] = mat
         }
     }
-    // Same grass/stone speckle as generation, at each cell's top voxel.
-    for ci in 0 ..< FAR_CELLS_PER_TILE {
-        wx, wz, wy := f64(top_xz[ci].x), f64(top_xz[ci].y), f64(s.ground_top[ci] - 1)
-        stone := noise.noise_3d_improve_xy(0, {wx * 0.05, wy * 0.05, wz * 0.05}) > 0.4
-        s.ground_mat[ci] = u8(stone ? Block_Type.Stone : Block_Type.Grass)
-    }
 
-    // Trees, through the real generator in summary mode.
+    // Trees, through the real generators in summary mode.
     tgt := Tree_Target{far = &s, ox = ox, oz = oz, size = FAR_TILE}
     for wz in oz - TREE_VOXEL_REACH ..< oz + FAR_TILE + TREE_VOXEL_REACH {
         for wx in ox - TREE_VOXEL_REACH ..< ox + FAR_TILE + TREE_VOXEL_REACH {
-            if !should_place_tree(wx, wz) { continue }
-            generate_tree(&tgt, wx, surface_height_at(wx, wz), wz, wx * 1000 + wz)
+            kind, base := tree_at(wx, wz)
+            if kind != .None { generate_tree_kind(&tgt, kind, wx, base, wz) }
         }
     }
 

@@ -8,9 +8,9 @@ import "core:time"
 // and a call count across all worker threads. Zero overhead when not timing.
 
 Profile_Zone :: enum {
-    Terrain_Noise,   // grass_cache 2D noise loop
+    Terrain_Noise,   // terrain samples for a column (terrain.odin)
     Terrain_Fill,    // 3D voxel fill + 3D stone noise
-    Tree_Scan,       // should_place_tree scan loop
+    Tree_Scan,       // tree_at scan loop
     Tree_Generate,   // generate_tree calls
     Integrate,       // main-thread column integrate (scan+pool+dirty mark)
     GPU_Upload,      // main-thread flush_gpu_uploads (transfer + copy pass)

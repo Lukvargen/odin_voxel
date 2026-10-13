@@ -97,7 +97,7 @@
 
   <h2>1. Spatial units</h2>
   <dl class="kv">
-    <dt>voxel</dt><dd>One cube. Smallest unit. Carries a <code>Block_Type</code> (Air, Grass, Stone, Log, Leaves).</dd>
+    <dt>voxel</dt><dd>One cube. Smallest unit. Carries a <code>Block_Type</code> (21 kinds: terrain, ores, wood, leaves, water, torch).</dd>
     <dt>chunk</dt><dd><code>8&times;8&times;8</code> voxels (<code>CHUNK_VOXELS = 8</code>). The unit of GPU upload.</dd>
     <dt>column</dt><dd>All <code>16</code> stacked Y-chunks at one XZ position (<code>CHUNKS_H = 16</code>). The unit of <em>generation work</em>.</dd>
     <dt>ring</dt><dd><code>64&times;16&times;64</code> chunks (<code>CHUNKS_W = 64</code>). The fixed GPU buffer the world wraps into.</dd>
@@ -114,20 +114,33 @@
           16 Y-chunks                           at the centre</div>
 
   <h2>2. The terrain function</h2>
-  <p>Terrain is a pure function of world position &mdash; no state, no neighbours, fully deterministic. For each XZ voxel a surface height is sampled from three octaves of 2D simplex noise:</p>
-  <pre><code>n0 = noise2d(seed=2, p / 600)   // continental shape
-n1 = noise2d(seed=0, p / 280)   // hills, gated by n0
-n2 = noise2d(seed=1, p /  70)   // local roughness
-height = n0*0.45 + n1*n0*0.45 + n2*0.10
-surface = 10 + height * 90      // → world Y in [10, 100]</code></pre>
-  <p>A voxel is solid if its world Y is below <code>surface</code>. Solid voxels are <code>Grass</code>, overridden to <code>Stone</code> where a 3D noise lobe fires. Above the surface is <code>Air</code>.</p>
-  <div class="note"><code>surface_height_at(wx, wz)</code> reuses this exact formula standalone, so trees can ask "where is the ground here?" without touching any chunk data.</div>
+  <p>Terrain is a pure function of world XZ (<code>terrain.odin</code>) &mdash; no state, no neighbours, fully deterministic. It returns a surface height and a biome; the column generator turns those into voxels.</p>
+  <pre><code>height = SEA_LEVEL + continent_base(cont)      // ocean floor .. inland plains (cont per voxel)
+       + hills * hill_amp                      // amplitude varies region to region
+       + mountain * (55*mountain + ridged^2*150) // uplifted massifs with ridged peaks
+then   badlands mesas (terraced in 8-voxel steps)
+       rivers   (warped ridge-noise valleys, beds just below sea level)
+       ravines  (narrow 30-55 deep cuts with near-vertical walls, high ground only)
+       soft cap above y=180</code></pre>
+  <p>Fields that vary over hundreds of voxels (temperature, moisture, hill amplitude, mountain/badlands/ravine masks, the river warp) are evaluated on a world-aligned 8-voxel lattice and bilinearly interpolated, so a column costs 9 lattice evaluations instead of 100. Columns, far tiles and single-point queries share the lattice, so they agree exactly.</p>
+  <table>
+    <tr><th>Biome</th><th>Chosen by</th><th>Surface</th><th>Trees</th></tr>
+    <tr><td>Ocean / River / Beach</td><td>height vs <code>SEA_LEVEL</code> (24)</td><td>sand, gravel; ice where very cold</td><td>&mdash;</td></tr>
+    <tr><td>Peaks</td><td>height &ge; snow line (~168)</td><td>snow over stone</td><td>&mdash;</td></tr>
+    <tr><td>Mountains</td><td>mountain mask, high ground</td><td>stone, gravel, grass patches</td><td>spruce below 150</td></tr>
+    <tr><td>Snowy / Taiga</td><td>cold (temperature drops with altitude)</td><td>snow / grass</td><td>spruce</td></tr>
+    <tr><td>Desert / Badlands</td><td>hot and dry</td><td>sand over sandstone / red sand over banded terracotta</td><td>cactus</td></tr>
+    <tr><td>Forest / Plains</td><td>temperate, wet / dry</td><td>grass over dirt</td><td>big and small oaks, bushes</td></tr>
+  </table>
+  <p>Below the surface layers is stone with coal, iron and gold blobs (an integer hash per 4&sup3; cell), carved by 3D cave noise between y&nbsp;=&nbsp;&minus;64 and 110. Slopes of 3+ voxels per voxel show bare rock (sandstone/terracotta in deserts). Open space below sea level is water; water chunks can be uniform like stone or air.</p>
+  <div class="note"><code>terrain_at(wx, wz)</code> / <code>surface_height_at</code> answer "where is the ground here?" without touching chunk data &mdash; used by trees, the far LOD, spawn search and cave darkness.</div>
 
   <h2>3. Trees: deterministic, per-column, self-clipping</h2>
   <p>Trees are the hard part &mdash; a single tree spans many chunks. The design that finally worked treats a tree as a <strong>pure function of its base position</strong>, regenerated independently by every column it overlaps, with each column keeping only the voxels that land inside it.</p>
 
   <h3>Why this is correct</h3>
   <ul>
+    <li>Whether a tree grows at a spot, and which kind (oak, small oak, bush, spruce, cactus), comes from <code>tree_at</code>: a position hash against the biome's density.</li>
     <li>A tree's RNG is seeded purely from its world XZ (<code>wx*1000 + wz</code>). Every column that regenerates it produces <em>byte-identical</em> geometry.</li>
     <li><code>Tree_Target</code> holds the 16 chunk pointers of one column plus its XZ origin. Every voxel write (<code>set_voxel_world</code>, <code>place_leaves</code>) is silently clipped: writes outside the column's <code>8&times;(16&middot;8)&times;8</code> box are dropped.</li>
     <li>A column scans every tree whose base falls within <code>TREE_VOXEL_REACH = 48</code> voxels of its footprint. Trees straddling a boundary are drawn by <em>both</em> columns &mdash; each keeps its half &mdash; so edges are seamless with <strong>zero shared state and zero cross-thread writes</strong>.</li>

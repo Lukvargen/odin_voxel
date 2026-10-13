@@ -56,6 +56,23 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_LOG    3u
 #define BLOCK_LEAVES 4u
 #define BLOCK_TORCH  5u
+#define BLOCK_DIRT          6u
+#define BLOCK_SAND          7u
+#define BLOCK_SANDSTONE     8u
+#define BLOCK_SNOW          9u
+#define BLOCK_ICE           10u
+#define BLOCK_WATER         11u
+#define BLOCK_GRAVEL        12u
+#define BLOCK_TERRACOTTA    13u
+#define BLOCK_RED_SAND      14u
+#define BLOCK_COAL_ORE      15u
+#define BLOCK_IRON_ORE      16u
+#define BLOCK_GOLD_ORE      17u
+#define BLOCK_SPRUCE_LOG    18u
+#define BLOCK_SPRUCE_LEAVES 19u
+#define BLOCK_CACTUS        20u
+
+bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES; }
 
 // Radiance a block's surface emits on its own (0 = not emissive). Added to
 // shading UNLIT (not multiplied by lighting/AO). Their light on the world
@@ -196,9 +213,10 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float m
         int lvi = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
         if (voxel_solid(chunk_i, lvi)) {
             uint bid = load_voxel(base + lvi);
-            if (block_emission(bid).x > 0.0) {
-                // emissive: transparent to shadow rays
-            } else if (bid == BLOCK_LEAVES) {
+            if (block_emission(bid).x > 0.0 || bid == BLOCK_WATER) {
+                // emissive / water: transparent to shadow rays (water
+                // darkens what's under it through absorption instead)
+            } else if (block_is_leaves(bid)) {
                 factor *= LEAF_TRANSMIT;
                 if (factor < 0.01) return 0.0;
             } else {
@@ -273,7 +291,8 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
                 int2 owner = chunk_owner[slot_i];
                 if (owner.x != x_i || owner.y != z_i) ci = -1;
             }
-            if (ci < -1) return 0.0; // uniform chunks are always opaque
+            if (ci == -2 - int(BLOCK_WATER)) ci = -1; // open water: see above
+            if (ci < -1) return 0.0; // other uniform chunks are opaque
             if (ci != -1) {
                 // Precision-safe local entry, same pattern as the primary
                 // tracer: subtract exact int chunk coords in chunk units,
@@ -395,7 +414,8 @@ struct HitInfo {
 //   block, so the entry voxel is the hit.
 HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
                                 float3 dir, int3 chunk_ic,
-                                int chunk_i, uint uniform_id, float3 entry_normal) {
+                                int chunk_i, uint uniform_id, float3 entry_normal,
+                                uint skip_id) {
     float t_delta_x = abs(1.0 / dir.x);
     float t_delta_y = abs(1.0 / dir.y);
     float t_delta_z = abs(1.0 / dir.z);
@@ -433,6 +453,7 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
         int lvi = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
         if (uniform_id != 0u) hit_block_id = uniform_id;
         else if (voxel_solid(chunk_i, lvi)) hit_block_id = load_voxel(global_chunk_i + lvi);
+        if (hit_block_id == skip_id) hit_block_id = 0u;
     }
 
     while (i < 23 && hit_block_id == 0u) {
@@ -451,7 +472,10 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
             x_i >= BRICK_CHUNK_SIZE || y_i >= BRICK_CHUNK_SIZE || z_i >= BRICK_CHUNK_SIZE)
             break;
         int lvi2 = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
-        if (voxel_solid(chunk_i, lvi2)) hit_block_id = load_voxel(global_chunk_i + lvi2);
+        if (voxel_solid(chunk_i, lvi2)) {
+            uint b = load_voxel(global_chunk_i + lvi2);
+            if (b != skip_id) hit_block_id = b;
+        }
     }
 
     float3 hit_pos = world_origin + dir * t;
@@ -472,8 +496,10 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
 
 // max_len: stop after this distance (the primary view ray stops where the
 // near voxel region ends; far_field.hlsl takes over from there).
+// skip_id: a block the ray passes through (BLOCK_WATER for rays already
+// under water), 0 = none.
 HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters = RAY_ITERATIONS,
-                        float max_len = RAY_MAX_LENGTH) {
+                        float max_len = RAY_MAX_LENGTH, uint skip_id = 0u) {
     dir = safe_dir(dir);
 
     float t_delta_x = abs(1.0 / dir.x);
@@ -531,6 +557,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
                 int2 owner = chunk_owner[slot_i];
                 if (owner.x != x_i || owner.y != z_i) ci = -1;
             }
+            if (skip_id != 0u && ci == -2 - int(skip_id)) ci = -1;
             if (ci != -1) {
                 float3 entry_pos = chunk_origin * BRICK_CHUNK_SIZE + dir * t * BRICK_CHUNK_SIZE;
                 // Precision-safe local entry: subtract the EXACT int chunk
@@ -549,7 +576,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
                 HitInfo vhit = trace_ray_chunk_voxels(entry_pos, local_entry, dir,
                                                       chunk_ic, max(ci, 0),
                                                       ci < -1 ? uint(-ci - 2) : 0u,
-                                                      chunk_entry_normal);
+                                                      chunk_entry_normal, skip_id);
                 if (vhit.block_id != 0u) {
                     hit_block_id = vhit.block_id;
                     t += vhit.t / float(BRICK_CHUNK_SIZE);
