@@ -44,6 +44,8 @@ Camera_Uniform :: struct #packed {
     ent_debug:      i32,   // bench: 1 = skip entity view rays, 2 = skip entity shadows
     _pad5:          f32,
     near_circle:    [4]f32, // near (voxel) region: XZ center, radius in voxels, unused
+    thermals:       [MAX_SKY_THERMALS][4]f32, // cumulus over thermals: XZ centre at cloud base, radius, strength
+    thermal_count:  [4]i32, // x = count
 }
 
 // (Re)create the scene color, depth, and half-res volumetric textures at the
@@ -636,6 +638,13 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
             0,
         },
     }
+    sky_thermals_update(gs)
+    for th, i in gs.sky_thermals[:gs.sky_thermal_count] {
+        // The column leans downwind ~0.08 m per metre of height.
+        c := th.centre + glider_wind(gs.glider.wind_time).xz * ((CUMULUS_BASE - th.ground) * 0.08)
+        uniform.thermals[i] = {c.x, c.y, th.cloud_r, th.strength}
+    }
+    uniform.thermal_count.x = i32(gs.sky_thermal_count)
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
     ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}

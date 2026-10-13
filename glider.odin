@@ -100,6 +100,41 @@ thermal_cell :: proc(gx, gz: int) -> (th: Thermal, ok: bool) {
     return th, true
 }
 
+// Cumulus clouds mark strong thermals (the same ones the eagles circle).
+CUMULUS_BASE     :: f32(240) // cloud base height; above the highest mountains (~225)
+MAX_SKY_THERMALS :: 16
+
+Sky_Thermal :: struct {
+    centre:   [2]f32,
+    ground:   f32,
+    cloud_r:  f32,
+    strength: f32,
+}
+
+// Strong thermals within two cells of the camera; recomputed only when the
+// camera enters another thermal cell (it samples the terrain height).
+sky_thermals_update :: proc(gs: ^Game_State) {
+    p := gs.camera.pos
+    cell := [2]int{int(math.floor(p.x / THERMAL_CELL)), int(math.floor(p.z / THERMAL_CELL))}
+    if gs.sky_thermals_ok && cell == gs.sky_thermal_cell { return }
+    gs.sky_thermal_cell, gs.sky_thermals_ok = cell, true
+    gs.sky_thermal_count = 0
+    for dz in -2 ..= 2 {
+        for dx in -2 ..= 2 {
+            th := thermal_cell(cell.x + dx, cell.y + dz) or_continue
+            if th.strength < 4.5 || gs.sky_thermal_count >= MAX_SKY_THERMALS { continue }
+            ground := max(f32(surface_height_at(int(th.centre.x), int(th.centre.y))), SEA_LEVEL)
+            gs.sky_thermals[gs.sky_thermal_count] = {
+                centre   = th.centre,
+                ground   = ground,
+                cloud_r  = 26 + th.radius * 1.2 + th.strength * 4,
+                strength = th.strength,
+            }
+            gs.sky_thermal_count += 1
+        }
+    }
+}
+
 // Rising air at p from thermals: a soft-edged core with a ring of sinking
 // air around it, drifting downwind with height like a real thermal leans.
 // `ground` is the terrain height under p; thermals weaken toward their top.

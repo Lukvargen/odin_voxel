@@ -18,6 +18,10 @@ Game_State :: struct {
     camera: Camera,
     glider: Glider, // hang glider (glider.odin)
     player_anim: Player_Anim, // third-person body animation (creatures.odin)
+    sky_thermals:      [MAX_SKY_THERMALS]Sky_Thermal, // strong thermals near the player, for cumulus (glider.odin)
+    sky_thermal_count: int,
+    sky_thermal_cell:  [2]int,
+    sky_thermals_ok:   bool,
 
     // World
     columns:         map[[2]int]^Column, // resident columns (world.odin)

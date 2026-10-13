@@ -27,6 +27,8 @@ cbuffer CameraUniforms : register(b0, space2) {
     int    u_ent_debug;      // bench: 1 = skip entity view rays, 2 = skip entity shadows
     float  _pad5;
     float4 u_near_circle;    // near (voxel) region: XZ center, radius in voxels, unused
+    float4 u_thermals[16];   // cumulus over thermals: XZ centre at cloud base, radius, strength (MAX_SKY_THERMALS)
+    int4   u_thermal_count;  // x = count
 };
 
 #endif // CAMERA_UNIFORMS_HLSL

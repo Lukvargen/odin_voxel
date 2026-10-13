@@ -343,6 +343,33 @@ float fbm2(float2 p) {
 #define CLOUD_COVER  0.48   // fbm threshold (higher = fewer clouds)
 #define CLOUD_DRIFT  float2(0.004, 0.0015) // uv/sec
 
+// Cumulus over strong thermals (the CPU lists them in u_thermals, leaned
+// downwind to the cloud base). Each is a puff on the cloud-base plane with
+// noisy edges: grey and dense in the middle, sunlit toward the rim, fading
+// into the haze with distance. Returns colour + coverage.
+#define CUMULUS_BASE 240.0
+float4 cumulus(float3 ro, float3 dir, float3 Ln) {
+    if (u_thermal_count.x == 0 || abs(dir.y) < 0.01) return float4(0, 0, 0, 0);
+    float t = (CUMULUS_BASE - ro.y) / dir.y;
+    if (t <= 0.0) return float4(0, 0, 0, 0);
+    float2 p = ro.xz + dir.xz * t;
+    float den = 0.0;
+    for (int i = 0; i < u_thermal_count.x; i++) {
+        float4 th = u_thermals[i];
+        float2 d = p - th.xy;
+        float dd = dot(d, d);
+        if (dd > th.z * th.z * 2.0) continue;
+        float n = fbm2(p * 0.03 + th.xy * 0.013);
+        float k = 1.0 - sqrt(dd) / th.z + (n - 0.5) * 1.1;
+        den = max(den, smoothstep(0.0, 0.45, k));
+    }
+    if (den <= 0.0) return float4(0, 0, 0, 0);
+    float3 lit  = float3(1.03, 1.01, 0.97) * lerp(float3(1, 1, 1), sun_tint_d(Ln), 0.3);
+    float3 base = float3(0.66, 0.70, 0.79);
+    float3 col  = lerp(lit, base, smoothstep(0.3, 1.0, den) * 0.7);
+    return float4(col, den * 0.95 * exp(-t * 0.0008));
+}
+
 float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt, bool clouds) {
     float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     float elev = clamp(Ln.y, 0.0, 1.0);
@@ -366,6 +393,10 @@ float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt, boo
         float3 shade = float3(0.62, 0.67, 0.78);
         float3 ccol  = lerp(lit, shade, den * 0.7);
         sky = lerp(sky, ccol, den * 0.9);
+    }
+    if (clouds) {
+        float4 cu = cumulus(u_cam_pos, dir, Ln);
+        sky = lerp(sky, cu.rgb, cu.a);
     }
     return sky;
 }

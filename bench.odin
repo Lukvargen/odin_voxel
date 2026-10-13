@@ -497,4 +497,24 @@ bench_glider_run :: proc(gs: ^Game_State) {
     entities_update(gs, 0)
     gpu_render(gs)
     bench_screenshot(gs, fmt.tprintf("%s/entity_Player.bmp", bench_shot_dir))
+
+    // Cumulus over the nearest strong thermal, seen from the ground.
+    g.third_person, g.chase_dist = false, 0
+    cam.view_offset = {}
+    sky_thermals_update(gs)
+    if gs.sky_thermal_count > 0 {
+        best := 0
+        for th, i in gs.sky_thermals[:gs.sky_thermal_count] {
+            if la.length(th.centre - cam.pos.xz) < la.length(gs.sky_thermals[best].centre - cam.pos.xz) { best = i }
+        }
+        th := gs.sky_thermals[best]
+        target := [3]f32{th.centre.x, CUMULUS_BASE, th.centre.y}
+        d := la.normalize(target - cam.pos)
+        cam.yaw   = math.to_degrees(math.atan2(d.x, d.z))
+        cam.pitch = math.to_degrees(math.asin(d.y))
+        fmt.printf("  cumulus: %d thermals, nearest %.0f m away\n", gs.sky_thermal_count, la.length(target - cam.pos))
+        entities_update(gs, 0)
+        gpu_render(gs)
+        bench_screenshot(gs, fmt.tprintf("%s/clouds.bmp", bench_shot_dir))
+    }
 }
