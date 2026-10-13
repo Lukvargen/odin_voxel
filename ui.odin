@@ -398,6 +398,17 @@ options_panel_layout :: proc(gs: ^Game_State) {
             if opt_button("EntOff", "off", !gs.entities_enabled) { gs.entities_enabled = false }
         }
 
+        // Cumulus clouds over thermals (volumetric; ~2 ms when the sky is full of them)
+        if clay.UI(clay.ID("RowClouds"))({
+            layout = { childGap = 8, childAlignment = {y = .Center},
+                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
+        }) {
+            opt_row(fmt.tprintf("Thermal clouds: %v", gs.clouds_enabled))
+            if clay.UI(clay.ID("CloudSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
+            if opt_button("CloudOn",  "on",  gs.clouds_enabled)  { gs.clouds_enabled = true  }
+            if opt_button("CloudOff", "off", !gs.clouds_enabled) { gs.clouds_enabled = false }
+        }
+
         // Volumetric steps row
         if clay.UI(clay.ID("RowVolSteps"))({
             layout = { childGap = 8, childAlignment = {y = .Center},

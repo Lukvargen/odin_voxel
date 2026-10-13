@@ -107,6 +107,7 @@ Game_State :: struct {
     entities:         [dynamic]Entity,
     entity_count:     i32,  // entities uploaded this frame
     entities_enabled: bool, // options panel toggle
+    clouds_enabled:   bool, // volumetric cumulus over thermals (options panel)
 
     // Input state
     mouse_locked:        bool,
@@ -141,6 +142,7 @@ main :: proc() {
     gs.selected_block = .Stone
     gs.brush_radius   = BRUSH_RADIUS
     gs.entities_enabled = true
+    gs.clouds_enabled   = true
     gs.far_enabled      = true
     gs.camera.pos     = find_spawn()
     if bench {

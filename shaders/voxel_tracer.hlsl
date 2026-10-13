@@ -347,6 +347,130 @@ static const float2 aa_offsets[4] = {
     float2(-0.125,  0.375),
 };
 
+// ---- Cumulus over thermals ---------------------------------------------------
+// Every strong thermal near the player (u_thermals, filled by the CPU and
+// leaned downwind) carries a cumulus: a volume with a flat base at
+// CUMULUS_BASE and a domed top, roughened by 3D value noise into puffs. The
+// centre ray of each pixel marches the clouds it crosses (box test first, so
+// pixels nowhere near a cloud pay a few slab tests), lit by the sun through
+// the cloud itself (two samples toward the sun) and by sky light that is
+// dimmer toward the base. Composited in front of whatever the ray hit, so
+// clouds also sit over terrain when gliding up near them.
+#define CUMULUS_BASE 240.0
+#define CLOUD_STEPS  20
+#define CLOUD_TOP    (CUMULUS_BASE + 160.0) // above any tower (1.75 x the largest radius)
+#define CLOUD_SIGMA  0.07   // extinction per metre at density 1
+
+float vnoise3(float3 p) {
+    float3 i = floor(p);
+    float3 f = p - i;
+    f = f * f * (3.0 - 2.0 * f);
+    int3 ip = int3(i);
+    float a = hash31i(ip);
+    float b = hash31i(ip + int3(1, 0, 0));
+    float c = hash31i(ip + int3(0, 1, 0));
+    float d = hash31i(ip + int3(1, 1, 0));
+    float e = hash31i(ip + int3(0, 0, 1));
+    float g = hash31i(ip + int3(1, 0, 1));
+    float h = hash31i(ip + int3(0, 1, 1));
+    float k = hash31i(ip + int3(1, 1, 1));
+    return lerp(lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y),
+                lerp(lerp(e, g, f.x), lerp(h, k, f.x), f.y), f.z);
+}
+
+// Density of cloud ci (u_thermals[ci]: xz centre, radius, strength) at p,
+// 0..1: a wide flat-bottomed base plus four towers (u_cloud_puffs), all as
+// "1 - distance / radius" so they union with max, then eroded by noise.
+float cloud_density(float3 p, int ci, bool detail = true) {
+    float4 th = u_thermals[ci];
+    float y = p.y - CUMULUS_BASE;
+    if (y < 0.0) return 0.0;
+    float3 rel = float3(p.x - th.x, y, p.z - th.y) / th.z;
+    float shape = 1.0 - length(float3(rel.x, max(rel.y - 0.12, 0.0) * 2.2, rel.z));
+    [unroll]
+    for (int k = 0; k < 4; k++) {
+        float4 pf = u_cloud_puffs[ci * 4 + k];
+        shape = max(shape, 1.0 - length(rel - pf.xyz) / pf.w);
+    }
+    if (shape < -0.4) return 0.0;
+    float3 q = p * 0.045 + float3(u_time * 0.02, -u_time * 0.01, u_time * 0.012);
+    // Light samples only need the overall shape (self-shadowing follows the
+    // towers); the noise matters at the visible edges.
+    float n = detail ? vnoise3(q) * 0.62 + vnoise3(q * 2.37 + 11.3) * 0.38 : 0.52;
+    float dens = shape + (n - 0.52) * 0.85;
+    dens *= smoothstep(0.0, 5.0, y); // soft flat base
+    return saturate(dens * 2.2);
+}
+
+struct CloudResult {
+    float3 color;   // premultiplied in-scattered light
+    float  trans;   // transmittance through the clouds
+    float  t_entry; // distance of the first cloud sample, for haze
+};
+
+CloudResult march_clouds(float3 ro, float3 rd, float t_max, uint2 pix) {
+    CloudResult r;
+    r.color = float3(0, 0, 0); r.trans = 1.0; r.t_entry = 1e30;
+    if (u_thermal_count.x == 0 || (u_ent_debug & 4) != 0) return r;
+    // Rays that can't reach the cloud layer before hitting something (caves,
+    // terrain below 240 m — most pixels) skip the per-cloud tests.
+    float ty0 = (CUMULUS_BASE - ro.y) / rd.y, ty1 = (CLOUD_TOP - ro.y) / rd.y;
+    if (abs(rd.y) < 1e-5) { ty0 = (ro.y >= CUMULUS_BASE && ro.y <= CLOUD_TOP) ? 0.0 : 1e30; ty1 = 1e30; }
+    if (max(min(ty0, ty1), 0.0) >= min(max(ty0, ty1), t_max)) return r;
+
+    // Clouds this ray crosses, nearest first (a ray rarely crosses more
+    // than two, so keep four).
+    float3 inv = 1.0 / ent_safe_dir(rd);
+    int   ids[4];
+    float t0s[4], t1s[4];
+    int   n = 0;
+    for (int i = 0; i < u_thermal_count.x && n < 4; i++) {
+        float4 th = u_thermals[i];
+        float R = th.z * 1.4;
+        float3 bmin = float3(th.x - R, CUMULUS_BASE, th.y - R);
+        float3 bmax = float3(th.x + R, CUMULUS_BASE + th.z * 1.75, th.y + R);
+        float t0, t1;
+        if (!ent_box(ro, inv, bmin, bmax, t0, t1)) continue;
+        t0 = max(t0, 0.0);
+        t1 = min(t1, t_max);
+        if (t0 >= t1) continue;
+        int k = n++;
+        for (; k > 0 && t0s[k - 1] > t0; k--) { ids[k] = ids[k - 1]; t0s[k] = t0s[k - 1]; t1s[k] = t1s[k - 1]; }
+        ids[k] = i; t0s[k] = t0; t1s[k] = t1;
+    }
+    if (n == 0) return r;
+
+    float3 l = light_dir_normalized;
+    float3 sun = sun_tint() * u_sun_intensity;
+    float3 amb = sky_ambient();
+    // Bright rim when looking toward the sun through thin cloud.
+    float phase = 0.75 + 0.9 * pow(saturate(dot(rd, l)), 6.0);
+    float jitter = frac(52.9829189 * frac(0.06711056 * float(pix.x) + 0.00583715 * float(pix.y)));
+
+    for (int c = 0; c < n; c++) {
+        int ci = ids[c];
+        float H = u_thermals[ci].z * 1.4;
+        float dt = (t1s[c] - t0s[c]) / CLOUD_STEPS;
+        for (int s = 0; s < CLOUD_STEPS; s++) {
+            float t = t0s[c] + (float(s) + jitter) * dt;
+            float3 p = ro + rd * t;
+            float dens = cloud_density(p, ci);
+            if (dens < 0.002) continue;
+            r.t_entry = min(r.t_entry, t);
+            // Sun light reaching p through the cloud.
+            float od = (cloud_density(p + l * 6.0, ci, false) * 6.0 + cloud_density(p + l * 20.0, ci, false) * 14.0) * CLOUD_SIGMA;
+            float sun_vis = exp(-od);
+            float hf = saturate((p.y - CUMULUS_BASE) / H);
+            float3 Li = sun * sun_vis * phase * 0.9 + amb * lerp(0.55, 1.7, hf);
+            float a = 1.0 - exp(-dens * CLOUD_SIGMA * dt);
+            r.color += r.trans * a * Li;
+            r.trans *= 1.0 - a;
+            if (r.trans < 0.02) return r;
+        }
+    }
+    return r;
+}
+
 // Shading for an entity voxel hit: direct sun (with entity occlusion) plus
 // the voxel light at the entity's surface. Entities are terminal hits (no
 // reflection bounce) so the caller breaks after compositing the result.
@@ -694,6 +818,17 @@ void main(uint3 id : SV_DispatchThreadID) {
         color += trace_pixel(float2(ipix) + aa_offsets[s], dims, hit0, far0, ehit0, s == 0);
     }
     color /= float(aa);
+
+    // Cumulus in front of whatever the centre ray hit (sky rays end at the
+    // far side of the cloud boxes), hazed by its distance like geometry.
+    if (!g_cam_in_water) {
+        CloudResult cl = march_clouds(u_cam_pos, cdir, min(prim_depth, 6000.0), uint2(ipix));
+        if (cl.trans < 0.999) {
+            float a = 1.0 - cl.trans;
+            float3 cc = apply_fog(float4(cl.color / a, 1.0), cl.t_entry, cdir).rgb;
+            color.rgb = color.rgb * cl.trans + cc * a;
+        }
+    }
 
     img_output[ipix]   = color;
     depth_output[ipix] = prim_depth;

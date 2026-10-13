@@ -109,6 +109,7 @@ Sky_Thermal :: struct {
     ground:   f32,
     cloud_r:  f32,
     strength: f32,
+    puffs:    [4][4]f32, // cumulus towers: offset from the base centre (in cloud radii), radius
 }
 
 // Strong thermals within two cells of the camera; recomputed only when the
@@ -124,12 +125,20 @@ sky_thermals_update :: proc(gs: ^Game_State) {
             th := thermal_cell(cell.x + dx, cell.y + dz) or_continue
             if th.strength < 4.5 || gs.sky_thermal_count >= MAX_SKY_THERMALS { continue }
             ground := max(f32(surface_height_at(int(th.centre.x), int(th.centre.y))), SEA_LEVEL)
-            gs.sky_thermals[gs.sky_thermal_count] = {
+            st := Sky_Thermal{
                 centre   = th.centre,
                 ground   = ground,
                 cloud_r  = 26 + th.radius * 1.2 + th.strength * 4,
                 strength = th.strength,
             }
+            // Cauliflower towers on top of the base, taller for stronger lift.
+            gx, gz := cell.x + dx, cell.y + dz
+            for k in 0 ..< 4 {
+                h := proc(gx, gz, k, j: int) -> f32 { return thermal_hash(gx, gz, u32(20 + k * 4 + j)) }
+                rise := 0.35 + 0.55 * h(gx, gz, k, 1) * (th.strength / 7.5)
+                st.puffs[k] = {(h(gx, gz, k, 0) - 0.5) * 0.9, rise, (h(gx, gz, k, 2) - 0.5) * 0.9, 0.42 + 0.22 * h(gx, gz, k, 3)}
+            }
+            gs.sky_thermals[gs.sky_thermal_count] = st
             gs.sky_thermal_count += 1
         }
     }

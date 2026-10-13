@@ -517,5 +517,17 @@ bench_glider_run :: proc(gs: ^Game_State) {
         entities_update(gs, 0)
         gpu_render(gs)
         bench_screenshot(gs, fmt.tprintf("%s/clouds.bmp", bench_shot_dir))
+
+        // From the side at cloud height, as when gliding up to one.
+        c := th.centre + glider_wind(g.wind_time).xz * ((CUMULUS_BASE - th.ground) * 0.08)
+        side := la.normalize(cam.pos.xz - c)
+        cam.pos = {c.x + side.x * th.cloud_r * 3.2, CUMULUS_BASE + 15, c.y + side.y * th.cloud_r * 3.2}
+        d = la.normalize([3]f32{c.x, CUMULUS_BASE + 25, c.y} - cam.pos)
+        cam.yaw   = math.to_degrees(math.atan2(d.x, d.z))
+        cam.pitch = math.to_degrees(math.asin(d.y))
+        gs.player_chunk = {floor_div(int(cam.pos.x), CHUNK_VOXELS), floor_div(int(cam.pos.y), CHUNK_VOXELS), floor_div(int(cam.pos.z), CHUNK_VOXELS)}
+        entities_update(gs, 0)
+        gpu_render(gs)
+        bench_screenshot(gs, fmt.tprintf("%s/clouds_side.bmp", bench_shot_dir))
     }
 }

@@ -41,11 +41,12 @@ Camera_Uniform :: struct #packed {
     cave_factor:    f32,   // 0 surface .. 1 deep underground (CPU-smoothed)
     sun_intensity:  f32,   // sun direct-light multiplier
     far_enabled:    i32,
-    ent_debug:      i32,   // bench: 1 = skip entity view rays, 2 = skip entity shadows, 4 = no cumulus
+    ent_debug:      i32,   // 1/2 = bench: skip entity view rays / shadows; 4 = no cumulus (bench or options)
     _pad5:          f32,
     near_circle:    [4]f32, // near (voxel) region: XZ center, radius in voxels, unused
     thermals:       [MAX_SKY_THERMALS][4]f32, // cumulus over thermals: XZ centre at cloud base, radius, strength
     thermal_count:  [4]i32, // x = count
+    cloud_puffs:    [MAX_SKY_THERMALS * 4][4]f32, // per thermal 4 towers: offset (cloud radii), radius
 }
 
 // (Re)create the scene color, depth, and half-res volumetric textures at the
@@ -627,7 +628,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         cave_factor    = gs.cave_factor,
         sun_intensity  = gs.sun_intensity,
         far_enabled    = gs.far_enabled ? 1 : 0,
-        ent_debug      = i32(gs.ent_debug),
+        ent_debug      = i32(gs.ent_debug) | (gs.clouds_enabled ? 0 : 4),
         // Columns whose centers lie within near_r of the player's column are
         // loaded; shrink by a column's half-diagonal so the circle only
         // covers loaded voxels.
@@ -643,6 +644,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         // The column leans downwind ~0.08 m per metre of height.
         c := th.centre + glider_wind(gs.glider.wind_time).xz * ((CUMULUS_BASE - th.ground) * 0.08)
         uniform.thermals[i] = {c.x, c.y, th.cloud_r, th.strength}
+        for k in 0 ..< 4 { uniform.cloud_puffs[i * 4 + k] = th.puffs[k] }
     }
     uniform.thermal_count.x = i32(gs.sky_thermal_count)
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
