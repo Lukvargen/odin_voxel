@@ -41,6 +41,7 @@ bench_run :: proc(gs: ^Game_State) {
         {"vista",      45,  30, -25, false, false},
         {"torches",    2,   30, -30, true,  false},
         {"cave",       -30, 30, -20, false, true},
+        {"canopy",     2,   30, 20,  false, false},
     }
     configs := []Bench_Config{
         {"default (aa1 hard)", 1, 1, false},

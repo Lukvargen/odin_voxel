@@ -289,7 +289,7 @@ float fbm2(float2 p) {
 #define CLOUD_COVER  0.48   // fbm threshold (higher = fewer clouds)
 #define CLOUD_DRIFT  float2(0.004, 0.0015) // uv/sec
 
-float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt) {
+float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt, bool clouds) {
     float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     float elev = clamp(Ln.y, 0.0, 1.0);
     float3 horizon = lerp(float3(0.90, 0.55, 0.25), float3(0.75, 0.85, 1.0), smoothstep(0.0, 0.3, elev));
@@ -303,7 +303,7 @@ float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt) {
     // Cloud layer, drawn over the disc (sun behind cloud = dimmed). Project
     // the ray onto a flat sky plane; fade out at the horizon (projection
     // blows up) so distant haze stays clean.
-    if (dir.y > 0.02) {
+    if (clouds && dir.y > 0.02) {
         float2 uv  = dir.xz / (dir.y + 0.15) * CLOUD_SCALE + u_time * CLOUD_DRIFT;
         float  den = smoothstep(CLOUD_COVER, CLOUD_COVER + 0.32, fbm2(uv));
         den *= smoothstep(0.02, 0.18, dir.y);
@@ -318,15 +318,16 @@ float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt) {
 
 // Sky as seen directly (miss rays): full sun disc + glow.
 float3 sky_color_d(float3 dir, float3 Ln) {
-    return sky_color_impl(dir, Ln, 1.0, 1.0);
+    return sky_color_impl(dir, Ln, 1.0, 1.0, true);
 }
 
 // Sky as a FOG color (blended onto hit geometry): the sharp disc would read
 // as the sun rendering in front of fogged mountains, so drop it and halve
 // the broad glow (forward-scatter halo through haze is plausible; a hard
-// circle is not).
+// circle is not). No clouds either: they are far behind any geometry, and
+// fogging toward them painted a faint drifting cloud pattern onto voxels.
 float3 sky_color_fog_d(float3 dir, float3 Ln) {
-    return sky_color_impl(dir, Ln, 0.0, 0.5);
+    return sky_color_impl(dir, Ln, 0.0, 0.5, false);
 }
 
 float3 voxel_albedo(uint block_id, int3 vkey) {
