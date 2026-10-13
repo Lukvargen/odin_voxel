@@ -66,7 +66,8 @@ Game_State :: struct {
     far_buf:      ^SDL.GPUBuffer,     // far terrain tile table, then cells (far.odin)
     light_index_buf: ^SDL.GPUBuffer,  // per-slot light pool id / uniform light (light.odin)
     light_pool_buf:  ^SDL.GPUBuffer,  // 512-byte light bricks
-    entity_buf:   ^SDL.GPUBuffer,     // SDF entity list (entities.odin)
+    entity_buf:   ^SDL.GPUBuffer,     // entity voxel models + instances (voxel_models.odin)
+    ent_dyn_base: int,                // uint4 index of the per-frame part of entity_buf
 
     brush_radius:  int,  // edit sphere radius, 0 = single voxel (Ctrl+scroll)
     left_pressed:  bool, // single-frame press edges — with Ctrl held a click
@@ -88,7 +89,7 @@ Game_State :: struct {
     sun_intensity:  f32,   // sun direct-light multiplier
     selected_block: Block_Type, // hotbar selection (keys 1-0)
 
-    // SDF entities (entities.odin)
+    // Entities (entities.odin, voxel_models.odin)
     entities:         [dynamic]Entity,
     entity_count:     i32,  // entities uploaded this frame
     entities_enabled: bool, // options panel toggle

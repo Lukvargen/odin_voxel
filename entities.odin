@@ -4,12 +4,11 @@ import "core:math"
 import "core:math/rand"
 import SDL "vendor:sdl3"
 
-// Procedural SDF entities (blob critters, hovering crystals). The CPU owns
-// the canonical list and runs the cheap wander "AI"; each frame the nearest
-// MAX_ENTITIES within ENTITY_CULL_RADIUS of the camera are packed and
-// uploaded to a small GPU buffer read by the tracer (primary rays + sun and
-// point-light shadow occlusion). Shapes/animation are evaluated entirely in
-// shaders/entity_sdf.hlsl — there is no model data, only these parameters.
+// Entities (blob critters, hovering crystals). The CPU owns the canonical
+// list and runs the cheap wander "AI"; each frame the nearest MAX_ENTITIES
+// within ENTITY_CULL_RADIUS of the camera are turned into rigid voxel-model
+// parts (voxel_models.odin) — animation is just where those parts are put —
+// and uploaded for the tracer (shaders/entity_voxel.hlsl).
 
 MAX_ENTITIES        :: 64
 ENTITY_CULL_RADIUS  :: f32(96.0)  // gather range around camera
@@ -18,16 +17,9 @@ ENTITY_TURN_RATE    :: f32(3.0)   // rad/s toward wander_yaw
 ENTITY_GRAVITY      :: f32(24.0)  // voxels/s^2 (blobs; crystals levitate)
 ENTITY_MAX_FALL     :: f32(30.0)  // terminal fall speed, voxels/s
 
-// CPU AABB must contain the SDF at every animation phase: bounds below are
-// the static local extents; ANIM_MARGIN covers bob/hover/leg-swing
-// displacement. INVARIANT: any new animation term in entity_sdf.hlsl must
-// stay inside this margin or the entity clips at its AABB edges.
-ANIM_MARGIN :: f32(0.35)
-
 Entity_Kind :: enum u8 {
     Blob,
     Crystal,
-    Glider, // the player's hang glider (glider.odin); never in gs.entities
 }
 
 Entity :: struct {
@@ -44,32 +36,7 @@ Entity :: struct {
     vel_y:      f32, // vertical velocity (gravity; blobs only)
 }
 
-// Matches the 5-float4 record in entity_sdf.hlsl (ENTITY_STRIDE).
-Entity_Gpu :: struct #packed {
-    pos:      [3]f32, yaw:        f32,
-    aabb_min: [3]f32, kind:       f32,
-    aabb_max: [3]f32, anim_phase: f32,
-    color:    [3]f32, seed:       f32,
-    scale:    f32,    params:     [3]f32,
-}
-
-ENTITY_BUF_SIZE :: MAX_ENTITIES * size_of(Entity_Gpu)
-
-// Static local-space bounds per kind (xz half-extent, height), scaled and
-// ANIM_MARGIN-padded when packing the GPU AABB.
-@(private="file")
-entity_kind_bounds :: proc(kind: Entity_Kind) -> (half_xz: f32, height: f32) {
-    switch kind {
-    case .Blob:    return 0.55, 1.25
-    case .Crystal: return 0.60, 1.60
-    case .Glider:  return 0, 0 // boxes come from glider_entities
-    }
-    return 0.6, 1.5
-}
-
-// Blob vertical physics + walking collision. pos.y is the FEET height;
-// a blob stands on cell c when pos.y == c + 1 and occupies the two cells
-// above (it's ~1.2 voxels tall, but 2 cells of headroom reads better).
+Ent_Candidate :: struct { idx: int, d2: f32 }
 
 // Spawn a handful of test entities on the terrain around the player.
 entities_init :: proc(gs: ^Game_State) {
@@ -98,13 +65,11 @@ entities_init :: proc(gs: ^Game_State) {
 // Per-frame: wander + ground-follow, then cull/pack/upload.
 // Called once per frame before gpu_render.
 entities_update :: proc(gs: ^Game_State, dt: f32) {
-    glider, glider_n := glider_entities(gs)
+    t := f32(SDL.GetTicks()) / 1000.0
     if !gs.entities_enabled {
-        gs.entity_count = i32(glider_n)
-        if glider_n > 0 { gpu_upload_buffer(gs, gs.entity_buf, &glider, glider_n * size_of(Entity_Gpu)) }
+        entities_upload(gs, {}, t)
         return
     }
-    t := f32(SDL.GetTicks()) / 1000.0
 
     for &e in gs.entities {
         if e.kind == .Crystal { continue } // hovers in place; motion is in-shader
@@ -114,7 +79,7 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
             e.next_think = t + rand.float32_range(1.0, 3.0)
         }
         // Steer away from the player: walking through the camera puts the
-        // ray origin inside the SDF (renders wrong) and feels bad anyway.
+        // camera inside a model (renders wrong) and feels bad anyway.
         to_cam := gs.camera.pos - e.pos
         if to_cam.x*to_cam.x + to_cam.z*to_cam.z < 4.0 * 4.0 {
             // dir = {-sin(yaw), 0, cos(yaw)}; solve for dir = -to_cam.
@@ -140,7 +105,7 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
         // Walk only while standing on something; in the air gravity owns it.
         supported := solid_at(gs, ix, feet - 1, iz) && e.pos.y - f32(feet) < 0.05
         if supported {
-            // Local forward is +z; matches rot2(lp.xz, -yaw) in entity_sdf.hlsl.
+            // Local forward is +z; matches basis_yaw in voxel_models.odin.
             dir := [3]f32{-math.sin(e.yaw), 0, math.cos(e.yaw)}
             np := e.pos + dir * (ENTITY_WALK_SPEED * dt)
             nx := int(math.floor(np.x))
@@ -188,15 +153,14 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
     }
 
     // Distance-sorted top-MAX_ENTITIES within the cull radius.
-    Candidate :: struct { idx: int, d2: f32 }
-    cands: [MAX_ENTITIES]Candidate
+    cands: [MAX_ENTITIES]Ent_Candidate
     n := 0
     cam := gs.camera.pos
     for e, idx in gs.entities {
         d := e.pos - cam
         d2 := d.x*d.x + d.y*d.y + d.z*d.z
         if d2 > ENTITY_CULL_RADIUS * ENTITY_CULL_RADIUS { continue }
-        c := Candidate{idx, d2}
+        c := Ent_Candidate{idx, d2}
         if n < MAX_ENTITIES {
             cands[n] = c
             n += 1
@@ -211,29 +175,46 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
         }
     }
 
-    // The glider takes the last slots if the list is full.
-    n = min(n, MAX_ENTITIES - glider_n)
-    gs.entity_count = i32(n + glider_n)
-    if gs.entity_count == 0 { return }
+    entities_upload(gs, cands[:n], t)
+}
 
-    packed: [MAX_ENTITIES]Entity_Gpu
-    for i in 0 ..< glider_n { packed[n + i] = glider[i] }
-    for i in 0 ..< n {
-        e := gs.entities[cands[i].idx]
-        half_xz, height := entity_kind_bounds(e.kind)
-        r := (half_xz + ANIM_MARGIN) * e.scale
-        h := (height + ANIM_MARGIN) * e.scale
-        packed[i] = {
-            pos        = e.pos,
-            yaw        = e.yaw,
-            aabb_min   = {e.pos.x - r, e.pos.y - 0.2 * e.scale, e.pos.z - r},
-            kind       = f32(e.kind),
-            aabb_max   = {e.pos.x + r, e.pos.y + h, e.pos.z + r},
-            anim_phase = e.phase,
-            color      = e.color,
-            seed       = e.seed,
-            scale      = e.scale,
+// Build the part instances for the culled entities (+ the glider) and upload.
+@(private="file")
+entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
+    frame := new(Ent_Frame, context.temp_allocator)
+    glider_add_parts(gs, frame) // first, so a full list never drops it
+    for c in cands {
+        e := gs.entities[c.idx]
+        if !ent_begin(frame) { break }
+        rot := basis_yaw(e.yaw)
+        s := e.scale
+        switch e.kind {
+        case .Blob:
+            tt  := t * 4 + e.phase
+            bob := 0.08 * math.sin(tt)
+            tint := e.color * (0.92 + 0.16 * e.seed)
+            ent_part(frame, .Blob_Body, e.pos + rot * [3]f32{0, bob * s, 0}, rot, {s, s, s}, tint)
+            // Diagonal leg pairs swing in opposite phase.
+            for i in 0 ..< 4 {
+                sx: f32 = i & 1 != 0 ? 1 : -1
+                sz: f32 = i & 2 != 0 ? 1 : -1
+                swing := 0.5 * math.sin(tt + (sx * sz > 0 ? 0 : math.PI))
+                hip := [3]f32{0.22 * sx, 0.35 + bob, 0.16 * sz} * s
+                ent_part(frame, .Blob_Leg, e.pos + rot * hip, rot * basis_rot_x(swing), {s, s, s}, tint)
+            }
+        case .Crystal:
+            hover := 0.15 * math.sin(t * 2 + e.phase)
+            spin := basis_yaw(e.yaw + t * 0.8 + e.phase)
+            ent_part(frame, .Crystal, e.pos + [3]f32{0, (0.75 + hover) * s, 0}, spin, {s, s, s})
         }
+        ent_end(frame)
     }
-    gpu_upload_buffer(gs, gs.entity_buf, &packed, int(gs.entity_count) * size_of(Entity_Gpu))
+    gs.entity_count = i32(frame.n_ents)
+    if frame.n_ents == 0 { return }
+    ent_build_bvh(frame)
+    // Entity records and BVH at their fixed slot ranges, parts right after.
+    size := int(offset_of(Ent_Frame, parts)) + frame.n_parts * size_of(Part_Gpu)
+    #assert(offset_of(Ent_Frame, nodes) == MAX_ENTITIES * size_of(Ent_Gpu))
+    #assert(offset_of(Ent_Frame, parts) == 3 * MAX_ENTITIES * size_of(Ent_Gpu))
+    gpu_upload_buffer(gs, gs.entity_buf, frame, size, gs.ent_dyn_base * 16)
 }

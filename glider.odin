@@ -419,59 +419,31 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
     }
 }
 
-// The glider as SDF entity records: the wing, and the control frame with the
-// pilot (pos = pilot eye, params = body pitch, bank, part flags; see
-// entity_sdf.hlsl). Each gets a tight world box around its rotated body-space
-// box, so rays that don't go near a part skip it on the box test.
-glider_entities :: proc(gs: ^Game_State) -> (out: [2]Entity_Gpu, n: int) {
+// The glider as one entity of voxel-model parts (voxel_models.odin), all in
+// the body frame at the pilot's eye. The wing unfolds by scaling its span.
+// The pilot's body only shows in the chase view — in first person it would
+// sit around the camera — but the arms on the bar always do.
+glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     g := &gs.glider
-    if !g.deployed { return }
-    GLIDER_WING  :: 1
-    GLIDER_FRAME :: 2
-    GLIDER_BODY  :: 4
-    pitch := g.path_angle + g.aoa
-    yaw   := -math.to_radians(g.heading)
+    if !g.deployed || !ent_begin(f) { return }
+    fwd, up := glider_axes(g.heading, g.path_angle + g.aoa, g.bank)
+    left := la.cross(up, fwd)
+    rot := basis_from_axes(left, up, fwd)
     p := gs.camera.pos
-    u := 0.12 + 0.88 * math.smoothstep(f32(0), 1, g.deploy_t)
-    span := 3.7 * u + 0.15
-
-    // Body point -> world (inverse of glider_body + the entity yaw).
-    to_world :: proc(b: [3]f32, pitch, bank, yaw: f32) -> [3]f32 {
-        rot :: proc(x, y, a: f32) -> (f32, f32) {
-            c, s := math.cos(a), math.sin(a)
-            return c * x - s * y, s * x + c * y
-        }
-        v := b
-        v.x, v.y = rot(v.x, v.y, -bank)
-        v.y, v.z = rot(v.y, v.z, -pitch)
-        v.x, v.z = rot(v.x, v.z, yaw)
-        return v
-    }
-    record :: proc(p: [3]f32, lo, hi: [3]f32, pitch, bank, yaw: f32, flags: f32, unfold: f32) -> Entity_Gpu {
-        mn := [3]f32{1e9, 1e9, 1e9}
-        mx := [3]f32{-1e9, -1e9, -1e9}
-        for i in 0 ..< 8 {
-            c := [3]f32{i & 1 != 0 ? hi.x : lo.x, i & 2 != 0 ? hi.y : lo.y, i & 4 != 0 ? hi.z : lo.z}
-            w := to_world(c, pitch, bank, yaw)
-            mn = la.min(mn, w)
-            mx = la.max(mx, w)
-        }
-        return {
-            pos = p, yaw = yaw, kind = f32(Entity_Kind.Glider),
-            aabb_min = p + mn, aabb_max = p + mx,
-            color = {0.95, 0.35, 0.12}, seed = unfold, scale = 1,
-            params = {pitch, bank, flags},
-        }
-    }
-    out[0] = record(p, {-span, 0.9, -2.05}, {span, 2.05, 2.0}, pitch, g.bank, yaw, GLIDER_WING, g.deploy_t)
-    if g.chase_dist > 1.5 {
-        out[1] = record(p, {-0.85, -0.6, -1.75}, {0.85, 1.35, 0.85}, pitch, g.bank, yaw, GLIDER_FRAME | GLIDER_BODY, g.deploy_t)
-    } else {
-        // First person: the box starts in front of the eye, so rays that
-        // don't head toward the bar never trace past the shoulders.
-        out[1] = record(p, {-0.85, -0.55, 0.15}, {0.85, 1.35, 0.85}, pitch, g.bank, yaw, GLIDER_FRAME, g.deploy_t)
-    }
-    return out, 2
+    unfold := 0.12 + 0.88 * math.smoothstep(f32(0), 1, g.deploy_t)
+    ent_part(f, .Glider_Wing, p, rot, {unfold, 1, 1})
+    // A-frame (two downtubes and the base bar) and the arms holding the bar.
+    at := proc(p: [3]f32, rot: Basis, b: [3]f32) -> [3]f32 { return p + rot * b }
+    apex := at(p, rot, {0, 1.25, 0.15})
+    bar_l := at(p, rot, {0.75, -0.45, 0.75})
+    bar_r := at(p, rot, {-0.75, -0.45, 0.75})
+    ent_segment(f, .Rod, apex, bar_l, up)
+    ent_segment(f, .Rod, apex, bar_r, up)
+    ent_segment(f, .Rod, bar_l, bar_r, up)
+    ent_segment(f, .Arm, at(p, rot, {0.2, -0.16, -0.05}), at(p, rot, {0.48, -0.42, 0.72}), up)
+    ent_segment(f, .Arm, at(p, rot, {-0.2, -0.16, -0.05}), at(p, rot, {-0.48, -0.42, 0.72}), up)
+    if g.chase_dist > 1.5 { ent_part(f, .Pilot_Body, p, rot) }
+    ent_end(f)
 }
 
 // Screen position (pixels in a w x h window) of a world direction, or false

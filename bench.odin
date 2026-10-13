@@ -1,6 +1,8 @@
 package main
 
 import "core:fmt"
+import "core:math"
+import la "core:math/linalg"
 import "core:slice"
 import "core:strings"
 import "core:time"
@@ -316,8 +318,28 @@ bench_glider_run :: proc(gs: ^Game_State) {
     }
     g.deployed = false
     cam.roll, cam.view_offset = 0, {}
+
     g.look_pitch, g.look_yaw = 0, 0
     cam.pitch = g.aim_pitch
     ms := bench_measure(gs)
     fmt.printf("  %-14s %6.2f ms\n", "no glider", ms)
+
+    // Close-ups of the first blob and crystal.
+    if bench_shot_dir == "" { return }
+    for kind in Entity_Kind {
+        for e in gs.entities {
+            if e.kind != kind { continue }
+            target := e.pos + [3]f32{0, 0.6, 0}
+            cam.pos = target + [3]f32{1.4, 0.7, 1.4}
+            ground := f32(surface_height_at(int(math.floor(cam.pos.x)), int(math.floor(cam.pos.z))))
+            cam.pos.y = max(cam.pos.y, ground + 2.2)
+            d := la.normalize(target - cam.pos)
+            cam.yaw   = math.to_degrees(math.atan2(d.x, d.z))
+            cam.pitch = math.to_degrees(math.asin(d.y))
+            entities_update(gs, 0) // dt 0: nobody walks off between frames
+            gpu_render(gs)
+            bench_screenshot(gs, fmt.tprintf("%s/entity_%v.bmp", bench_shot_dir, kind))
+            break
+        }
+    }
 }

@@ -386,7 +386,7 @@ options_panel_layout :: proc(gs: ^Game_State) {
             if opt_button("VolOff", "off", !gs.vol_enabled) { gs.vol_enabled = false }
         }
 
-        // SDF entities row
+        // Entities row
         if clay.UI(clay.ID("RowEntities"))({
             layout = { childGap = 8, childAlignment = {y = .Center},
                        sizing = { clay.SizingGrow(), clay.SizingFit() } },

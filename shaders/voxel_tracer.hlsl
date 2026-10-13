@@ -15,7 +15,7 @@ StructuredBuffer<int2>     chunk_owner      : register(t2, space0);
 StructuredBuffer<uint>     voxel_mask       : register(t3, space0);
 StructuredBuffer<int>      light_index      : register(t4, space0); // per slot: light pool id, or -1-light if uniform
 StructuredBuffer<uint>     light_pool       : register(t5, space0); // 512 light bytes per brick
-StructuredBuffer<float4>   sdf_entities     : register(t6, space0); // ENTITY_STRIDE float4s/entity (entities.odin)
+StructuredBuffer<uint4>    ent_data         : register(t6, space0); // entity voxel models + instances (voxel_models.odin)
 StructuredBuffer<uint>     far_data         : register(t7, space0); // far terrain tile table, then cells (far.odin)
 
 RWTexture2D<float4>        img_output        : register(u0, space1);
@@ -24,8 +24,7 @@ RWTexture2D<float>         depth_output      : register(u1, space1); // primary-
 #include "camera_uniforms.hlsl"
 
 #define HAS_VOXEL_LIGHT
-#define HAS_SDF_ENTITIES
-#include "entity_sdf.hlsl"
+#include "entity_voxel.hlsl"
 #include "voxel_common.hlsl"
 #include "far_field.hlsl"
 
@@ -348,25 +347,21 @@ static const float2 aa_offsets[4] = {
     float2(-0.125,  0.375),
 };
 
-// Shading for an SDF entity hit: direct sun (with entity occlusion) plus the
-// voxel light at the entity's surface. Entities are terminal hits in v1 (no
+// Shading for an entity voxel hit: direct sun (with entity occlusion) plus
+// the voxel light at the entity's surface. Entities are terminal hits (no
 // reflection bounce) so the caller breaks after compositing the result.
 float4 shade_entity(EntityHit ehit, float3 dir) {
-    int    ei = ehit.index;
-    float3 P  = ehit.hit_pos;
-    int    kind   = int(sdf_entities[ei * ENTITY_STRIDE + 1].w + 0.5);
-    float3 N  = kind == ENTITY_KIND_GLIDER ? ehit.normal : sdf_entity_normal(ei, P);
-    float  phase  = sdf_entities[ei * ENTITY_STRIDE + 2].w;
-    float4 e3     = sdf_entities[ei * ENTITY_STRIDE + 3]; // color, seed
-    float3 albedo = e3.rgb * (0.92 + 0.16 * e3.w);        // per-entity tone variety
-    if (kind == ENTITY_KIND_GLIDER) albedo = glider_albedo(ei, P, ehit.part);
+    float3 P = ehit.hit_pos;
+    float3 N = ehit.normal;
+    uint flags;
+    float3 albedo = entity_albedo(ehit, flags);
 
     float3 l  = light_dir_normalized;
-    // 0.05 offset vs the 0.01 shadow-trace epsilon: enough margin that
-    // grazing self-shadow rays don't acne on the entity's own surface.
-    float3 so = P + N * 0.05;
+    // Entity voxels are ~6 cm: a small offset keeps shadow rays off the
+    // face they start on without skipping the neighbouring voxels.
+    float3 so = P + N * 0.02;
 
-    // Sun: single hard tap (entities are small — soft-shadow taps not worth it).
+    // Sun: single hard tap.
     float ndl = dot(N, l);
     float sun = 0.0;
     if (ndl > 0.0) {
@@ -382,15 +377,15 @@ float4 shade_entity(EntityHit ehit, float3 dir) {
 
     float3 col = albedo * (ambient + sun + torch);
 
-    // Glider sail is thin fabric: lit from behind, the sun glows through it.
-    if (kind == ENTITY_KIND_GLIDER && ehit.part == GLIDER_PART_SAIL && ndl < 0.0) {
+    // Thin fabric (glider sail): lit from behind, the sun glows through it.
+    if ((flags & PAL_THIN) != 0u && ndl < 0.0) {
         col += albedo * (-ndl) * 0.6 * u_sun_intensity * trace_shadow_transmittance(P - N * 0.1, l);
     }
 
-    // Crystals glow on their own (unlit, like torch emission — trips bloom).
-    if (kind == ENTITY_KIND_CRYSTAL) {
-        float pulse = 0.85 + 0.15 * sin(u_time * 3.0 + phase);
-        col += e3.rgb * 4.0 * pulse;
+    // Emissive voxels (crystals) glow on their own and trip bloom.
+    if ((flags & PAL_EMIT) != 0u) {
+        float pulse = 0.85 + 0.15 * sin(u_time * 3.0 + float(ehit.index));
+        col += albedo * 4.0 * pulse;
     }
     return apply_fog(float4(col, 1.0), ehit.t, dir);
 }

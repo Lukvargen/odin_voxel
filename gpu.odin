@@ -34,7 +34,7 @@ Camera_Uniform :: struct #packed {
     reflect_amount: i32,
     quality:        i32,   // packed: AA*10 + shadow_rays
     vol:            i32,   // packed: enabled*100 + steps (0/16/24/32)
-    entity_count:   i32,   // active SDF entities uploaded this frame (entities.odin)
+    entity_count:   i32,   // entities uploaded this frame (entities.odin)
     time:           f32,   // seconds: cloud drift, flicker
     exposure:       f32,   // pre-tonemap multiplier
     fog_density:    f32,   // base distance-fog density
@@ -151,7 +151,7 @@ gpu_init :: proc(gs: ^Game_State) {
         // put the driver on a ~2x slower path), hence the shared buffers:
         // region counts ride at the end of chunk_index, and the far tile
         // table and cells share one buffer.
-        num_readonly_storage_buffers   = 8, // voxel_chunk (t0), chunk_index + region counts (t1), chunk_owner (t2), voxel_mask (t3), light_index (t4), light_pool (t5), sdf_entities (t6), far_data (t7)
+        num_readonly_storage_buffers   = 8, // voxel_chunk (t0), chunk_index + region counts (t1), chunk_owner (t2), voxel_mask (t3), light_index (t4), light_pool (t5), ent_data (t6), far_data (t7)
         num_readwrite_storage_textures = 2, // img_output (u0), depth_output (u1)
         num_uniform_buffers            = 1, // CameraUniforms (b0)
         threadcount_x                  = 16,
@@ -211,12 +211,21 @@ gpu_init :: proc(gs: ^Game_State) {
     gs.bloom_v_pipeline = bloom_pipeline(gs, #load("shaders/bloom_blur_v.spv"))
     assert(gs.bloom_v_pipeline != nil, "Failed to create bloom blur V pipeline")
 
-    // SDF entity list (entities.odin). Tiny; re-uploaded whenever entities exist.
-    gs.entity_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
-        usage = {.COMPUTE_STORAGE_READ},
-        size  = ENTITY_BUF_SIZE,
-    })
-    assert(gs.entity_buf != nil, "Failed to create entity buffer")
+    // Entity voxel models (static, uploaded once) followed by the per-frame
+    // entity/part instance lists (voxel_models.odin, entities.odin).
+    {
+        ent_models_bake()
+        words, dyn_base := ent_static_words()
+        defer delete(words)
+        gs.ent_dyn_base = dyn_base
+        dyn_size := int(offset_of(Ent_Frame, parts)) + size_of(Part_Gpu) * MAX_ENT_PARTS
+        gs.entity_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
+            usage = {.COMPUTE_STORAGE_READ},
+            size  = u32(len(words) * 4 + dyn_size),
+        })
+        assert(gs.entity_buf != nil, "Failed to create entity buffer")
+        gpu_upload_buffer(gs, gs.entity_buf, raw_data(words), len(words) * 4)
+    }
 
     // Scene color/depth/volumetric textures, sized to the current internal
     // render resolution (gs.render_w/h). Recreated on render-scale change.
@@ -501,7 +510,7 @@ flush_light_uploads :: proc(gs: ^Game_State) {
     _ = SDL.SubmitGPUCommandBuffer(cmd)
 }
 
-gpu_upload_buffer :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawptr, size: int) {
+gpu_upload_buffer :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawptr, size: int, dst_offset := 0) {
     transfer := SDL.CreateGPUTransferBuffer(gs.gpu_device, SDL.GPUTransferBufferCreateInfo{
         usage = .UPLOAD,
         size  = u32(size),
@@ -516,7 +525,7 @@ gpu_upload_buffer :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawptr, si
     copy_pass := SDL.BeginGPUCopyPass(cmd)
     SDL.UploadToGPUBuffer(copy_pass,
         SDL.GPUTransferBufferLocation{transfer_buffer = transfer, offset = 0},
-        SDL.GPUBufferRegion{buffer = dst, offset = 0, size = u32(size)},
+        SDL.GPUBufferRegion{buffer = dst, offset = u32(dst_offset), size = u32(size)},
         false)
     SDL.EndGPUCopyPass(copy_pass)
     _ = SDL.SubmitGPUCommandBuffer(cmd)
@@ -566,7 +575,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
     ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}
-    // The tracer additionally reads the voxel light (t4, t5) and the SDF
+    // The tracer additionally reads the voxel light (t4, t5) and the
     // entity list (t6).
     ro_bufs_tracer := [8]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.light_index_buf, gs.light_pool_buf, gs.entity_buf, gs.far_buf}
 
