@@ -514,9 +514,10 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
     // their voxels land in via set_voxel_world.
     tgt := Tree_Target{col = column, ox = gx, oz = gz, size = CHUNK_VOXELS}
     t_scan := time.tick_now()
+    lat := tree_lattice(gx, gz, CHUNK_VOXELS)
     for wz in gz - TREE_VOXEL_REACH ..< gz + CHUNK_VOXELS + TREE_VOXEL_REACH {
         for wx in gx - TREE_VOXEL_REACH ..< gx + CHUNK_VOXELS + TREE_VOXEL_REACH {
-            kind, base := tree_at(wx, wz)
+            kind, base := tree_at(&lat, wx, wz)
             if kind == .None { continue }
             t_gen := time.tick_now()
             generate_tree_kind(&tgt, kind, wx, base, wz)
@@ -967,6 +968,32 @@ edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^
                 col.modified = true
                 dirty[ring_slot(cx, cy, cz)] = true
                 append(changed, [3]int{wx, wy, wz})
+            }
+        }
+    }
+    if block == .Air { fill_dug_water(gs, changed[:]) }
+}
+
+// Dug-out voxels touching water (from the side or above) fill with it, so
+// digging into a lake or the seabed doesn't leave an air pocket. Only the
+// dug voxels fill, never existing caves: water doesn't flow. Every voxel in
+// `dug` is already in the caller's changed list and dirty slots.
+fill_dug_water :: proc(gs: ^Game_State, dug: [][3]int) {
+    FEEDS :: [5][3]int{{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}, {0, 1, 0}}
+    feeds := FEEDS
+    water := u32(Block_Type.Water)
+    for filled := true; filled; {
+        filled = false
+        for p in dug {
+            if get_voxel(gs, p.x, p.y, p.z) != 0 { continue }
+            for d in feeds {
+                q := p + d
+                if get_voxel(gs, q.x, q.y, q.z) != water { continue }
+                col := gs.columns[{p.x >> 3, p.z >> 3}] // CHUNK_VOXELS == 8
+                chunk_set_voxel(&col.chunks[chunk_y_index(p.y >> 3)],
+                                (p.x & 7) + (p.y & 7) * CHUNK_VOXELS + (p.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS, u8(water))
+                filled = true
+                break
             }
         }
     }

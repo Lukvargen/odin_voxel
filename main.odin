@@ -414,6 +414,8 @@ main :: proc() {
         ui_build_and_render(&gs, dt)
         autosave_tick(&gs)
 
+        free_all(context.temp_allocator)
+
         gs.prof_frames += 1
         if gs.prof_frames >= 300 {
             profile_dump("last ~300 frames")

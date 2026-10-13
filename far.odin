@@ -188,9 +188,10 @@ far_tile_compute :: proc(job: Far_Job) -> Far_Result {
 
     // Trees, through the real generators in summary mode.
     tgt := Tree_Target{far = &s, ox = ox, oz = oz, size = FAR_TILE}
+    lat := tree_lattice(ox, oz, FAR_TILE)
     for wz in oz - TREE_VOXEL_REACH ..< oz + FAR_TILE + TREE_VOXEL_REACH {
         for wx in ox - TREE_VOXEL_REACH ..< ox + FAR_TILE + TREE_VOXEL_REACH {
-            kind, base := tree_at(wx, wz)
+            kind, base := tree_at(&lat, wx, wz)
             if kind != .None { generate_tree_kind(&tgt, kind, wx, base, wz) }
         }
     }

@@ -208,6 +208,9 @@ worker_pool_drain_budget :: proc(pool: ^Worker_Pool, max_n: int) -> []Chunk_Resu
 worker_proc :: proc(data: rawptr) {
     pool := (^Worker_Pool)(data)
     for pool.running {
+        // Generation scratch (terrain grids, lattices) lives in the temp
+        // allocator for one job.
+        free_all(context.temp_allocator)
         // Pop the pending job NEAREST the player. While scanning, drop any
         // job that has drifted outside LOAD_RADIUS_XZ — the player moved on
         // before a worker reached it, so generating it now is wasted work

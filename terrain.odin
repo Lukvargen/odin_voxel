@@ -254,24 +254,39 @@ surface_height_at :: proc(wx, wz: int) -> int {
 // Samples for the w x d voxels starting at (ox, oz), row-major into out.
 terrain_grid :: proc(ox, oz, w, d: int, out: []Terrain_Sample) {
     assert(len(out) >= w * d)
-    lx0 := ox >> 3; lz0 := oz >> 3
-    lw  := ((ox + w - 1) >> 3) - lx0 + 2
-    ld  := ((oz + d - 1) >> 3) - lz0 + 2
-    lattice := make([]Coarse_Fields, lw * ld, context.temp_allocator)
-    for z in 0 ..< ld {
-        for x in 0 ..< lw { lattice[x + z * lw] = coarse_fields(lx0 + x, lz0 + z) }
-    }
+    lat := terrain_lattice(ox, oz, w, d)
     for z in 0 ..< d {
-        for x in 0 ..< w {
-            wx, wz := ox + x, oz + z
-            ix := (wx >> 3) - lx0; iz := (wz >> 3) - lz0
-            cell := Coarse_Cell{c = {
-                lattice[ix + iz * lw],       lattice[ix + 1 + iz * lw],
-                lattice[ix + (iz + 1) * lw], lattice[ix + 1 + (iz + 1) * lw],
-            }}
-            out[x + z * w] = terrain_from_cell(&cell, wx, wz)
-        }
+        for x in 0 ..< w { out[x + z * w] = lattice_sample(&lat, ox + x, oz + z) }
     }
+}
+
+// The coarse fields covering a w x d voxel area from (ox, oz), so many
+// samples in it (a grid, or scattered tree spots) share lattice points.
+Terrain_Lattice :: struct {
+    lx0, lz0, lw, ld: int,
+    fields: []Coarse_Fields, // temp allocated
+}
+
+terrain_lattice :: proc(ox, oz, w, d: int) -> Terrain_Lattice {
+    l := Terrain_Lattice{lx0 = ox >> 3, lz0 = oz >> 3} // COARSE == 8
+    l.lw = ((ox + w - 1) >> 3) - l.lx0 + 2
+    l.ld = ((oz + d - 1) >> 3) - l.lz0 + 2
+    l.fields = make([]Coarse_Fields, l.lw * l.ld, context.temp_allocator)
+    for z in 0 ..< l.ld {
+        for x in 0 ..< l.lw { l.fields[x + z * l.lw] = coarse_fields(l.lx0 + x, l.lz0 + z) }
+    }
+    return l
+}
+
+// Terrain at (wx, wz), which must lie inside the lattice's area.
+lattice_sample :: proc(l: ^Terrain_Lattice, wx, wz: int) -> Terrain_Sample {
+    ix := (wx >> 3) - l.lx0; iz := (wz >> 3) - l.lz0
+    f := l.fields
+    cell := Coarse_Cell{c = {
+        f[ix + iz * l.lw],       f[ix + 1 + iz * l.lw],
+        f[ix + (iz + 1) * l.lw], f[ix + 1 + (iz + 1) * l.lw],
+    }}
+    return terrain_from_cell(&cell, wx, wz)
 }
 
 // Steepness at a sample: the largest height step to a 4-neighbour.
@@ -347,22 +362,30 @@ biome_trees :: proc(b: Biome, height: int) -> [3]Tree_Rate {
     return {}
 }
 
-// The tree rooted at (wx, wz), if any, and its base y (the surface).
-tree_at :: proc(wx, wz: int) -> (kind: Tree_Kind, base_y: int) {
+// The tree rooted at (wx, wz), if any, and its base y (the surface). lat
+// must cover (wx .. wx + 2, wz); tree_lattice builds one for a scan area.
+tree_at :: proc(lat: ^Terrain_Lattice, wx, wz: int) -> (kind: Tree_Kind, base_y: int) {
     h := tree_hash(wx, wz, 42)
     if h >= TREE_MAX_DENSITY { return .None, 0 }
-    s := terrain_at(wx, wz)
+    s := lattice_sample(lat, wx, wz)
     if s.height < SEA_LEVEL + 1 { return .None, 0 }
     acc := 0.0
     for r in biome_trees(s.biome, s.height) {
         acc += r.density
         if h < acc {
             // No trees on cliffs (a probe 2 voxels out is enough).
-            if r.kind != .Cactus && abs(surface_height_at(wx + 2, wz) - s.height) >= CLIFF_SLOPE + 1 { return .None, 0 }
+            if r.kind != .Cactus && abs(lattice_sample(lat, wx + 2, wz).height - s.height) >= CLIFF_SLOPE + 1 { return .None, 0 }
             return r.kind, s.height
         }
     }
     return .None, 0
+}
+
+// Lattice for tree_at over every tree base that can reach the size x size
+// footprint at (ox, oz).
+tree_lattice :: proc(ox, oz, size: int) -> Terrain_Lattice {
+    return terrain_lattice(ox - TREE_VOXEL_REACH, oz - TREE_VOXEL_REACH,
+                           size + 2 * TREE_VOXEL_REACH + 2, size + 2 * TREE_VOXEL_REACH)
 }
 
 // ---- Ores ----------------------------------------------------------------
