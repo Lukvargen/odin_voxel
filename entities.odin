@@ -12,7 +12,7 @@ import SDL "vendor:sdl3"
 // shaders/entity_sdf.hlsl — there is no model data, only these parameters.
 
 MAX_ENTITIES        :: 64
-ENTITY_CULL_RADIUS  :: f32(96.0)  // gather range around camera (matches lights)
+ENTITY_CULL_RADIUS  :: f32(96.0)  // gather range around camera
 ENTITY_WALK_SPEED   :: f32(1.5)   // voxels/s
 ENTITY_TURN_RATE    :: f32(3.0)   // rad/s toward wander_yaw
 ENTITY_GRAVITY      :: f32(24.0)  // voxels/s^2 (blobs; crystals levitate)
@@ -93,8 +93,8 @@ entities_init :: proc(gs: ^Game_State) {
     }
 }
 
-// Per-frame: wander + ground-follow, then cull/pack/upload like lights_update.
-// Called once per frame between lights_update and gpu_render.
+// Per-frame: wander + ground-follow, then cull/pack/upload.
+// Called once per frame before gpu_render.
 entities_update :: proc(gs: ^Game_State, dt: f32) {
     if !gs.entities_enabled {
         gs.entity_count = 0
@@ -183,7 +183,7 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
         }
     }
 
-    // Distance-sorted top-MAX_ENTITIES within the cull radius (lights pattern).
+    // Distance-sorted top-MAX_ENTITIES within the cull radius.
     Candidate :: struct { idx: int, d2: f32 }
     cands: [MAX_ENTITIES]Candidate
     n := 0

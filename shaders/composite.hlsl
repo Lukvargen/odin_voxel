@@ -16,39 +16,7 @@ RWTexture2D<float4> img_output : register(u0, space1); // full-res scene color (
 #define GRADE_SATURATION  1.05
 #define GRADE_CONTRAST    1.04
 
-cbuffer CameraUniforms : register(b0, space2) {
-    float3 u_cam_pos;
-    float  _pad0;
-    float3 u_cam_fwd;
-    float  _pad1;
-    float3 u_cam_right;
-    float  _pad2;
-    float3 u_cam_up;
-    float  _pad3;
-    float3 u_light_dir_raw;
-    float  _pad4;
-    int    u_reflect_amount;
-    int    u_player_chunk_x;
-    int    u_player_chunk_z;
-    int    u_quality;
-    int    u_vol;
-    int    u_gi_frame_index;
-    int    u_gi_enabled;
-    float  u_gi_alpha;
-    int3   u_gi_cache_origin;
-    int    u_gi_epoch;
-    float  u_time;
-    int    u_light_count;
-    float  u_exposure;
-    float  u_fog_density;
-    float  u_cave_factor;
-    float  u_sun_intensity;
-    float2 _pad7;
-    int3   u_gi_region_min;
-    int    u_gi_region_mode;
-    int3   u_gi_region_dims;
-    float  u_gi_region_alpha;
-};
+#include "camera_uniforms.hlsl"
 
 // ACES filmic tone mapping (approximation by Krzysztof Narkowicz)
 float3 tone_map(float3 x) {

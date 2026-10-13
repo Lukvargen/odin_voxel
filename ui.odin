@@ -298,22 +298,6 @@ options_panel_layout :: proc(gs: ^Game_State) {
             if opt_button("Sh3", "soft", gs.shadow_rays == 3) { gs.shadow_rays = 3 }
         }
 
-        // GI enable row
-        if clay.UI(clay.ID("RowGIOn"))({
-            layout = { childGap = 8, childAlignment = {y = .Center},
-                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
-        }) {
-            opt_row(fmt.tprintf("GI: %v", gs.gi_enabled))
-            if clay.UI(clay.ID("GISpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
-            if opt_button("GIOn",  "on",  gs.gi_enabled)  {
-                gs.gi_enabled = true
-            }
-            if opt_button("GIOff", "off", !gs.gi_enabled) {
-                gs.gi_enabled     = false
-                gs.gi_frame_index = 0
-            }
-        }
-
         // Volumetric enable row
         if clay.UI(clay.ID("RowVolOn"))({
             layout = { childGap = 8, childAlignment = {y = .Center},

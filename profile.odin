@@ -14,6 +14,8 @@ Profile_Zone :: enum {
     Tree_Generate,   // generate_tree calls
     Integrate,       // main-thread column integrate (scan+pool+dirty mark)
     GPU_Upload,      // main-thread flush_gpu_uploads (transfer + copy pass)
+    Light_Column,    // worker: sky light flood fill for a new column
+    Light_Stitch,    // main thread: light exchange with neighbour columns
 }
 
 @(private="file") prof_ns:    [Profile_Zone]i64

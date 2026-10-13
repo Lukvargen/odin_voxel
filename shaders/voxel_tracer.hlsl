@@ -1,60 +1,28 @@
 // Voxel raytracer compute shader.
 // Two-level DDA traversal lives in voxel_common.hlsl; this pass does primary
-// rays + direct lighting + AO, and samples the world-space GI irradiance
-// cache (filled by gi_update.hlsl) for ambient.
+// rays + shading. Ambient sky light and torch light come from the per-voxel
+// light the CPU flood-fills (light.odin); the only lighting ray is the sun
+// shadow ray.
 
 // ---- Bindings ---------------------------------------------------------------
-// SPIR-V/SDL3 space0 order: RO storage bufs (t0..t4): voxel data + GI cache.
+// SPIR-V/SDL3 space0 order: RO storage bufs (t0..t6): voxel data, voxel
+// light, entities.
 // RW textures (set 1): img_output (u0), depth_output (u1).
 // Shared constants/functions come from voxel_common.hlsl AFTER these decls.
 StructuredBuffer<uint>     voxel_chunk      : register(t0, space0);
 StructuredBuffer<int>      chunk_index      : register(t1, space0);
 StructuredBuffer<int2>     chunk_owner      : register(t2, space0);
 StructuredBuffer<uint>     voxel_mask       : register(t3, space0);
-StructuredBuffer<uint>     gi_cache         : register(t4, space0);
-StructuredBuffer<float4>   point_lights     : register(t5, space0); // 2 float4s/light (lights.odin)
+StructuredBuffer<int>      light_index      : register(t4, space0); // per slot: light pool id, or -1-light if uniform
+StructuredBuffer<uint>     light_pool       : register(t5, space0); // 512 light bytes per brick
 StructuredBuffer<float4>   sdf_entities     : register(t6, space0); // ENTITY_STRIDE float4s/entity (entities.odin)
 
 RWTexture2D<float4>        img_output        : register(u0, space1);
 RWTexture2D<float>         depth_output      : register(u1, space1); // primary-hit dist, 1e30 = sky
 
-cbuffer CameraUniforms : register(b0, space2) {
-    float3 u_cam_pos;
-    float  _pad0;
-    float3 u_cam_fwd;
-    float  _pad1;
-    float3 u_cam_right;
-    float  _pad2;
-    float3 u_cam_up;
-    float  _pad3;
-    float3 u_light_dir_raw;
-    float  _pad4;
-    int    u_reflect_amount;
-    int    u_player_chunk_x;
-    int    u_player_chunk_z;
-    int    u_quality;
-    int    u_vol;
-    int    u_gi_frame_index;
-    int    u_gi_enabled;
-    float  u_gi_alpha;
-    int3   u_gi_cache_origin;
-    int    u_gi_epoch;
-    float  u_time;
-    int    u_light_count;
-    float  u_exposure;
-    float  u_fog_density;
-    float  u_cave_factor;
-    float  u_sun_intensity;
-    int    u_entity_count;
-    float  _pad7;
-    int3   u_gi_region_min;
-    int    u_gi_region_mode;
-    int3   u_gi_region_dims;
-    float  u_gi_region_alpha;
-};
+#include "camera_uniforms.hlsl"
 
-#define HAS_GI_CACHE
-#define HAS_POINT_LIGHTS
+#define HAS_VOXEL_LIGHT
 #define HAS_SDF_ENTITIES
 #include "entity_sdf.hlsl"
 #include "voxel_common.hlsl"
@@ -116,6 +84,27 @@ float4 apply_fog(float4 color, float dist, float3 ray_dir) {
 
     float transmit = t_dist * t_height * t_cave;
     return lerp(fog_color, color, transmit);
+}
+
+// ---- Light colors -------------------------------------------------------------
+
+// Ambient light from the open sky at full sky light: cool blue by day, warm
+// and dim with the sun at the horizon.
+float3 sky_ambient() {
+    return lerp(float3(0.22, 0.16, 0.13), float3(0.42, 0.50, 0.64),
+                smoothstep(0.0, 0.4, sun_elevation()));
+}
+
+#define TORCH_LIGHT_COLOR float3(1.6, 0.95, 0.45) // block light at level 15
+#define MIN_AMBIENT       0.015                   // so pitch-black caves keep a hint of shape
+
+// Fixed per-face dimming of the sky/torch light (as in Minecraft): tops get
+// it all, sides less, undersides least, so blocks keep their shape where the
+// sun doesn't reach.
+float face_shade(float3 n) {
+    if (n.y > 0.5)  return 1.0;
+    if (n.y < -0.5) return 0.5;
+    return abs(n.x) > 0.5 ? 0.8 : 0.65;
 }
 
 // Tone mapping lives in composite.hlsl — the LAST pass — so the volumetric
@@ -267,7 +256,7 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm)
 #define AA_SAMPLES 4
 
 // Sub-pixel offsets (in pixel units). Sample 0 is the pixel CENTER so it can
-// share the primary trace already done in main() for GI/depth (see use_hit0).
+// share the primary trace already done in main() for depth (see use_hit0).
 static const float2 aa_offsets[4] = {
     float2( 0.0,    0.0  ),
     float2( 0.125, -0.375),
@@ -275,8 +264,8 @@ static const float2 aa_offsets[4] = {
     float2(-0.125,  0.375),
 };
 
-// Shading for an SDF entity hit. Direct sun + point lights (both with entity
-// occlusion) over a constant ambient; entities are terminal hits in v1 (no
+// Shading for an SDF entity hit: direct sun (with entity occlusion) plus the
+// voxel light at the entity's surface. Entities are terminal hits in v1 (no
 // reflection bounce) so the caller breaks after compositing the result.
 float4 shade_entity(EntityHit ehit, float3 dir) {
     int    ei = ehit.index;
@@ -301,14 +290,10 @@ float4 shade_entity(EntityHit ehit, float3 dir) {
                   * u_sun_intensity;
     }
 
-    // Ambient: constant fallback for v1. GI follow-up is one line:
-    // ambient = sample_gi_cache(P + N, N) (gi_face_index picks the dominant
-    // face, so non-axis-aligned normals are fine).
-    float3 ambient = gi_fallback_amount().xxx;
-
-    // Torches: entity occlusion comes via the HAS_SDF_ENTITIES hook inside
-    // point_lights_direct.
-    float3 torch = (u_light_count > 0) ? point_lights_direct(so, N) : float3(0, 0, 0);
+    // Sky + torch light of the voxel just off the surface.
+    uint   lv    = sample_light(int3(floor(P + N * 0.6)));
+    float3 ambient = sky_ambient() * light_curve(float(lv >> 4)) + MIN_AMBIENT;
+    float3 torch   = TORCH_LIGHT_COLOR * light_curve(float(lv & 15u));
 
     float3 col = albedo * (ambient + sun + torch);
 
@@ -322,7 +307,7 @@ float4 shade_entity(EntityHit ehit, float3 dir) {
 
 // hit0/ehit0/use_hit0: precomputed primary voxel + entity hits for the center
 // ray — when set, the first bounce of this sample skips its traces entirely.
-float4 trace_pixel(float2 pixel, float2 dims, float3 gi_irr, float3 torch_direct, HitInfo hit0, EntityHit ehit0, bool use_hit0) {
+float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, EntityHit ehit0, bool use_hit0) {
     float3 origin = u_cam_pos;
     float nx = (pixel.x * 2.0 - dims.x) / dims.x;
     float ny = -(pixel.y * 2.0 - dims.y) / dims.y;
@@ -357,19 +342,23 @@ float4 trace_pixel(float2 pixel, float2 dims, float3 gi_irr, float3 torch_direct
             float3 looking_dir = u_cam_fwd;
             float epsilon      = 0.01;
 
-            // Distance-based shadow LOD: only 1 ray beyond 150 units (fog hides the difference)
-            float3 lighting;
-            {
-                float3 l = light_dir_normalized;
+            // Voxel light in front of this face: sky (ambient + whether the
+            // sun can reach at all) and block light (torches).
+            float2 lv = face_light(hit.vkey, surf_normal, hit_point);
+            float  sky_level = lv.x;
+            float3 lighting = (sky_ambient() * light_curve(sky_level) + MIN_AMBIENT
+                            + TORCH_LIGHT_COLOR * light_curve(lv.y)) * face_shade(surf_normal);
+
+            // Sun. No sky light means sealed off from the sky (caves), so the
+            // shadow ray is skipped there.
+            float3 l = light_dir_normalized;
+            float n_dot_l = dot(surf_normal, l);
+            if (n_dot_l > 0.0 && sky_level > 0.0) {
                 float3 shadow_origin = hit_point + surf_normal * epsilon;
-                float3 tangent   = normalize(abs(l.x) > 0.9 ? float3(0,1,0) : float3(1,0,0));
-                tangent          = normalize(cross(tangent, l));
-                float3 bitangent = cross(l, tangent);
-                float t0 = trace_shadow_transmittance(shadow_origin, normalize(l));
-                float shadow_factor;
-                // Soft shadow: 5-tap Poisson disc within a small sun cone (~3 deg radius).
-                // spread = tan(3 deg) ~= 0.052. Always taken in soft mode within range —
-                // t0 is binary for solid occluders, so it can't detect penumbra by itself.
+                float shadow_factor = trace_shadow_transmittance(shadow_origin, l);
+                // Soft shadow: 5-tap disc within a small sun cone (~3 deg).
+                // t0 is binary for solid occluders, so it can't detect
+                // penumbra by itself; only taken near the camera.
                 if ((u_quality % 10) == 3 && hit.t < 150.0) {
                     static const float2 disk[4] = {
                         float2( 0.0,    1.0),
@@ -377,45 +366,28 @@ float4 trace_pixel(float2 pixel, float2 dims, float3 gi_irr, float3 torch_direct
                         float2(-0.866, -0.5),
                         float2( 0.0,   -0.3),
                     };
+                    float3 tangent   = normalize(cross(abs(l.x) > 0.9 ? float3(0,1,0) : float3(1,0,0), l));
+                    float3 bitangent = cross(l, tangent);
                     float spread = 0.052; // tan(3 deg)
-                    float acc = t0;
+                    float acc = shadow_factor;
                     for (int k = 0; k < 4; k++) {
                         float3 jitter = (disk[k].x * tangent + disk[k].y * bitangent) * spread;
                         acc += trace_shadow_transmittance(shadow_origin, normalize(l + jitter));
                     }
                     shadow_factor = acc / 5.0;
-                } else {
-                    shadow_factor = t0;
                 }
-                // Entity occlusion: one shared tap across the soft-shadow
-                // taps (entity penumbra isn't worth 5x the cost).
+                // Entity occlusion: one tap (entity penumbra isn't worth 5x).
                 if (u_entity_count > 0 && shadow_factor > 0.0) {
-                    shadow_factor *= entity_shadow_transmittance(shadow_origin, normalize(l), RAY_MAX_LENGTH);
+                    shadow_factor *= entity_shadow_transmittance(shadow_origin, l, RAY_MAX_LENGTH);
                 }
-                float n_dot_l = dot(surf_normal, l);
-                // GI on:  ambient from the world-space irradiance cache, in full
-                //         RGB (bounce light carries color). Primary hits use the
-                //         precomputed gi_irr; reflection bounces sample directly.
-                // GI off: no ambient (pure direct only) so you can see exactly what GI adds
-                float3 ambient = float3(0.0, 0.0, 0.0);
-                if (u_gi_enabled != 0) {
-                    ambient = (i == 0 && use_hit0)
-                        ? gi_irr
-                        : sample_gi_cache(hit_point + surf_normal, surf_normal);
-                }
-                float sun_direct = n_dot_l > 0.0 ? n_dot_l * shadow_factor * u_sun_intensity : 0.0;
-                // Torch/point lights: precomputed for the primary hit (shared
-                // across AA samples like gi_irr); reflection bounces rely on
-                // the GI-cache ambient, which already carries torch bounce.
-                lighting = ambient + sun_direct + (i == 0 ? torch_direct : float3(0, 0, 0));
+                lighting += sun_tint() * (n_dot_l * shadow_factor * u_sun_intensity);
             }
 
-            // Leaf backlit glow: when sun is behind leaves, tint toward warm yellow-green
+            // Leaf backlit glow: sun behind the leaves tints them warm
+            // yellow-green, scaled by how open to the sky they are.
             if (hit.block_id == BLOCK_LEAVES) {
-                float back_light = clamp(-dot(surf_normal, light_dir_normalized), 0.0, 1.0);
-                float3 transmitted = trace_shadow_transmittance(hit_point - surf_normal * epsilon, -light_dir_normalized)
-                                     * float3(0.6, 0.9, 0.2) * 0.5;
-                hit_color.rgb += transmitted * back_light * sun_tint();
+                float back_light = saturate(-n_dot_l);
+                hit_color.rgb += float3(0.3, 0.45, 0.1) * back_light * light_curve(sky_level) * sun_tint();
             }
 
             float ao = (i == 0) ? compute_ao(hit_point + surf_normal * epsilon, surf_normal, hit_point) : 1.0;
@@ -453,8 +425,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     int2   ipix = int2(id.xy);
     if (id.x >= w || id.y >= h) return;
 
-    // 1. Trace the center primary ray ONCE — it feeds depth, the GI lookup,
-    // and AA sample 0 (whose offset is the pixel center).
+    // 1. Trace the center primary ray ONCE — it feeds depth and AA sample 0
+    // (whose offset is the pixel center).
     float2 pf  = float2(ipix);
     float  cnx = (pf.x * 2.0 - dims.x) / dims.x;
     float  cny = -(pf.y * 2.0 - dims.y) / dims.y;
@@ -466,24 +438,11 @@ void main(uint3 id : SV_DispatchThreadID) {
     float prim_depth = (hit0.block_id != 0u) ? hit0.t : 1e30;
     if (ehit0.index >= 0) prim_depth = min(prim_depth, ehit0.t);
 
-    // 2. Ambient for the primary surface from the world-space irradiance
-    // cache (smooth trilinear gradient — no per-pixel GI rays).
-    float3 gi_irr = gi_fallback_amount().xxx;
-    if (u_gi_enabled != 0 && hit0.block_id != 0u) {
-        gi_irr = sample_gi_cache(hit0.hit_pos + hit0.normal * 1.0, hit0.normal);
-    }
-
-    // Torch/point-light direct for the primary surface (shadow rays included).
-    float3 torch_direct = float3(0, 0, 0);
-    if (u_light_count > 0 && hit0.block_id != 0u) {
-        torch_direct = point_lights_direct(hit0.hit_pos + hit0.normal * 0.01, hit0.normal);
-    }
-
-    // 3. AA loop — u_quality packs: AA = u_quality/10, shadow mode = u_quality%10
+    // 2. AA loop — u_quality packs: AA = u_quality/10, shadow mode = u_quality%10
     int aa = clamp(u_quality / 10, 1, AA_SAMPLES);
     float4 color = float4(0, 0, 0, 0);
     for (int s = 0; s < aa; s++) {
-        color += trace_pixel(float2(ipix) + aa_offsets[s], dims, gi_irr, torch_direct, hit0, ehit0, s == 0);
+        color += trace_pixel(float2(ipix) + aa_offsets[s], dims, hit0, ehit0, s == 0);
     }
     color /= float(aa);
 

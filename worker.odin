@@ -2,6 +2,7 @@ package main
 
 import "core:sync"
 import "core:thread"
+import "core:time"
 
 WORKER_COUNT :: 12
 
@@ -192,6 +193,9 @@ worker_proc :: proc(data: rawptr) {
         }
 
         column := generate_column_at(job.key[0], job.key[1])
+        t_light := time.tick_now()
+        light_column_compute(&column)
+        profile_add(.Light_Column, t_light)
 
         // Precompute emptiness + occupancy mask here (worker side) so the
         // main-thread integrate is just pool-alloc + two mem.copy. This is

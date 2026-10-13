@@ -24,7 +24,8 @@
 #define BLOCK_TORCH  5u
 
 // Radiance a block's surface emits on its own (0 = not emissive). Added to
-// shading UNLIT (not multiplied by lighting/AO) and picked up by GI rays.
+// shading UNLIT (not multiplied by lighting/AO). Their light on the world
+// comes from block light (light.odin).
 // Bright enough to pass BLOOM_THRESHOLD so emissive blocks glow. Future
 // emissive blocks (lava, glowstone) slot in here.
 float3 block_emission(uint id) {
@@ -35,81 +36,6 @@ float3 block_emission(uint id) {
 #define LEAF_TRANSMIT 0.35
 
 #define PI 3.14159265359
-
-// ---- GI irradiance cache (world-anchored clipmap) ----------------------------
-// Camera-centered toroidal volume of GI_GRID_N^3 cells, GI_CELL_SIZE voxels
-// each. Per cell: 6 axis-face irradiances (R11G11B10-packed uint each) +
-// 1 validity/sample-count uint = GI_CELL_UINTS. Slot = mod(cell, N) per axis
-// (same ring trick as the chunk grid); cells outside
-// [u_gi_cache_origin, origin+N) are NOT resident and must not be tapped.
-#define GI_CELL_SIZE      2
-#define GI_GRID_N         128
-#define GI_CELL_UINTS     7
-#define GI_UPDATE_BUDGET  32768    // cells updated per frame
-#define GI_SWEEP_FRAMES   (GI_GRID_N * GI_GRID_N * GI_GRID_N / GI_UPDATE_BUDGET) // full refresh period (64)
-#define GI_RAYS           16       // rays per cell update
-
-// GI look tuning (one place):
-#define GI_SKY_DESAT      0.45     // 0 = full sky saturation, 1 = grayscale
-#define GI_AMBIENT_SCALE  0.9      // cache irradiance -> shading ambient
-#define GI_FEEDBACK       1.0      // multi-bounce gain: 1 = true radiosity (albedo alone
-                                   // conserves energy; loop gain = albedo*scale ~ 0.5 < 1).
-                                   // Lower values choke bounce light in caves. 0 = off.
-#define GI_FALLBACK       0.35     // ambient where the cache has no data yet
-
-// Cells whose center is inside solid store this count sentinel. They hold
-// zero irradiance; sampling down-weights them (instead of full weight) so
-// narrow caves/tunnels aren't crushed to black by wall cells — AO already
-// provides the high-frequency contact darkening.
-#define GI_SOLID_MARK     0xFFFFu
-#define GI_SOLID_WEIGHT   0.25
-
-// i-th cosine-weighted hemisphere direction around +Y (Fibonacci spiral).
-float3 fibonacci_hemisphere(uint i, uint N) {
-    float phi       = 2.0 * PI * frac(float(i) * 0.6180339887);
-    float cos_theta = 1.0 - (float(i) + 0.5) / float(N);
-    float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
-    return float3(cos(phi) * sin_theta, cos_theta, sin(phi) * sin_theta);
-}
-
-// i-th direction on the FULL sphere (Fibonacci spiral), for the cache update.
-float3 fibonacci_sphere(uint i, uint N) {
-    float phi       = 2.0 * PI * frac(float(i) * 0.6180339887);
-    float cos_theta = 1.0 - 2.0 * (float(i) + 0.5) / float(N);
-    float sin_theta = sqrt(max(0.0, 1.0 - cos_theta * cos_theta));
-    return float3(cos(phi) * sin_theta, cos_theta, sin(phi) * sin_theta);
-}
-
-// R11G11B10 float pack via the half-bits trick (no sign; irradiance >= 0).
-uint pack_r11g11b10(float3 c) {
-    c = max(c, 0.0);
-    uint r = (f32tof16(c.r) >> 4) & 0x7FFu;
-    uint g = (f32tof16(c.g) >> 4) & 0x7FFu;
-    uint b = (f32tof16(c.b) >> 5) & 0x3FFu;
-    return r | (g << 11) | (b << 22);
-}
-
-float3 unpack_r11g11b10(uint v) {
-    return float3(f16tof32((v         & 0x7FFu) << 4),
-                  f16tof32(((v >> 11) & 0x7FFu) << 4),
-                  f16tof32(((v >> 22) & 0x3FFu) << 5));
-}
-
-// Toroidal slot index for a world cell coord (caller guarantees residency).
-int gi_slot_index(int3 cell) {
-    int3 s = ((cell % GI_GRID_N) + GI_GRID_N) % GI_GRID_N;
-    return s.x + s.y * GI_GRID_N + s.z * GI_GRID_N * GI_GRID_N;
-}
-
-// Cache face index for an axis-aligned normal: +X,-X,+Y,-Y,+Z,-Z.
-int gi_face_index(float3 n) {
-    if (n.x >  0.5) return 0;
-    if (n.x < -0.5) return 1;
-    if (n.y >  0.5) return 2;
-    if (n.y < -0.5) return 3;
-    if (n.z >  0.5) return 4;
-    return 5;
-}
 
 // Integer-coordinate hashes (exact at any distance from spawn).
 float hash31i(int3 v) {
@@ -155,8 +81,8 @@ uint sample_voxel(float3 world_pos) {
     if (ry < 0 || ry >= GPU_CHUNKS_HEIGHT) return 0u;
 
     int ring_w = CHUNK_COUNT_WIDTH;
-    int rx = ((chunk_coord.x % ring_w) + ring_w) % ring_w;
-    int rz = ((chunk_coord.z % ring_w) + ring_w) % ring_w;
+    int rx = chunk_coord.x & (ring_w - 1); // ring_w is a power of two
+    int rz = chunk_coord.z & (ring_w - 1); // ring_w is a power of two
     int slot = rx + ry * ring_w + rz * ring_w * GPU_CHUNKS_HEIGHT;
 
     int2 owner = chunk_owner[slot];
@@ -299,8 +225,8 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
             // old voxel-level Y-bounds break).
             if ((ry < 0 && step_y <= 0) || (ry >= GPU_CHUNKS_HEIGHT && step_y >= 0)) break;
         } else {
-            int rx = ((x_i % ring_w) + ring_w) % ring_w;
-            int rz = ((z_i % ring_w) + ring_w) % ring_w;
+            int rx = x_i & (ring_w - 1); // ring_w is a power of two
+            int rz = z_i & (ring_w - 1); // ring_w is a power of two
             int slot_i = rx + ry * ring_w + rz * ring_w * GPU_CHUNKS_HEIGHT;
             int ci = chunk_index[slot_i];
             if (ci != -1) {
@@ -333,69 +259,6 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
     return transmittance;
 }
 
-// ---- Point lights (torches) ---------------------------------------------------
-// Only for shaders that declare a `point_lights` StructuredBuffer<float4>
-// (2 float4s per light: [0].xyz pos / .w radius, [1].rgb premultiplied HDR
-// color) — define HAS_POINT_LIGHTS before including this file.
-#ifdef HAS_POINT_LIGHTS
-
-// Windowed inverse-square falloff (UE-style): smooth cutoff at the radius,
-// physical 1/d² inside, +1 in the denominator clamps the near-zero blowup.
-float3 point_light_contrib(float4 pos_radius, float3 color, float3 p, float3 n,
-                           out float out_dist, out float3 out_L) {
-    out_dist = 0.0;
-    out_L    = float3(0, 0, 0);
-    float3 d     = pos_radius.xyz - p;
-    float  dist2 = dot(d, d);
-    float  R     = pos_radius.w;
-    if (dist2 > R * R) return float3(0, 0, 0);
-    float dist = sqrt(max(dist2, 1e-6));
-    float3 L   = d / dist;
-    float ndl  = dot(n, L);
-    if (ndl <= 0.0) return float3(0, 0, 0);
-    float ratio = dist / R;
-    float r2    = ratio * ratio;
-    float win   = saturate(1.0 - r2 * r2);
-    win *= win;
-    out_dist = dist;
-    out_L    = L;
-    return color * (ndl * win / (dist2 + 1.0));
-}
-
-// Unshadowed sum — used by gi_update at ray hit points (deterministic VPL-style
-// injection; bounce-magnitude light, so wall leaks are invisible in practice).
-float3 point_lights_unshadowed(float3 p, float3 n) {
-    float3 acc = float3(0, 0, 0);
-    for (int li = 0; li < u_light_count; li++) {
-        float dist; float3 L;
-        acc += point_light_contrib(point_lights[li * 2], point_lights[li * 2 + 1].rgb, p, n, dist, L);
-    }
-    return acc;
-}
-
-// Shadowed sum — per-pixel direct lighting in the tracer. The shadow ray stops
-// 0.9 short of the light center so it neither hits the solid emissive voxel
-// nor reports occlusion from geometry behind the light.
-float3 point_lights_direct(float3 p, float3 n) {
-    float3 acc = float3(0, 0, 0);
-    for (int li = 0; li < u_light_count; li++) {
-        float dist; float3 L;
-        float3 contrib = point_light_contrib(point_lights[li * 2], point_lights[li * 2 + 1].rgb, p, n, dist, L);
-        if (max(contrib.r, max(contrib.g, contrib.b)) < 0.004) continue; // negligible → skip shadow ray
-        float transmit = trace_shadow_transmittance(p + n * 0.01, L, dist - 0.9);
-#ifdef HAS_SDF_ENTITIES
-        // Entities block torch light too (defined only in the tracer; the
-        // gi_update/volumetric passes compile without entity data).
-        transmit *= entity_shadow_transmittance(p + n * 0.01, L, dist - 0.9);
-#endif
-        contrib *= transmit;
-        acc += contrib;
-    }
-    return acc;
-}
-
-#endif // HAS_POINT_LIGHTS
-
 // ---- Sky / albedo (pass-agnostic: take normalized light dir as arg) ---------
 
 // FBM clouds: value noise on integer lattice (hash31i — exact anywhere).
@@ -424,7 +287,7 @@ float fbm2(float2 p) {
 
 #define CLOUD_SCALE  1.6    // sky-plane uv scale (smaller = bigger clouds)
 #define CLOUD_COVER  0.48   // fbm threshold (higher = fewer clouds)
-#define CLOUD_DRIFT  float2(0.004, 0.0015) // uv/sec — slow so the GI cache keeps up
+#define CLOUD_DRIFT  float2(0.004, 0.0015) // uv/sec
 
 float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt) {
     float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
@@ -613,8 +476,8 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
             if (is_light) break;
         } else {
             // Wrap X and Z into ring buffer space [0, ring_w).
-            int rx = ((x_i % ring_w) + ring_w) % ring_w;
-            int rz = ((z_i % ring_w) + ring_w) % ring_w;
+            int rx = x_i & (ring_w - 1); // ring_w is a power of two
+            int rz = z_i & (ring_w - 1); // ring_w is a power of two
             int slot_i = rx + ry * ring_w + rz * ring_w * GPU_CHUNKS_HEIGHT;
             int ci = chunk_index[slot_i];
             if (ci != -1) {
@@ -669,67 +532,70 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
     return info;
 }
 
-// ---- GI cache sampling --------------------------------------------------------
-// Only for shaders that declare a `gi_cache` buffer (StructuredBuffer<uint> or
-// RWStructuredBuffer<uint>) — define HAS_GI_CACHE before including this file.
-#ifdef HAS_GI_CACHE
+// ---- Voxel light (light.odin) ---------------------------------------------
+// Only for shaders that declare `light_index` (StructuredBuffer<int>) and
+// `light_pool` (StructuredBuffer<uint>) — define HAS_VOXEL_LIGHT first.
+// One byte per voxel: sky light << 4 | block light, both 0..15.
+#ifdef HAS_VOXEL_LIGHT
 
-// Validity-weighted trilinear sample of the irradiance cache.
-// pos: world position ~1 voxel off the surface. n: axis-aligned surface normal
-// (selects the ambient-cube face). Falls back to GI_FALLBACK where the cache
-// has no data, and fades to it near the volume edge. Cells inside solids hold
-// valid zeros, so creases darken naturally.
-// Cave-aware ambient floor: above ground the constant fallback keeps warmup
-// and out-of-cache areas lit; deep underground it collapses to near-black so
-// caves are genuinely dark until a light is brought in. Real cache data
-// (skylight at cave mouths) always wins over the fallback.
-float gi_fallback_amount() {
-    return GI_FALLBACK * lerp(1.0, 0.06, u_cave_factor);
+#define LIGHT_SKY_FULL 0xF0u
+
+// Light byte of world voxel v. Outside the resident world reads as open sky,
+// so the far edge of the loaded area never turns black.
+uint sample_light(int3 v) {
+    int3 cc = v >> 3; // arithmetic shift: floor division by 8
+    int ry = cc.y - WORLD_CHUNK_Y_MIN;
+    if (ry < 0) return 0u;
+    if (ry >= GPU_CHUNKS_HEIGHT) return LIGHT_SKY_FULL;
+    int rx = cc.x & (CHUNK_COUNT_WIDTH - 1);
+    int rz = cc.z & (CHUNK_COUNT_WIDTH - 1);
+    int slot = rx + ry * CHUNK_COUNT_WIDTH + rz * CHUNK_COUNT_WIDTH * GPU_CHUNKS_HEIGHT;
+    int2 owner = chunk_owner[slot];
+    if (owner.x != cc.x || owner.y != cc.z) return LIGHT_SKY_FULL;
+    int li = light_index[slot];
+    if (li < 0) return uint(-1 - li); // whole chunk has one light value
+    int3 l  = v & 7;
+    int idx = li * 512 + l.x + l.y * 8 + l.z * 64;
+    return (light_pool[idx >> 2] >> ((uint(idx) & 3u) * 8u)) & 0xFFu;
 }
 
-float3 sample_gi_cache(float3 pos, float3 n) {
-    float3 cellf = pos / float(GI_CELL_SIZE) - 0.5;
-    int3   c0    = int3(floor(cellf));
-    float3 f     = cellf - float3(c0);
-    int    face  = gi_face_index(n);
+// Smooth (sky, block) light, each 0..15, at hit_pos on the face of voxel
+// vkey with normal nrm: bilinear over the four voxels in front of the face
+// nearest the point. Unlit samples (solid blocks) are left out so a wall
+// beside the face doesn't darken it (AO does contact shadow), and the
+// diagonal is skipped when both edge samples are blocked so light can't leak
+// around a corner.
+float2 face_light(int3 vkey, float3 nrm, float3 hit_pos) {
+    int3 n = int3(round(nrm));
+    int3 f = vkey + n;
+    int3 t = (n.x != 0) ? int3(0, 0, 1) : int3(1, 0, 0);
+    int3 b = (n.y != 0) ? int3(0, 0, 1) : int3(0, 1, 0);
+    float3 fr = frac(hit_pos);
+    float fu = dot(fr, float3(t));
+    float fv = dot(fr, float3(b));
+    int3 du = (fu < 0.5 ? -1 : 1) * t;
+    int3 dv = (fv < 0.5 ? -1 : 1) * b;
+    float wu = abs(fu - 0.5);
+    float wv = abs(fv - 0.5);
 
-    float3 sum  = float3(0,0,0);
-    float  wsum = 0.0;
-    [unroll]
-    for (int k = 0; k < 8; k++) {
-        int3 off = int3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
-        int3 c   = c0 + off;
-        int3 rel = c - u_gi_cache_origin;
-        float w  = (off.x != 0 ? f.x : 1.0 - f.x) *
-                   (off.y != 0 ? f.y : 1.0 - f.y) *
-                   (off.z != 0 ? f.z : 1.0 - f.z);
-        // Resident + ever written? (taps outside the volume would alias to
-        // wrong world cells through the toroidal wrap — reject them)
-        if (any(rel < 0) || any(rel >= GI_GRID_N)) w = 0.0;
-        else {
-            int base = gi_slot_index(c) * GI_CELL_UINTS;
-            uint cnt = gi_cache[base + 6];
-            if (cnt == 0u) w = 0.0;
-            else {
-                if (cnt == GI_SOLID_MARK) w *= GI_SOLID_WEIGHT; // in-rock zeros: soften, don't crush
-                sum += unpack_r11g11b10(gi_cache[base + face]) * w;
-            }
-        }
-        wsum += w;
-    }
+    uint l00 = sample_light(f);
+    uint l10 = sample_light(f + du);
+    uint l01 = sample_light(f + dv);
+    uint l11 = (l10 != 0u || l01 != 0u) ? sample_light(f + du + dv) : 0u;
 
-    float3 fallback = gi_fallback_amount().xxx;
-    if (wsum < 1e-4) return fallback * GI_AMBIENT_SCALE;
-    float3 irr = sum / wsum;
-
-    // Fade to the constant over the last ~8 cells before the volume edge so
-    // out-of-range geometry doesn't show a hard ambient seam.
-    float3 centerd = abs(cellf + 0.5 - (float3(u_gi_cache_origin) + GI_GRID_N * 0.5));
-    float  edge    = max(centerd.x, max(centerd.y, centerd.z));
-    float  fade    = saturate((float(GI_GRID_N) * 0.5 - edge) / 8.0);
-    return lerp(fallback, irr, fade) * GI_AMBIENT_SCALE;
+    float4 w = float4((1.0 - wu) * (1.0 - wv), wu * (1.0 - wv), (1.0 - wu) * wv, wu * wv);
+    w *= float4(1.0, l10 != 0u ? 1.0 : 0.0, l01 != 0u ? 1.0 : 0.0, l11 != 0u ? 1.0 : 0.0);
+    uint4 l = uint4(l00, l10, l01, l11);
+    float inv = 1.0 / (w.x + w.y + w.z + w.w);
+    return float2(dot(w, float4(l >> 4)), dot(w, float4(l & 15u))) * inv;
 }
 
-#endif // HAS_GI_CACHE
+// Light level (0..15) to brightness: each level is 20% dimmer, as in
+// Minecraft, so light falls off smoothly instead of linearly.
+float light_curve(float level) {
+    return level > 0.0 ? pow(0.8, 15.0 - level) : 0.0;
+}
+
+#endif // HAS_VOXEL_LIGHT
 
 #endif // VOXEL_COMMON_HLSL

@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:os"
 import SDL "vendor:sdl3"
 
 DOUBLE_TAP_MS :: u64(300)
@@ -24,6 +25,10 @@ Game_State :: struct {
     gpu_index:       []i32,
     gpu_chunk_owner: [][2]i32,           // ring slot -> (world_cx, world_cz)
     brick_pool:      Brick_Pool,         // free-list allocator over pool ids
+    gpu_light_index: []i32,              // ring slot -> light pool id, or uniform light (light.odin)
+    light_pool:      Brick_Pool,         // free-list allocator over light pool ids
+    light_dirty:     [dynamic]int,       // slots whose light needs GPU upload
+    stitch_queue:    [dynamic][2]int,    // integrated columns awaiting light stitching
     player_chunk:    [3]int,
     prof_frames:     int,
 
@@ -31,8 +36,6 @@ Game_State :: struct {
     pipeline:           ^SDL.GPUComputePipeline,
     vol_pipeline:       ^SDL.GPUComputePipeline,
     comp_pipeline:      ^SDL.GPUComputePipeline,
-    gi_update_pipeline: ^SDL.GPUComputePipeline,
-    gi_clear_pipeline:  ^SDL.GPUComputePipeline,
     bloom_pre_pipeline: ^SDL.GPUComputePipeline,
     bloom_h_pipeline:   ^SDL.GPUComputePipeline,
     bloom_v_pipeline:   ^SDL.GPUComputePipeline,
@@ -44,27 +47,13 @@ Game_State :: struct {
     index_buf:    ^SDL.GPUBuffer,
     owner_buf:    ^SDL.GPUBuffer,
     mask_buf:     ^SDL.GPUBuffer,
-    gi_cache_buf: ^SDL.GPUBuffer,     // world-space irradiance cache (clipmap)
-    light_buf:    ^SDL.GPUBuffer,     // point-light list (lights.odin)
+    light_index_buf: ^SDL.GPUBuffer,  // per-slot light pool id / uniform light (light.odin)
+    light_pool_buf:  ^SDL.GPUBuffer,  // 512-byte light bricks
     entity_buf:   ^SDL.GPUBuffer,     // SDF entity list (entities.odin)
 
-    // Emissive blocks (canonical CPU set; chunk-streaming independent).
-    // Value = placement time in seconds (drives the intensity ease-in).
-    torch_voxels: map[[3]int]f32,
-    dying_lights: [dynamic]Dying_Light, // removed torches fading out
     brush_radius:  int,  // edit sphere radius, 0 = single voxel (Ctrl+scroll)
     left_pressed:  bool, // single-frame press edges — with Ctrl held a click
     right_pressed: bool, // performs exactly one edit instead of repeating
-
-    // GI cache bookkeeping (see gpu_render)
-    gi_cache_origin:      [3]i32,  // clipmap volume origin, in cache cells
-    gi_cache_valid:       bool,    // false until the initial full clear
-    gi_alpha_boost_frames: i32,    // >0: high blend floor (light changed / edit / GI re-enabled)
-    gi_prev_light_dir:    [3]f32,  // for light-change detection
-    gi_epoch:             i32,     // completed sweeps (rotates per-visit ray sets)
-    gi_region_frames:     i32,     // >0: priority re-estimation of the region box each frame
-    gi_region_min:        [3]i32,  // priority box, world-cell coords
-    gi_region_max:        [3]i32,
 
     // Settings
     light_dir:      [3]f32,
@@ -73,8 +62,6 @@ Game_State :: struct {
     shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
     vol_enabled:    bool,  // volumetric god rays on/off (F4)
     vol_steps:      i32,   // volumetric march steps: 16/24/32 (F5 cycles)
-    gi_enabled:     bool,  // global illumination on/off (F6)
-    gi_frame_index: i32,   // current Fibonacci direction index (0..GI_DIRS-1)
     render_scale:   i32,   // internal-resolution divisor (1/2/4); pixel-art look
     render_w:       i32,   // = TEX_W / render_scale  (current scene texture size)
     render_h:       i32,   // = TEX_H / render_scale
@@ -83,7 +70,6 @@ Game_State :: struct {
     cave_factor:    f32,   // 0 surface .. 1 deep underground, smoothed per frame
     sun_intensity:  f32,   // sun direct-light multiplier
     selected_block: Block_Type, // hotbar selection (keys 1-5)
-    light_count:    i32,   // active point lights uploaded this frame
 
     // SDF entities (entities.odin)
     entities:         [dynamic]Entity,
@@ -104,14 +90,15 @@ Game_State :: struct {
 
 main :: proc() {
     gs: Game_State
+    bench := len(os.args) > 1 && os.args[1] == "bench"
 
     gs.reflect_amount = 1
-    gs.aa_samples     = 2   // F2 cycles 4->2->1
-    gs.shadow_rays    = 3   // F3 toggles 1<->3 (1=hard, 3=soft near); soft is cheap since the two-level shadow DDA
-    gs.vol_enabled    = true // F4 toggles volumetric god rays
-    gs.vol_steps      = 16   // measured: 16 = 55 FPS (~baseline), 24/32 cost more for little visual gain. F5 cycles 16/24/32
-    gs.gi_enabled     = true // F6 toggles GI; cache converges over a sweep (~GI_SWEEP_FRAMES frames)
-    gs.gi_frame_index = 0
+    // Defaults are the cheap settings; each step up roughly adds a frame's
+    // worth of GPU time on a GTX 1050 Ti (see `odin run . -- bench`).
+    gs.aa_samples     = 1     // F2 cycles 1->2->4
+    gs.shadow_rays    = 1     // F3 toggles 1<->3 (1=hard, 3=soft near)
+    gs.vol_enabled    = false // F4 toggles volumetric god rays
+    gs.vol_steps      = 16    // F5 cycles 16/24/32
     gs.render_scale   = RENDER_SCALE // 1 = full-res, 2/4 = pixel-art (options screen)
     gs.render_w       = TEX_W / gs.render_scale
     gs.render_h       = TEX_H / gs.render_scale
@@ -122,7 +109,6 @@ main :: proc() {
     gs.selected_block = .Stone
     gs.brush_radius   = BRUSH_RADIUS
     gs.entities_enabled = true
-    gs.gi_prev_light_dir = gs.light_dir
     gs.camera.pos     = {0, 80, 0}
     gs.camera.yaw     = 0
     gs.camera.pitch   = -20
@@ -135,7 +121,9 @@ main :: proc() {
     }
     defer SDL.Quit()
 
-    gs.window = SDL.CreateWindow("Voxel Raytracer", TEX_W, TEX_H, {.RESIZABLE})
+    // Bench runs hidden and unfocusable so it never interrupts the user.
+    window_flags: SDL.WindowFlags = bench ? {.HIDDEN, .NOT_FOCUSABLE} : {.RESIZABLE}
+    gs.window = SDL.CreateWindow("Voxel Raytracer", TEX_W, TEX_H, window_flags)
     if gs.window == nil {
         fmt.eprintln("CreateWindow failed:", SDL.GetError())
         return
@@ -147,11 +135,22 @@ main :: proc() {
     defer worker_pool_stop(&gs.pool)
     gs.dirty_slots = make([dynamic]int)
     defer delete(gs.dirty_slots)
+    gs.light_dirty = make([dynamic]int)
+    defer delete(gs.light_dirty)
+    defer delete(gs.stitch_queue)
     generate_world(&gs)
     gpu_init(&gs)
     defer gpu_destroy(&gs)
     entities_init(&gs)
     defer delete(gs.entities)
+
+    if bench {
+        for a in os.args[2:] {
+            if a == "quick" { bench_quick = true } else { bench_shot_dir = a }
+        }
+        bench_run(&gs)
+        return
+    }
 
     ui_init(&gs)
     defer ui_shutdown(&gs)
@@ -204,7 +203,7 @@ main :: proc() {
                         gs.camera.pos.x, gs.camera.pos.y, gs.camera.pos.z,
                         gs.camera.yaw, gs.camera.pitch, gs.camera.fly_mode)
                 case SDL.K_F2:
-                    gs.aa_samples = gs.aa_samples == 4 ? 2 : (gs.aa_samples == 2 ? 1 : 4)
+                    gs.aa_samples = gs.aa_samples == 1 ? 2 : (gs.aa_samples == 2 ? 4 : 1)
                     fmt.printf("AA samples: %d\n", gs.aa_samples)
                 case SDL.K_F3:
                     gs.shadow_rays = gs.shadow_rays == 3 ? 1 : 3
@@ -215,11 +214,6 @@ main :: proc() {
                 case SDL.K_F5:
                     gs.vol_steps = gs.vol_steps == 16 ? 24 : (gs.vol_steps == 24 ? 32 : 16)
                     fmt.printf("volumetric steps: %d\n", gs.vol_steps)
-                case SDL.K_F6:
-                    gs.gi_enabled = !gs.gi_enabled
-                    gs.gi_frame_index = 0
-                    if gs.gi_enabled { gs.gi_alpha_boost_frames = GI_SWEEP_FRAMES } // fast refresh of the stale cache
-                    fmt.printf("GI: %v\n", gs.gi_enabled)
                 // Hotbar: block selection for left-click placement.
                 // (Reflection bounces moved to the options panel.)
                 case SDL.K_1: gs.selected_block = .Stone
@@ -330,6 +324,7 @@ main :: proc() {
 
         // Integrate finished chunks from worker threads
         integrate_ready_chunks(&gs)
+        stitch_pending_columns(&gs)
 
         // Edits. The brush radius is user-set (Ctrl+scroll, 0 = single voxel)
         // and applies to place AND break. Ctrl turns either button into a
@@ -350,10 +345,8 @@ main :: proc() {
                     target = hit
                     block  = .Air
                 }
-                // Torch placement stays a single voxel regardless of brush
-                // (a sphere of emitters would blow past MAX_LIGHTS) and one
-                // per click (held-repeat would restart the intensity ease-in
-                // every frame).
+                // Torch placement stays a single voxel regardless of brush,
+                // one per click.
                 radius  := gs.brush_radius
                 do_edit := true
                 if block == .Torch {
@@ -363,56 +356,22 @@ main :: proc() {
                 if do_edit {
                     dirty: map[int]bool
                     defer delete(dirty)
-                    edit_sphere(&gs, target, block, &dirty, radius)
-                    // Keep the emissive set in sync: any torch inside the
-                    // edited sphere was just overwritten (break OR place).
-                    removed := lights_remove_in_sphere(&gs, target, radius)
-                    if block == .Torch {
-                        lights_add(&gs, target)
-                    }
-                    // Torch set changed → re-estimate the GI region at high
-                    // priority so the lighting crossfades smoothly instead of
-                    // ghosting (EMA-only) or popping dark (hard clear).
-                    if block == .Torch || removed > 0 {
-                        lights_queue_gi_region(&gs, target, radius)
-                    }
+                    changed: [dynamic][3]int
+                    defer delete(changed)
+                    edit_sphere(&gs, target, block, &dirty, &changed, radius)
+                    light_on_edit(&gs, changed[:])
                     for slot in dirty {
                         if refresh_chunk_index(&gs, slot) { gs.index_dirty = true }
                         append(&gs.dirty_slots, slot)
-                    }
-                    // Geometry changed: raise the GI blend floor for a sweep
-                    // so the cache relights the edit promptly instead of
-                    // nudging toward it at the steady-state 1/32 rate.
-                    // Single-voxel edits skip this — their lighting impact is
-                    // local (torches get the priority-region burst); the
-                    // global boost would just churn the whole cache.
-                    if radius > 0 {
-                        gs.gi_alpha_boost_frames = GI_SWEEP_FRAMES
                     }
                 }
             }
         }
 
-        // Light direction changed (Ctrl+look)? Boost the cache EMA so the new
-        // lighting overwrites stale irradiance within one sweep instead of
-        // slowly blending toward it.
-        dl := gs.light_dir - gs.gi_prev_light_dir
-        if abs(dl.x) + abs(dl.y) + abs(dl.z) > 0.0005 {
-            gs.gi_alpha_boost_frames = GI_SWEEP_FRAMES
-        }
-        gs.gi_prev_light_dir = gs.light_dir
-        if gs.gi_alpha_boost_frames > 0 { gs.gi_alpha_boost_frames -= 1 }
-
         flush_gpu_uploads(&gs)
-        lights_update(&gs)
         entities_update(&gs, dt)
         gpu_render(&gs)
         ui_build_and_render(&gs, dt)
-
-        if gs.gi_enabled {
-            gs.gi_frame_index = (gs.gi_frame_index + 1) % GI_SWEEP_FRAMES
-            if gs.gi_frame_index == 0 { gs.gi_epoch += 1 }
-        }
 
         gs.prof_frames += 1
         if gs.prof_frames >= 300 {

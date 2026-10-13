@@ -14,43 +14,10 @@ StructuredBuffer<uint>    voxel_chunk  : register(t1, space0);
 StructuredBuffer<int>     chunk_index  : register(t2, space0);
 StructuredBuffer<int2>    chunk_owner  : register(t3, space0);
 StructuredBuffer<uint>    voxel_mask   : register(t4, space0);
-StructuredBuffer<float4>  point_lights : register(t5, space0); // 2 float4s/light (lights.odin)
 
 RWTexture2D<float4>       vol_output  : register(u0, space1); // half-res inscatter
 
-cbuffer CameraUniforms : register(b0, space2) {
-    float3 u_cam_pos;
-    float  _pad0;
-    float3 u_cam_fwd;
-    float  _pad1;
-    float3 u_cam_right;
-    float  _pad2;
-    float3 u_cam_up;
-    float  _pad3;
-    float3 u_light_dir_raw;
-    float  _pad4;
-    int    u_reflect_amount;
-    int    u_player_chunk_x;
-    int    u_player_chunk_z;
-    int    u_quality;
-    int    u_vol;
-    int    u_gi_frame_index;
-    int    u_gi_enabled;
-    float  u_gi_alpha;
-    int3   u_gi_cache_origin;
-    int    u_gi_epoch;
-    float  u_time;
-    int    u_light_count;
-    float  u_exposure;
-    float  u_fog_density;
-    float  u_cave_factor;
-    float  u_sun_intensity;
-    float2 _pad7;
-    int3   u_gi_region_min;
-    int    u_gi_region_mode;
-    int3   u_gi_region_dims;
-    float  u_gi_region_alpha;
-};
+#include "camera_uniforms.hlsl"
 
 #include "voxel_common.hlsl"
 
@@ -74,7 +41,6 @@ float dither(uint2 p) {
 #define VOL_DENSITY     0.009   // uniform participating-media density (tuned down)
 #define VOL_HG_G        0.62    // forward-scatter anisotropy
 #define VOL_INTENSITY   1.0     // overall shaft brightness (tuned down from 1.35)
-#define VOL_TORCH_SCALE 0.04    // point-light inscatter strength (halo around torches)
 
 [numthreads(16, 16, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
@@ -145,30 +111,5 @@ void main(uint3 id : SV_DispatchThreadID) {
     // through cave ceilings near the surface.
     shaft *= lerp(1.0, 0.25, u_cave_factor);
 
-    // Torch glow: closed-form inscatter per point light, no marching or
-    // shadowing — ∫ dt / |ro + t·rd − L|² over [0, march_len] is analytic.
-    // Reads as a soft halo around each torch; boosted underground where the
-    // air feels thicker.
-    float3 glow = float3(0, 0, 0);
-    for (int li = 0; li < u_light_count; li++) {
-        float4 pr = point_lights[li * 2];
-        float3 to = pr.xyz - ro;
-        float  tc = dot(to, rd);                          // closest-approach t
-        float  pd = sqrt(max(dot(to, to) - tc * tc, 0.25)); // perp distance (clamped)
-        float  R  = pr.w;
-        if (tc < -R || tc > march_len + R || pd > R * 2.5) continue;
-        // Occlusion: one shadow ray from the view ray's closest-approach
-        // point toward the light. Without it the analytic halo deposits on
-        // fog IN FRONT of walls that hide the torch (glow through walls).
-        float3 sp   = ro + rd * clamp(tc, 0.0, max(march_len - 0.5, 0.0));
-        float3 td   = pr.xyz - sp;
-        float  tlen = length(td);
-        float  vis  = trace_shadow_transmittance(sp, td / max(tlen, 1e-4), tlen - 0.9);
-        if (vis <= 0.0) continue;
-        float integral = (atan2(march_len - tc, pd) + atan2(tc, pd)) / pd;
-        glow += point_lights[li * 2 + 1].rgb * (integral * VOL_DENSITY * VOL_TORCH_SCALE * vis);
-    }
-    glow *= lerp(1.0, 2.5, u_cave_factor);
-
-    vol_output[int2(id.xy)] = float4(shaft + glow, 1.0);
+    vol_output[int2(id.xy)] = float4(shaft, 1.0);
 }

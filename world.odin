@@ -27,6 +27,14 @@ VOXELS_PER_BRICK :: CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS // 512
 // uniform-stone sentinel (future) would let this shrink substantially.
 MAX_RESIDENT_BRICKS :: 1 << 20
 
+// Light bricks (512 bytes each) exist only for chunks whose light varies:
+// mostly the terrain surface, tree canopies, cave mouths and around torches.
+// gpu_light_index[slot] is a light pool id, or light_index_uniform(v) for a
+// chunk whose every voxel has light v.
+MAX_LIGHT_BRICKS :: 1 << 18
+
+light_index_uniform :: #force_inline proc(v: u8) -> i32 { return -1 - i32(v) }
+
 // Free-list allocator: a stack of free pool ids. free_top is the count of
 // ids available in free_ids[0:free_top]. alloc = pop, free = push. O(1),
 // no fragmentation, deterministic.
@@ -35,12 +43,12 @@ Brick_Pool :: struct {
     free_top: int,
 }
 
-pool_init :: proc(p: ^Brick_Pool) {
-    p.free_ids = make([]i32, MAX_RESIDENT_BRICKS)
-    for i in 0 ..< MAX_RESIDENT_BRICKS {
-        p.free_ids[i] = i32(MAX_RESIDENT_BRICKS - 1 - i) // pop order hands out 0,1,2...
+pool_init :: proc(p: ^Brick_Pool, n: int) {
+    p.free_ids = make([]i32, n)
+    for i in 0 ..< n {
+        p.free_ids[i] = i32(n - 1 - i) // pop order hands out 0,1,2...
     }
-    p.free_top = MAX_RESIDENT_BRICKS
+    p.free_top = n
 }
 
 // Returns a pool id in [0, MAX_RESIDENT_BRICKS) or -1 if exhausted.
@@ -86,7 +94,9 @@ Block_Type :: enum u8 {
 }
 
 Chunk :: struct {
-    voxels: [CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS]u8,
+    voxels:     [CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS]u8,
+    light:      ^[CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS]u8, // nil = all light_fill (light.odin)
+    light_fill: u8,
 }
 
 LOAD_RADIUS_XZ  :: 56   // must stay < CHUNKS_W/2 (=64) so a chunk and its ring-twin never coexist
@@ -146,12 +156,15 @@ generate_world :: proc(gs: ^Game_State) {
     // Slot-sized: indexed by ring slot.
     gs.gpu_index       = make([]i32,    total)
     gs.gpu_chunk_owner = make([][2]i32, total)
+    gs.gpu_light_index = make([]i32,    total)
 
-    pool_init(&gs.brick_pool)
+    pool_init(&gs.brick_pool, MAX_RESIDENT_BRICKS)
+    pool_init(&gs.light_pool, MAX_LIGHT_BRICKS)
 
     for i in 0 ..< total {
         gs.gpu_index[i]       = -1
         gs.gpu_chunk_owner[i] = {0x7fffffff, 0x7fffffff}
+        gs.gpu_light_index[i] = light_index_uniform(LIGHT_SKY)
     }
 
     gs.player_chunk = {
@@ -166,7 +179,8 @@ generate_world :: proc(gs: ^Game_State) {
     enqueue_radius(gs, STARTUP_RADIUS_XZ)
     for {
         integrate_ready_chunks(gs)
-        if worker_pool_idle(&gs.pool) { break }
+        stitch_pending_columns(gs)
+        if streaming_idle(gs) { break }
     }
 
     elapsed := time.duration_seconds(time.since(t0))
@@ -224,6 +238,10 @@ integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, empty: bool
         pool_free(&gs.brick_pool, old_id)
         gs.gpu_index[slot] = -1
     }
+    if lid := gs.gpu_light_index[slot]; lid >= 0 {
+        pool_free(&gs.light_pool, lid)
+        gs.gpu_light_index[slot] = light_index_uniform(LIGHT_SKY)
+    }
 
     gs.gpu_loaded[key]       = true
     gs.gpu_chunk_owner[slot] = {i32(wcx), i32(wcz)}
@@ -249,6 +267,7 @@ integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, empty: bool
 
     if gpu_ready {
         append(&gs.dirty_slots, slot)
+        append(&gs.light_dirty, slot)
         gs.index_dirty = true
     }
 }
@@ -274,7 +293,10 @@ integrate_ready_chunks :: proc(gs: ^Game_State) {
         probe := [3]int{wcx, 0, wcz}
         if probe in gs.gpu_loaded {
             // Column already present — discard the duplicate.
-            for cy in 0 ..< CHUNKS_H { free(r.column[cy]) }
+            for cy in 0 ..< CHUNKS_H {
+                chunk_free_light(r.column[cy])
+                free(r.column[cy])
+            }
             continue
         }
         for iy in 0 ..< CHUNKS_H {
@@ -283,8 +305,30 @@ integrate_ready_chunks :: proc(gs: ^Game_State) {
             gs.chunk_map[key] = r.column[iy]
             integrate_chunk(gs, key, r.column[iy], r.empty[iy], &r.mask[iy], true)
         }
+        append(&gs.stitch_queue, [2]int{wcx, wcz})
     }
     profile_add(.Integrate, t_int)
+}
+
+// Main-thread time per frame for stitching light between columns. New
+// columns stream in far from the player, so a few frames of unstitched
+// light at their borders is never seen; a spike in frame time would be.
+LIGHT_STITCH_BUDGET :: 1500 * time.Microsecond
+
+stitch_pending_columns :: proc(gs: ^Game_State) {
+    start := time.tick_now()
+    n := 0
+    for n < len(gs.stitch_queue) && time.tick_since(start) < LIGHT_STITCH_BUDGET {
+        c := gs.stitch_queue[n]
+        light_stitch_column(gs, c[0], c[1])
+        n += 1
+    }
+    remove_range(&gs.stitch_queue, 0, n)
+}
+
+// No columns generating, waiting to integrate, or waiting for light stitching.
+streaming_idle :: proc(gs: ^Game_State) -> bool {
+    return worker_pool_idle(&gs.pool) && len(gs.stitch_queue) == 0
 }
 
 // Generate an entire XZ column: all CHUNKS_H Y chunks at world chunk coord
@@ -744,8 +788,9 @@ BRUSH_RADIUS :: 5
 
 // Sets all voxels within a sphere of `radius` around center to `block`
 // (radius 0 = single voxel, used for torch placement). Marks each affected
-// chunk slot in `dirty`.
-edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^map[int]bool, radius := BRUSH_RADIUS) {
+// chunk slot in `dirty` and appends every voxel that changed to `changed`
+// (the caller relights them with light_on_edit).
+edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^map[int]bool, changed: ^[dynamic][3]int, radius := BRUSH_RADIUS) {
     r := radius
     for dz in -r ..= r {
         for dy in -r ..= r {
@@ -770,8 +815,10 @@ edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^
                 // Write only the authoritative chunk; the pool-aware
                 // refresh_chunk_index (called per dirty slot) syncs the
                 // pool-id voxel + mask blocks, handling air<->solid.
+                if chunk.voxels[vi] == u8(block) { continue }
                 chunk.voxels[vi] = u8(block)
                 dirty[slot] = true
+                append(changed, [3]int{wx, wy, wz})
             }
         }
     }

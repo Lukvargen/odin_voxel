@@ -10,21 +10,6 @@ import SDL "vendor:sdl3"
 TEX_W :: 800
 TEX_H :: 800
 
-// GI irradiance cache (must match the defines in voxel_common.hlsl).
-// Camera-centered toroidal volume of GI_GRID_N^3 cells, GI_CELL_SIZE voxels
-// each; 7 uints per cell (6 packed face irradiances + validity).
-GI_CELL_SIZE      :: 2
-GI_GRID_N         :: 128
-GI_CELL_UINTS     :: 7
-GI_UPDATE_BUDGET  :: 32768 // cells re-estimated per frame
-GI_SWEEP_FRAMES   :: i32(GI_GRID_N * GI_GRID_N * GI_GRID_N / GI_UPDATE_BUDGET) // full refresh period (64)
-GI_CACHE_BUF_SIZE :: GI_GRID_N * GI_GRID_N * GI_GRID_N * GI_CELL_UINTS * size_of(u32)
-GI_REGION_FRAMES  :: i32(60)   // priority-region burst length (torch place/break);
-                               // outlasts the light intensity fades (lights.odin)
-GI_REGION_ALPHA   :: f32(0.15) // blend floor per region update — low enough that
-                               // per-frame estimate noise averages out across the
-                               // burst (0.85^60 ≈ 0 residual)
-
 // Default internal render scale (divisor of the window resolution). The scene
 // is ray traced into a (TEX_W/scale)×(TEX_H/scale) texture and upscaled to the
 // window. scale > 1 trades resolution for a large primary-ray-cost saving (and
@@ -33,7 +18,7 @@ GI_REGION_ALPHA   :: f32(0.15) // blend floor per region update — low enough t
 // so render_w stays a multiple of the 16-wide threadgroup).
 RENDER_SCALE :: 1
 
-// Matches cbuffer CameraUniforms in voxel_tracer.hlsl.
+// Matches cbuffer CameraUniforms in shaders/camera_uniforms.hlsl.
 // Each float3 is padded to float4 (cbuffer std140 rules).
 Camera_Uniform :: struct #packed {
     pos:            [3]f32,
@@ -46,36 +31,16 @@ Camera_Uniform :: struct #packed {
     _pad3:          f32,
     light_dir:      [3]f32,
     _pad4:          f32,
-    reflect_amount:   i32,
-    player_chunk_x:   i32,
-    player_chunk_z:   i32,
-    quality:          i32,   // packed: AA*10 + shadow_rays
-    vol:              i32,   // packed: enabled*100 + steps (0/16/24/32)
-    gi_frame_index:   i32,   // cache sweep counter, [0, GI_SWEEP_FRAMES)
-    gi_enabled:       i32,
-    gi_alpha:         f32,   // blend-rate FLOOR (0 normal; ~0.6 after light/edit changes)
-    gi_cache_origin:  [3]i32, // clipmap volume origin, in cache cells
-    gi_epoch:         i32,   // completed-sweep counter (rotates ray sets)
-    time:             f32,   // seconds — cloud drift
-    light_count:      i32,   // active point lights (0 = none)
-    exposure:         f32,   // pre-tonemap multiplier
-    fog_density:      f32,   // base distance-fog density
-    cave_factor:      f32,   // 0 surface .. 1 deep underground (CPU-smoothed)
-    sun_intensity:    f32,   // sun direct-light multiplier (was hardcoded 2.5)
-    entity_count:     i32,   // active SDF entities uploaded this frame (entities.odin)
-    _pad7:            f32,
-    gi_region_min:    [3]i32, // priority re-estimation box (cells; mode != 0)
-    gi_region_mode:   i32,    // 0 = normal sweep, 1 = region re-estimation
-    gi_region_dims:   [3]i32,
-    gi_region_alpha:  f32,    // blend floor for region updates
-}
-
-// Matches cbuffer ClearBox in gi_clear.hlsl (world-cell box, max exclusive).
-Gi_Clear_Box :: struct #packed {
-    box_min: [3]i32,
-    _p0:     i32,
-    box_max: [3]i32,
-    _p1:     i32,
+    reflect_amount: i32,
+    quality:        i32,   // packed: AA*10 + shadow_rays
+    vol:            i32,   // packed: enabled*100 + steps (0/16/24/32)
+    entity_count:   i32,   // active SDF entities uploaded this frame (entities.odin)
+    time:           f32,   // seconds: cloud drift, flicker
+    exposure:       f32,   // pre-tonemap multiplier
+    fog_density:    f32,   // base distance-fog density
+    cave_factor:    f32,   // 0 surface .. 1 deep underground (CPU-smoothed)
+    sun_intensity:  f32,   // sun direct-light multiplier
+    _pad5:          [3]f32,
 }
 
 // (Re)create the scene color, depth, and half-res volumetric textures at the
@@ -165,7 +130,7 @@ gpu_set_render_scale :: proc(gs: ^Game_State, scale: i32) {
 
 gpu_init :: proc(gs: ^Game_State) {
     // SDL3 GPU device (SPIR-V shaders, debug mode on)
-    gs.gpu_device = SDL.CreateGPUDevice({.SPIRV}, true, nil)
+    gs.gpu_device = SDL.CreateGPUDevice({.SPIRV}, ODIN_DEBUG, nil)
     assert(gs.gpu_device != nil, "Failed to create GPU device")
     fmt.println("GPU driver:", SDL.GetGPUDeviceDriver(gs.gpu_device))
 
@@ -180,7 +145,7 @@ gpu_init :: proc(gs: ^Game_State) {
         code_size                      = len(shader_bytes),
         entrypoint                     = "main",
         format                         = {.SPIRV},
-        num_readonly_storage_buffers   = 7, // voxel_chunk (t0), chunk_index (t1), chunk_owner (t2), voxel_mask (t3), gi_cache (t4), point_lights (t5), sdf_entities (t6)
+        num_readonly_storage_buffers   = 7, // voxel_chunk (t0), chunk_index (t1), chunk_owner (t2), voxel_mask (t3), light_index (t4), light_pool (t5), sdf_entities (t6)
         num_readwrite_storage_textures = 2, // img_output (u0), depth_output (u1)
         num_uniform_buffers            = 1, // CameraUniforms (b0)
         threadcount_x                  = 16,
@@ -199,7 +164,7 @@ gpu_init :: proc(gs: ^Game_State) {
         entrypoint                     = "main",
         format                         = {.SPIRV},
         num_readonly_storage_textures  = 1, // depth_input (t0)
-        num_readonly_storage_buffers   = 5, // voxel buffers (t1..t4), point_lights (t5)
+        num_readonly_storage_buffers   = 4, // voxel buffers (t1..t4)
         num_readwrite_storage_textures = 1, // vol_output (u0)
         num_uniform_buffers            = 1,
         threadcount_x = 16, threadcount_y = 16, threadcount_z = 1,
@@ -240,48 +205,6 @@ gpu_init :: proc(gs: ^Game_State) {
     gs.bloom_v_pipeline = bloom_pipeline(gs, #load("shaders/bloom_blur_v.spv"))
     assert(gs.bloom_v_pipeline != nil, "Failed to create bloom blur V pipeline")
 
-    // GI cache update pass: voxel buffers RO + cache RW, 1D dispatch.
-    giu_bytes := #load("shaders/gi_update.spv")
-    gs.gi_update_pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, SDL.GPUComputePipelineCreateInfo{
-        code                          = raw_data(giu_bytes),
-        code_size                     = len(giu_bytes),
-        entrypoint                    = "main",
-        format                        = {.SPIRV},
-        num_readonly_storage_buffers  = 5, // voxel buffers (t0..t3), point_lights (t4)
-        num_readwrite_storage_buffers = 1, // gi_cache (u0)
-        num_uniform_buffers           = 1,
-        threadcount_x = 256, threadcount_y = 1, threadcount_z = 1,
-    })
-    assert(gs.gi_update_pipeline != nil, "Failed to create GI update pipeline")
-
-    // GI cache clear pass: cache RW + its own ClearBox cbuffer.
-    gic_bytes := #load("shaders/gi_clear.spv")
-    gs.gi_clear_pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, SDL.GPUComputePipelineCreateInfo{
-        code                          = raw_data(gic_bytes),
-        code_size                     = len(gic_bytes),
-        entrypoint                    = "main",
-        format                        = {.SPIRV},
-        num_readwrite_storage_buffers = 1, // gi_cache (u0)
-        num_uniform_buffers           = 1,
-        threadcount_x = 4, threadcount_y = 4, threadcount_z = 4,
-    })
-    assert(gs.gi_clear_pipeline != nil, "Failed to create GI clear pipeline")
-
-    // GI irradiance cache (~56 MB). Written by gi_update/gi_clear, read by
-    // the tracer; never uploaded from the CPU.
-    gs.gi_cache_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
-        usage = {.COMPUTE_STORAGE_READ, .COMPUTE_STORAGE_WRITE},
-        size  = GI_CACHE_BUF_SIZE,
-    })
-    assert(gs.gi_cache_buf != nil, "Failed to create GI cache buffer")
-
-    // Point-light list (torches). Tiny; re-uploaded whenever lights exist.
-    gs.light_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
-        usage = {.COMPUTE_STORAGE_READ},
-        size  = LIGHT_BUF_SIZE,
-    })
-    assert(gs.light_buf != nil, "Failed to create light buffer")
-
     // SDF entity list (entities.odin). Tiny; re-uploaded whenever entities exist.
     gs.entity_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
         usage = {.COMPUTE_STORAGE_READ},
@@ -319,6 +242,19 @@ gpu_init :: proc(gs: ^Game_State) {
     })
     assert(gs.owner_buf != nil, "Failed to create owner buffer")
 
+    // Voxel light (light.odin): per-slot light index + the light brick pool.
+    light_index_size := u32(len(gs.gpu_light_index) * size_of(i32))
+    gs.light_index_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
+        usage = {.COMPUTE_STORAGE_READ},
+        size  = light_index_size,
+    })
+    assert(gs.light_index_buf != nil, "Failed to create light index buffer")
+    gs.light_pool_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
+        usage = {.COMPUTE_STORAGE_READ},
+        size  = MAX_LIGHT_BRICKS * VOXELS_PER_BRICK,
+    })
+    assert(gs.light_pool_buf != nil, "Failed to create light pool buffer")
+
     mask_buf_size := u32(len(gs.gpu_voxel_mask) * size_of(u32))
     gs.mask_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
         usage = {.COMPUTE_STORAGE_READ},
@@ -335,6 +271,7 @@ gpu_init :: proc(gs: ^Game_State) {
     gpu_upload_buffer(gs, gs.index_buf, raw_data(gs.gpu_index),       int(index_buf_size))
     gpu_upload_buffer(gs, gs.owner_buf, raw_data(gs.gpu_chunk_owner), int(owner_buf_size))
     gpu_upload_buffer(gs, gs.mask_buf,  raw_data(gs.gpu_voxel_mask),  int(mask_buf_size))
+    gpu_upload_buffer(gs, gs.light_index_buf, raw_data(gs.gpu_light_index), int(light_index_size))
 }
 
 gpu_upload_buffer_range :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawptr, size: int, dst_offset: int) {
@@ -382,6 +319,7 @@ gpu_upload_owner_slot :: proc(gs: ^Game_State, slot: int) {
 // packed in destination order and emitted as a few large coalesced
 // uploads over contiguous destination runs, instead of one call per slot.
 flush_gpu_uploads :: proc(gs: ^Game_State) {
+    flush_light_uploads(gs)
     if len(gs.dirty_slots) == 0 && !gs.index_dirty { return }
     t_up := time.tick_now()
     defer profile_add(.GPU_Upload, t_up)
@@ -461,30 +399,6 @@ flush_gpu_uploads :: proc(gs: ^Game_State) {
     cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
     copy_pass := SDL.BeginGPUCopyPass(cmd)
 
-    // Coalesce a destination-sorted index list into one UploadToGPUBuffer
-    // per maximal contiguous run. `keys[i]` is the destination block index
-    // of the i-th packed element; transfer bytes are contiguous in the same
-    // order, so a run of consecutive keys is one copy.
-    upload_runs :: proc(copy_pass: ^SDL.GPUCopyPass, transfer: ^SDL.GPUTransferBuffer,
-        dst: ^SDL.GPUBuffer, keys: []int, block: int, base_xfer_off: int) {
-        i := 0
-        for i < len(keys) {
-            run_start := i
-            for i+1 < len(keys) && keys[i+1] == keys[i]+1 { i += 1 }
-            run_len := i - run_start + 1
-            SDL.UploadToGPUBuffer(copy_pass,
-                SDL.GPUTransferBufferLocation{
-                    transfer_buffer = transfer,
-                    offset = u32(base_xfer_off + run_start * block)},
-                SDL.GPUBufferRegion{
-                    buffer = dst,
-                    offset = u32(keys[run_start] * block),
-                    size   = u32(run_len * block)},
-                false)
-            i += 1
-        }
-    }
-
     upload_runs(copy_pass, transfer, gs.voxel_buf, pids[:], voxel_chunk_bytes, voxel_write_off)
     upload_runs(copy_pass, transfer, gs.mask_buf,  pids[:], mask_chunk_bytes,  mask_write_off)
     upload_runs(copy_pass, transfer, gs.owner_buf, oslots,  owner_slot_bytes,  owner_write_off)
@@ -502,6 +416,102 @@ flush_gpu_uploads :: proc(gs: ^Game_State) {
     clear(&gs.dirty_slots)
     gs.index_dirty = false
     _ = n // suppress unused warning
+}
+
+// Coalesce a destination-sorted index list into one UploadToGPUBuffer
+// per maximal contiguous run. `keys[i]` is the destination block index
+// of the i-th packed element; transfer bytes are contiguous in the same
+// order, so a run of consecutive keys is one copy.
+upload_runs :: proc(copy_pass: ^SDL.GPUCopyPass, transfer: ^SDL.GPUTransferBuffer,
+    dst: ^SDL.GPUBuffer, keys: []int, block: int, base_xfer_off: int) {
+    i := 0
+    for i < len(keys) {
+        run_start := i
+        for i+1 < len(keys) && keys[i+1] == keys[i]+1 { i += 1 }
+        run_len := i - run_start + 1
+        SDL.UploadToGPUBuffer(copy_pass,
+            SDL.GPUTransferBufferLocation{
+                transfer_buffer = transfer,
+                offset = u32(base_xfer_off + run_start * block)},
+            SDL.GPUBufferRegion{
+                buffer = dst,
+                offset = u32(keys[run_start] * block),
+                size   = u32(run_len * block)},
+            false)
+        i += 1
+    }
+}
+
+@(private="file")
+g_light_pool_warned: bool
+
+// Sync the GPU light of every dirty ring slot. A chunk with uniform light is
+// encoded straight into gpu_light_index; one whose light varies gets a light
+// pool brick holding its 512 bytes. Same coalesced upload as the voxels.
+flush_light_uploads :: proc(gs: ^Game_State) {
+    if len(gs.light_dirty) == 0 { return }
+
+    seen: map[int]bool
+    defer delete(seen)
+    Light_Upload :: struct { pid: int, light: ^[VOXELS_PER_BRICK]u8 }
+    ups: [dynamic]Light_Upload
+    defer delete(ups)
+    for slot in gs.light_dirty {
+        if slot in seen { continue }
+        seen[slot] = true
+        owner := gs.gpu_chunk_owner[slot]
+        if owner[0] == 0x7fffffff { continue }
+        key := [3]int{int(owner[0]), (slot / CHUNKS_W) % CHUNKS_H + WORLD_CHUNK_Y_MIN, int(owner[1])}
+        chunk := gs.chunk_map[key]
+        lid := gs.gpu_light_index[slot]
+        if chunk == nil || chunk.light == nil {
+            if lid >= 0 { pool_free(&gs.light_pool, lid) }
+            gs.gpu_light_index[slot] = light_index_uniform(chunk == nil ? LIGHT_SKY : chunk.light_fill)
+            continue
+        }
+        if lid < 0 {
+            lid = pool_alloc(&gs.light_pool)
+            if lid < 0 {
+                if !g_light_pool_warned {
+                    g_light_pool_warned = true
+                    fmt.eprintln("WARNING: light pool exhausted; raise MAX_LIGHT_BRICKS.")
+                }
+                gs.gpu_light_index[slot] = light_index_uniform(LIGHT_SKY)
+                continue
+            }
+            gs.gpu_light_index[slot] = lid
+        }
+        append(&ups, Light_Upload{int(lid), chunk.light})
+    }
+    clear(&gs.light_dirty)
+    slice.sort_by(ups[:], proc(a, b: Light_Upload) -> bool { return a.pid < b.pid })
+
+    index_bytes := len(gs.gpu_light_index) * size_of(i32)
+    index_off   := len(ups) * VOXELS_PER_BRICK
+    transfer := SDL.CreateGPUTransferBuffer(gs.gpu_device, SDL.GPUTransferBufferCreateInfo{
+        usage = .UPLOAD,
+        size  = u32(index_off + index_bytes),
+    })
+    defer SDL.ReleaseGPUTransferBuffer(gs.gpu_device, transfer)
+    base := uintptr(SDL.MapGPUTransferBuffer(gs.gpu_device, transfer, false))
+    pids := make([]int, len(ups))
+    defer delete(pids)
+    for u, i in ups {
+        mem.copy(rawptr(base + uintptr(i * VOXELS_PER_BRICK)), u.light, VOXELS_PER_BRICK)
+        pids[i] = u.pid
+    }
+    mem.copy(rawptr(base + uintptr(index_off)), raw_data(gs.gpu_light_index), index_bytes)
+    SDL.UnmapGPUTransferBuffer(gs.gpu_device, transfer)
+
+    cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
+    copy_pass := SDL.BeginGPUCopyPass(cmd)
+    upload_runs(copy_pass, transfer, gs.light_pool_buf, pids, VOXELS_PER_BRICK, 0)
+    SDL.UploadToGPUBuffer(copy_pass,
+        SDL.GPUTransferBufferLocation{transfer_buffer = transfer, offset = u32(index_off)},
+        SDL.GPUBufferRegion{buffer = gs.light_index_buf, offset = 0, size = u32(index_bytes)},
+        false)
+    SDL.EndGPUCopyPass(copy_pass)
+    _ = SDL.SubmitGPUCommandBuffer(cmd)
 }
 
 gpu_upload_buffer :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawptr, size: int) {
@@ -525,135 +535,37 @@ gpu_upload_buffer :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawptr, si
     _ = SDL.SubmitGPUCommandBuffer(cmd)
 }
 
-// Zero all GI cache cells in a world-cell box (max exclusive). Pushes the
-// ClearBox cbuffer at uniform slot 0 — callers must push CameraUniforms
-// AFTERWARD for the passes that need it.
-gi_dispatch_clear :: proc(gs: ^Game_State, cmd: ^SDL.GPUCommandBuffer, bmin, bmax: [3]i32) {
-    if bmin.x >= bmax.x || bmin.y >= bmax.y || bmin.z >= bmax.z { return }
-    box := Gi_Clear_Box{box_min = bmin, box_max = bmax}
-    SDL.PushGPUComputeUniformData(cmd, 0, &box, size_of(box))
-    rw := SDL.GPUStorageBufferReadWriteBinding{buffer = gs.gi_cache_buf}
-    p := SDL.BeginGPUComputePass(cmd, nil, 0, &rw, 1)
-    SDL.BindGPUComputePipeline(p, gs.gi_clear_pipeline)
-    SDL.DispatchGPUCompute(p,
-        u32(bmax.x - bmin.x + 3) / 4,
-        u32(bmax.y - bmin.y + 3) / 4,
-        u32(bmax.z - bmin.z + 3) / 4)
-    SDL.EndGPUComputePass(p)
-}
-
-gpu_render :: proc(gs: ^Game_State) {
+// want_fence: return a fence for the submission (bench mode times the GPU
+// with it); the caller must release it. Otherwise returns nil.
+gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
-    if cmd == nil { return }
+    if cmd == nil { return nil }
 
-    // --- GI clipmap origin tracking + invalidation -------------------------
-    // Volume is centered on the camera; when it shifts, the slabs of cells
-    // that ENTER the volume alias (toroidally) to stale far-side data and
-    // must be zeroed before anything samples them this frame.
-    n :: i32(GI_GRID_N)
-    new_origin := [3]i32{
-        i32(math.floor(gs.camera.pos.x / GI_CELL_SIZE)) - n / 2,
-        i32(math.floor(gs.camera.pos.y / GI_CELL_SIZE)) - n / 2,
-        i32(math.floor(gs.camera.pos.z / GI_CELL_SIZE)) - n / 2,
-    }
-    if !gs.gi_cache_valid {
-        gi_dispatch_clear(gs, cmd, new_origin, new_origin + n)
-        gs.gi_cache_valid = true
-    } else if new_origin != gs.gi_cache_origin {
-        d := new_origin - gs.gi_cache_origin
-        if abs(d.x) >= n || abs(d.y) >= n || abs(d.z) >= n {
-            gi_dispatch_clear(gs, cmd, new_origin, new_origin + n) // teleport
-        } else {
-            lo := new_origin
-            hi := new_origin + n
-            // Entering slab per moved axis (full cross-section of the new
-            // volume; overlap between axes double-clears harmlessly).
-            if d.x > 0 { gi_dispatch_clear(gs, cmd, {hi.x - d.x, lo.y, lo.z}, hi) }
-            if d.x < 0 { gi_dispatch_clear(gs, cmd, lo, {lo.x - d.x, hi.y, hi.z}) }
-            if d.y > 0 { gi_dispatch_clear(gs, cmd, {lo.x, hi.y - d.y, lo.z}, hi) }
-            if d.y < 0 { gi_dispatch_clear(gs, cmd, lo, {hi.x, lo.y - d.y, hi.z}) }
-            if d.z > 0 { gi_dispatch_clear(gs, cmd, {lo.x, lo.y, hi.z - d.z}, hi) }
-            if d.z < 0 { gi_dispatch_clear(gs, cmd, lo, {hi.x, hi.y, lo.z - d.z}) }
-        }
-    }
-    gs.gi_cache_origin = new_origin
-
-    // Push per-frame uniform data (camera + light + GI cache state). Must
-    // come after the clear dispatches (they overwrite uniform slot 0).
     fwd, right, up := camera_basis(gs.camera)
     render_pos := gs.camera.pos
     render_pos.y += gs.camera.step_visual_offset
     uniform := Camera_Uniform{
-        pos             = render_pos,
-        fwd             = fwd,
-        right           = right,
-        up              = up,
-        light_dir       = gs.light_dir,
-        reflect_amount  = gs.reflect_amount,
-        player_chunk_x  = i32(gs.player_chunk[0]),
-        player_chunk_z  = i32(gs.player_chunk[2]),
-        quality         = gs.aa_samples * 10 + gs.shadow_rays,
-        vol             = (gs.vol_enabled ? 100 : 0) + gs.vol_steps,
-        gi_frame_index  = gs.gi_frame_index,
-        gi_enabled      = gs.gi_enabled ? 1 : 0,
-        gi_alpha        = gs.gi_alpha_boost_frames > 0 ? 0.6 : 0.0, // floor; shader uses max(1/(n+1), floor)
-        gi_cache_origin = new_origin,
-        gi_epoch        = gs.gi_epoch,
-        time            = f32(SDL.GetTicks()) / 1000.0,
-        light_count     = gs.light_count,
-        exposure        = gs.exposure,
-        fog_density     = gs.fog_density,
-        cave_factor     = gs.cave_factor,
-        sun_intensity   = gs.sun_intensity,
-        entity_count    = gs.entity_count,
+        pos            = render_pos,
+        fwd            = fwd,
+        right          = right,
+        up             = up,
+        light_dir      = gs.light_dir,
+        reflect_amount = gs.reflect_amount,
+        quality        = gs.aa_samples * 10 + gs.shadow_rays,
+        vol            = (gs.vol_enabled ? 100 : 0) + gs.vol_steps,
+        entity_count   = gs.entity_count,
+        time           = f32(SDL.GetTicks()) / 1000.0,
+        exposure       = gs.exposure,
+        fog_density    = gs.fog_density,
+        cave_factor    = gs.cave_factor,
+        sun_intensity  = gs.sun_intensity,
     }
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
-    // Shared by gi_update + volumetric: voxel buffers + point lights last.
-    ro_bufs := [5]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.light_buf}
-    // The tracer additionally reads the GI cache (t4), lights (t5) and the
-    // SDF entity list (t6).
-    ro_bufs_tracer := [7]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.gi_cache_buf, gs.light_buf, gs.entity_buf}
-
-    // --- Pass 0: GI cache progressive update (skipped while GI is off) -----
-    if gs.gi_enabled {
-        // Priority region burst (torch placed/removed): re-estimate every
-        // cell of the box THIS frame with a raised blend floor, so torch
-        // lighting crossfades in/out over ~GI_REGION_FRAMES frames instead
-        // of popping (hard clear) or ghosting (sweep-rate EMA).
-        if gs.gi_region_frames > 0 {
-            lo := new_origin
-            hi := new_origin + n
-            bmin := [3]i32{max(gs.gi_region_min.x, lo.x), max(gs.gi_region_min.y, lo.y), max(gs.gi_region_min.z, lo.z)}
-            bmax := [3]i32{min(gs.gi_region_max.x, hi.x), min(gs.gi_region_max.y, hi.y), min(gs.gi_region_max.z, hi.z)}
-            dims := bmax - bmin
-            if dims.x > 0 && dims.y > 0 && dims.z > 0 {
-                runiform := uniform
-                runiform.gi_region_mode  = 1
-                runiform.gi_region_min   = bmin
-                runiform.gi_region_dims  = dims
-                runiform.gi_region_alpha = GI_REGION_ALPHA
-                SDL.PushGPUComputeUniformData(cmd, 0, &runiform, size_of(runiform))
-                cells := u32(dims.x * dims.y * dims.z)
-                rw_gi_r := SDL.GPUStorageBufferReadWriteBinding{buffer = gs.gi_cache_buf}
-                pr := SDL.BeginGPUComputePass(cmd, nil, 0, &rw_gi_r, 1)
-                SDL.BindGPUComputePipeline(pr, gs.gi_update_pipeline)
-                SDL.BindGPUComputeStorageBuffers(pr, 0, raw_data(ro_bufs[:]), 5)
-                SDL.DispatchGPUCompute(pr, (cells + 255) / 256, 1, 1)
-                SDL.EndGPUComputePass(pr)
-                // Restore the normal (mode 0) uniforms for all later passes.
-                SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
-            }
-            gs.gi_region_frames -= 1
-        }
-
-        rw_gi := SDL.GPUStorageBufferReadWriteBinding{buffer = gs.gi_cache_buf}
-        p0 := SDL.BeginGPUComputePass(cmd, nil, 0, &rw_gi, 1)
-        SDL.BindGPUComputePipeline(p0, gs.gi_update_pipeline)
-        SDL.BindGPUComputeStorageBuffers(p0, 0, raw_data(ro_bufs[:]), 5)
-        SDL.DispatchGPUCompute(p0, GI_UPDATE_BUDGET / 256, 1, 1)
-        SDL.EndGPUComputePass(p0)
-    }
+    ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}
+    // The tracer additionally reads the voxel light (t4, t5) and the SDF
+    // entity list (t6).
+    ro_bufs_tracer := [7]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.light_index_buf, gs.light_pool_buf, gs.entity_buf}
 
     // Threadgroup counts at the current render resolution (ceil-divide by the
     // 16×16 group; shaders guard out-of-range threads so over-dispatch is safe).
@@ -675,15 +587,18 @@ gpu_render :: proc(gs: ^Game_State) {
     SDL.EndGPUComputePass(p1)
 
     // --- Pass 2: half-res volumetric march → vol_texture ---
-    // Reads depth (RO storage tex, t0) + voxel buffers (t1..t4).
-    rw_vol := SDL.GPUStorageTextureReadWriteBinding{ texture = gs.vol_texture, cycle = true }
-    p2 := SDL.BeginGPUComputePass(cmd, &rw_vol, 1, nil, 0)
-    SDL.BindGPUComputePipeline(p2, gs.vol_pipeline)
-    vol_ro_tex := [1]^SDL.GPUTexture{ gs.depth_texture }
-    SDL.BindGPUComputeStorageTextures(p2, 0, raw_data(vol_ro_tex[:]), 1)
-    SDL.BindGPUComputeStorageBuffers(p2, 0, raw_data(ro_bufs[:]), 5)
-    SDL.DispatchGPUCompute(p2, hgroups_x, hgroups_y, 1)
-    SDL.EndGPUComputePass(p2)
+    // Reads depth (RO storage tex, t0) + voxel buffers (t1..t4). Skipped when
+    // off: composite then ignores vol_texture.
+    if gs.vol_enabled {
+        rw_vol := SDL.GPUStorageTextureReadWriteBinding{ texture = gs.vol_texture, cycle = true }
+        p2 := SDL.BeginGPUComputePass(cmd, &rw_vol, 1, nil, 0)
+        SDL.BindGPUComputePipeline(p2, gs.vol_pipeline)
+        vol_ro_tex := [1]^SDL.GPUTexture{ gs.depth_texture }
+        SDL.BindGPUComputeStorageTextures(p2, 0, raw_data(vol_ro_tex[:]), 1)
+        SDL.BindGPUComputeStorageBuffers(p2, 0, raw_data(ro_bufs[:]), 4)
+        SDL.DispatchGPUCompute(p2, hgroups_x, hgroups_y, 1)
+        SDL.EndGPUComputePass(p2)
+    }
 
     // --- Pass 2b-d: bloom (half-res) — prefilter → blur H → blur V ---------
     // prefilter: scene → bloom[0]; H: bloom[0] → bloom[1]; V: bloom[1] → bloom[0].
@@ -716,7 +631,9 @@ gpu_render :: proc(gs: ^Game_State) {
     // Swapchain presentation is owned by the SDL.Renderer in ui.odin
     // (see ui_build_and_render). It draws out_texture as a fullscreen quad,
     // then Clay UI on top, then calls SDL.RenderPresent.
+    if want_fence { return SDL.SubmitGPUCommandBufferAndAcquireFence(cmd) }
     _ = SDL.SubmitGPUCommandBuffer(cmd)
+    return nil
 }
 
 gpu_destroy :: proc(gs: ^Game_State) {
@@ -730,14 +647,12 @@ gpu_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.index_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.owner_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.mask_buf)
-    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.gi_cache_buf)
-    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.light_buf)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.light_index_buf)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.light_pool_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.entity_buf)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.vol_pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.comp_pipeline)
-    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.gi_update_pipeline)
-    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.gi_clear_pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_pre_pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_h_pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_v_pipeline)
