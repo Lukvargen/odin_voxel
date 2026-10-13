@@ -212,8 +212,8 @@ ent_models_bake :: proc() {
 //   [ENT_MODEL_BASE..+2/model) model table: (dims, voxel word), (brick dims, brick word)
 //   ...                       per model: voxel bytes, then one 64-bit occupancy
 //                             mask per 4^3 brick (bit = x + 4y + 16z)
-//   [dyn_base..]              per frame: header (BVH roots), MAX_ENTITIES entity
-//                             records, the entity BVHs (2 * MAX_ENTITIES nodes), parts
+//   [dyn_base..]              per frame: Ent_Frame up to n_ents — header, entity
+//                             records, parts, screen-tile masks, sun-grid masks
 ENT_PAL_BASE   :: 1
 ENT_MODEL_BASE :: ENT_PAL_BASE + 64
 ENT_DATA_BASE  :: ENT_MODEL_BASE + 2 * len(Model_Id)
@@ -280,68 +280,96 @@ Part_Gpu :: struct #packed {
     tint:     [3]f32, _pad:  f32,
 }
 
-// Matches the 2-uint4 BVH node: interior nodes have their left child right
-// after them and `a` = right child; leaves have `a` = entity index.
-Bvh_Node_Gpu :: struct #packed {
-    bmin: [3]f32, a:    u32,
-    bmax: [3]f32, leaf: u32,
-}
+// Which entities a ray can possibly hit is answered by two bitmasks (bit i
+// = entity i), built on the CPU each frame from the entity boxes:
+//  - view rays: per 16x16-pixel screen tile, the entities whose projected
+//    box overlaps it. A pixel loads one mask and is done if it's empty.
+//  - sun shadow rays: per cell of a grid on a plane facing the sun (centred
+//    on the camera), the shadow-casting entities whose box projects onto it
+//    along the sun direction. Points outside the grid clamp to its edge,
+//    and boxes are clamped the same way, so the edge cells stay conservative.
+// Most pixels are nowhere near an entity, so they pay one load, not a
+// traversal — that per-pixel cost was most of the entity GPU time.
+ENT_TILE        :: 16
+ENT_TILES_X     :: (TEX_W + ENT_TILE - 1) / ENT_TILE
+ENT_TILES_Y     :: (TEX_H + ENT_TILE - 1) / ENT_TILE
+ENT_SUN_GRID    :: 64
+ENT_SUN_CELL    :: f32(4)
 
-ENT_NO_ROOT :: 0xffffffff
+// Matches the 4-uint4 header of the per-frame data.
+Ent_Header :: struct #packed {
+    tiles_x, tiles_y: u32, _pad0: [2]u32,
+    sun_u: [3]f32, u0: f32, // grid axes (perpendicular to the sun) and origins
+    sun_v: [3]f32, v0: f32,
+    _pad1: [4]u32,
+}
 
 Ent_Frame :: struct {
-    // Roots of the two BVHs: shadow casters, and entities only seen
-    // directly (far birds — shadow rays never walk that tree).
-    root_caster, root_view: u32,
-    _hdr_pad:   [2]u32,
+    hdr:    Ent_Header,
     ents:   [MAX_ENTITIES]Ent_Gpu,
-    nodes:  [2 * MAX_ENTITIES]Bvh_Node_Gpu,
     parts:  [MAX_ENT_PARTS]Part_Gpu,
-    n_ents, n_parts, n_nodes: int,
+    tiles:  [ENT_TILES_X * ENT_TILES_Y]u64,
+    sun:    [ENT_SUN_GRID * ENT_SUN_GRID]u64,
+    // CPU only below
+    n_ents, n_parts: int,
     no_shadow: [MAX_ENTITIES]bool,
 }
+#assert(ENT_TILES_X * ENT_TILES_Y % 2 == 0)
 
-// BVH over the entity boxes, so a ray far from every entity costs one box
-// test instead of one per entity. Rebuilt every frame (<= 64 leaves).
-ent_build_bvh :: proc(f: ^Ent_Frame) {
-    f.n_nodes = 0
-    f.root_caster, f.root_view = ENT_NO_ROOT, ENT_NO_ROOT
-    // Casters first, view-only entities after.
-    ids: [MAX_ENTITIES]int
-    nc := 0
-    for i in 0 ..< f.n_ents { if !f.no_shadow[i] { ids[nc] = i; nc += 1 } }
-    nv := nc
-    for i in 0 ..< f.n_ents { if f.no_shadow[i] { ids[nv] = i; nv += 1 } }
-    build :: proc(f: ^Ent_Frame, ids: []int) -> u32 {
-        node := f.n_nodes
-        f.n_nodes += 1
-        mn := [3]f32{1e9, 1e9, 1e9}
-        mx := [3]f32{-1e9, -1e9, -1e9}
-        for i in ids {
-            mn = la.min(mn, f.ents[i].aabb_min)
-            mx = la.max(mx, f.ents[i].aabb_max)
+// Fill the screen-tile and sun-grid masks for this frame's camera.
+ent_build_masks :: proc(f: ^Ent_Frame, gs: ^Game_State) {
+    cam := gs.camera
+    fwd, right, up := camera_view_basis(cam)
+    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+    w, h := f32(gs.render_w), f32(gs.render_h)
+    tx := (int(gs.render_w) + ENT_TILE - 1) / ENT_TILE
+    ty := (int(gs.render_h) + ENT_TILE - 1) / ENT_TILE
+    f.hdr.tiles_x, f.hdr.tiles_y = u32(tx), u32(ty)
+
+    l := la.normalize(gs.light_dir)
+    ref := abs(l.y) > 0.99 ? [3]f32{1, 0, 0} : [3]f32{0, 1, 0}
+    su := la.normalize(la.cross(l, ref))
+    sv := la.cross(l, su)
+    half := ENT_SUN_GRID / 2 * ENT_SUN_CELL
+    f.hdr.sun_u, f.hdr.u0 = su, la.dot(eye, su) - half
+    f.hdr.sun_v, f.hdr.v0 = sv, la.dot(eye, sv) - half
+
+    for i in 0 ..< f.n_ents {
+        e := f.ents[i]
+        bit := u64(1) << u64(i)
+        // Screen rect of the box: skipped when wholly behind the eye, the
+        // whole screen when it straddles the eye plane (e.g. the glider).
+        x0, y0, x1, y1 := f32(1e9), f32(1e9), f32(-1e9), f32(-1e9)
+        behind := 0
+        umin, vmin, umax, vmax := f32(1e9), f32(1e9), f32(-1e9), f32(-1e9)
+        for c in 0 ..< 8 {
+            p := [3]f32{c & 1 != 0 ? e.aabb_max.x : e.aabb_min.x, c & 2 != 0 ? e.aabb_max.y : e.aabb_min.y, c & 4 != 0 ? e.aabb_max.z : e.aabb_min.z}
+            u, v := la.dot(p, su), la.dot(p, sv)
+            umin, umax, vmin, vmax = min(umin, u), max(umax, u), min(vmin, v), max(vmax, v)
+            d := p - eye
+            z := la.dot(d, fwd)
+            if z < 0.05 { behind += 1; continue }
+            nx := la.dot(d, right) / z / la.length2(right)
+            ny := la.dot(d, up) / z / la.length2(up)
+            px, py := (nx + 1) * 0.5 * w, (1 - ny) * 0.5 * h
+            x0, x1, y0, y1 = min(x0, px), max(x1, px), min(y0, py), max(y1, py)
         }
-        if len(ids) == 1 {
-            f.nodes[node] = {bmin = mn, a = u32(ids[0]), bmax = mx, leaf = 1}
-            return u32(node)
+        if behind == 8 { x1 = -1e9 } else if behind > 0 { x0, y0, x1, y1 = 0, 0, w, h }
+        // +-1 px for the AA sample offsets.
+        if x1 >= -1 && y1 >= -1 && x0 <= w + 1 && y0 <= h + 1 {
+            ax := clamp(int(math.floor((x0 - 1) / ENT_TILE)), 0, tx - 1)
+            bx := clamp(int(math.floor((x1 + 1) / ENT_TILE)), 0, tx - 1)
+            ay := clamp(int(math.floor((y0 - 1) / ENT_TILE)), 0, ty - 1)
+            by := clamp(int(math.floor((y1 + 1) / ENT_TILE)), 0, ty - 1)
+            for yy in ay ..= by { for xx in ax ..= bx { f.tiles[yy * tx + xx] |= bit } }
         }
-        // Split at the median centre along the longest axis.
-        ext := mx - mn
-        axis := ext.x >= ext.y && ext.x >= ext.z ? 0 : (ext.y >= ext.z ? 1 : 2)
-        centre :: proc(f: ^Ent_Frame, i, axis: int) -> f32 { return f.ents[i].aabb_min[axis] + f.ents[i].aabb_max[axis] }
-        for i in 1 ..< len(ids) {
-            for j := i; j > 0 && centre(f, ids[j], axis) < centre(f, ids[j - 1], axis); j -= 1 {
-                ids[j], ids[j - 1] = ids[j - 1], ids[j]
-            }
-        }
-        mid := len(ids) / 2
-        build(f, ids[:mid]) // left child = node + 1
-        right := build(f, ids[mid:])
-        f.nodes[node] = {bmin = mn, a = right, bmax = mx, leaf = 0}
-        return u32(node)
+        if f.no_shadow[i] { continue }
+        cu0 := clamp(int(math.floor((umin - f.hdr.u0) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1)
+        cu1 := clamp(int(math.floor((umax - f.hdr.u0) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1)
+        cv0 := clamp(int(math.floor((vmin - f.hdr.v0) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1)
+        cv1 := clamp(int(math.floor((vmax - f.hdr.v0) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1)
+        for vv in cv0 ..= cv1 { for uu in cu0 ..= cu1 { f.sun[vv * ENT_SUN_GRID + uu] |= bit } }
     }
-    if nc > 0 { f.root_caster = build(f, ids[:nc]) }
-    if nv > nc { f.root_view = build(f, ids[nc:nv]) }
 }
 
 // A part stretched from a to b along its model +z (Rod, Arm); `up` picks

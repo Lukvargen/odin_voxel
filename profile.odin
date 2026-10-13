@@ -17,6 +17,11 @@ Profile_Zone :: enum {
     Light_Column,    // worker: sky light flood fill for a new column
     Light_Stitch,    // main thread: light exchange with neighbour columns
     Far_Tile,        // worker: far terrain tile summary (far.odin)
+    Ent_AI,          // entities_update: fox/bird movement
+    Ent_Birds,       // birds_manage (about once a second)
+    Ent_Build,       // posing parts + BVH
+    Ent_Upload,      // entity buffer upload
+    Glider,          // glider_update (flight physics + air sampling)
 }
 
 @(private="file") prof_ns:    [Profile_Zone]i64

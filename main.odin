@@ -69,6 +69,9 @@ Game_State :: struct {
     light_pool_buf:  ^SDL.GPUBuffer,  // 512-byte light bricks
     entity_buf:   ^SDL.GPUBuffer,     // entity voxel models + instances (voxel_models.odin)
     ent_dyn_base: int,                // uint4 index of the per-frame part of entity_buf
+    ent_debug:    int,                // bench only: see Camera_Uniform.ent_debug
+    ent_transfer: ^SDL.GPUTransferBuffer, // persistent staging for the per-frame entity data
+    ent_upload_size: int,             // bytes staged this frame, copied at the start of gpu_render
 
     brush_radius:  int,  // edit sphere radius, 0 = single voxel (Ctrl+scroll)
     left_pressed:  bool, // single-frame press edges — with Ctrl held a click
@@ -136,6 +139,7 @@ main :: proc() {
             switch {
             case a == "quick": bench_quick = true
             case a == "glider": bench_glider = true
+            case a == "entcost": bench_entcost = true
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])

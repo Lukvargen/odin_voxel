@@ -533,7 +533,7 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
 
         // Entities compete with the voxel hit on the primary view ray. The
         // voxel hit caps the trace so occluded entities exit on the AABB test.
-        if (i == 0 && u_entity_count > 0) {
+        if (i == 0 && u_entity_count > 0 && (u_ent_debug & 1) == 0) {
             EntityHit ehit;
             if (use_hit0) ehit = ehit0;
             else          ehit = trace_entities(origin, dir, hit_t);
@@ -604,7 +604,7 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
                     shadow_factor = acc / 5.0;
                 }
                 // Entity occlusion: one tap (entity penumbra isn't worth 5x).
-                if (u_entity_count > 0 && shadow_factor > 0.0) {
+                if (u_entity_count > 0 && shadow_factor > 0.0 && (u_ent_debug & 2) == 0) {
                     shadow_factor *= entity_shadow_transmittance(shadow_origin, l, RAY_MAX_LENGTH);
                 }
                 lighting += sun_tint() * (n_dot_l * shadow_factor * u_sun_intensity);
@@ -673,6 +673,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     float near_len = primary_max_len(u_cam_pos, cdir, exit_axis);
     // Under water: pass through water, see only WATER_VIEW_DIST (as trace_pixel does).
     g_cam_in_water = sample_voxel(u_cam_pos) == BLOCK_WATER;
+    ent_set_pixel(uint2(ipix));
     HitInfo hit0 = trace_ray_chunk(u_cam_pos, cdir, false, RAY_ITERATIONS,
                                    g_cam_in_water ? WATER_VIEW_DIST : near_len,
                                    g_cam_in_water ? BLOCK_WATER : 0u);
@@ -682,7 +683,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     float hit0_t = hit0.block_id != 0u ? hit0.t : (far0.hit ? far0.t : 1e30);
     // Entities on the center ray: shared by AA sample 0 and merged into the
     // depth output (volumetric clamp + composite bilateral upscale read it).
-    EntityHit ehit0 = trace_entities(u_cam_pos, cdir, min(hit0_t, RAY_MAX_LENGTH));
+    EntityHit ehit0 = trace_entities(u_cam_pos, cdir, (u_ent_debug & 1) != 0 ? 0.0 : min(hit0_t, RAY_MAX_LENGTH));
     float prim_depth = hit0_t;
     if (ehit0.index >= 0) prim_depth = min(prim_depth, ehit0.t);
 

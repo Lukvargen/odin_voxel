@@ -41,6 +41,9 @@ bench_shot_dir: string
 bench_quick: bool
 // `bench glider`: fly a scripted hang-glider test instead of the views.
 bench_glider: bool
+// `bench entcost`: per view, the GPU cost of entity view rays and entity
+// shadow rays, configs interleaved in one process so clock swings hit all.
+bench_entcost: bool
 
 bench_run :: proc(gs: ^Game_State) {
     views := []Bench_View{
@@ -104,6 +107,10 @@ bench_run :: proc(gs: ^Game_State) {
 
         fmt.printf("\nview %-8s  pos (%.0f %.0f %.0f)\n", v.name,
             gs.camera.pos.x, gs.camera.pos.y, gs.camera.pos.z)
+        if bench_entcost {
+            bench_entity_cost(gs)
+            continue
+        }
         for c, ci in configs {
             if bench_quick && ci > 2 { break }
             gs.aa_samples  = c.aa
@@ -118,6 +125,30 @@ bench_run :: proc(gs: ^Game_State) {
                 bench_screenshot(gs, fmt.tprintf("%s/%s%s.bmp", bench_shot_dir, v.name, suffix))
             }
         }
+    }
+}
+
+bench_entity_cost :: proc(gs: ^Game_State) {
+    Cfg :: struct { name: string, enabled: bool, debug: int }
+    cfgs := []Cfg{
+        {"entities off",        false, 0},
+        {"all",                 true,  0},
+        {"no entity view rays", true,  1},
+        {"no entity shadows",   true,  2},
+        {"neither (traversal setup only)", true, 3},
+    }
+    best: [5]f64
+    for &b in best { b = 1e9 }
+    for _ in 0 ..< 6 {
+        for c, i in cfgs {
+            gs.entities_enabled = c.enabled
+            gs.ent_debug = c.debug
+            best[i] = min(best[i], bench_measure(gs))
+        }
+    }
+    gs.entities_enabled, gs.ent_debug = true, 0
+    for c, i in cfgs {
+        fmt.printf("  %-32s %6.2f ms  (%+.2f vs off)\n", c.name, best[i], best[i] - best[0])
     }
 }
 
@@ -280,6 +311,29 @@ bench_glider_run :: proc(gs: ^Game_State) {
             }
         }
         if !g.deployed { break }
+    }
+
+    // CPU cost per frame of entities + glider, as the game loop calls them
+    // (no GPU waits: uploads are only submitted).
+    {
+        cam.pos = {spawn.x, surf + 60, spawn.z}
+        if !g.deployed { glider_toggle_deploy(gs) }
+        g.aim_pitch = -5
+        profile_reset()
+        t0 := time.tick_now()
+        for i in 0 ..< 600 {
+            g.aim_yaw += 0.3
+            glider_update(gs, 0, 0, 1.0 / 60, false, false, false, false, false)
+            glider_view_update(gs, 1.0 / 60)
+            entities_update(gs, 1.0 / 60)
+            free_all(context.temp_allocator)
+        }
+        total := time.duration_milliseconds(time.tick_since(t0))
+        birds := 0
+        for e in gs.entities { if e.kind == .Bird { birds += 1 } }
+        fmt.printf("  cpu: %.3f ms/frame for glider + entities (%d entities, %d birds, %d uploaded)\n",
+            total / 600, len(gs.entities), birds, gs.entity_count)
+        profile_dump("glider + entities, 600 frames")
     }
 
     // Visuals: back near spawn, gliding in a gentle left bank.

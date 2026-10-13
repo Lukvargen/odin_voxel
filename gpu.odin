@@ -41,7 +41,8 @@ Camera_Uniform :: struct #packed {
     cave_factor:    f32,   // 0 surface .. 1 deep underground (CPU-smoothed)
     sun_intensity:  f32,   // sun direct-light multiplier
     far_enabled:    i32,
-    _pad5:          [2]f32,
+    ent_debug:      i32,   // bench: 1 = skip entity view rays, 2 = skip entity shadows
+    _pad5:          f32,
     near_circle:    [4]f32, // near (voxel) region: XZ center, radius in voxels, unused
 }
 
@@ -218,13 +219,18 @@ gpu_init :: proc(gs: ^Game_State) {
         words, dyn_base := ent_static_words()
         defer delete(words)
         gs.ent_dyn_base = dyn_base
-        dyn_size := int(offset_of(Ent_Frame, parts)) + size_of(Part_Gpu) * MAX_ENT_PARTS
+        dyn_size := int(offset_of(Ent_Frame, n_ents))
         gs.entity_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
             usage = {.COMPUTE_STORAGE_READ},
             size  = u32(len(words) * 4 + dyn_size),
         })
         assert(gs.entity_buf != nil, "Failed to create entity buffer")
         gpu_upload_buffer(gs, gs.entity_buf, raw_data(words), len(words) * 4)
+        // Staging for the per-frame part, reused every frame (mapped with
+        // cycling) and copied inside the frame's own command buffer: a
+        // fresh transfer buffer + submit per frame cost ~0.3 ms of CPU.
+        gs.ent_transfer = SDL.CreateGPUTransferBuffer(gs.gpu_device, {usage = .UPLOAD, size = u32(dyn_size)})
+        assert(gs.ent_transfer != nil, "Failed to create entity transfer buffer")
     }
 
     // Scene color/depth/volumetric textures, sized to the current internal
@@ -537,6 +543,17 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
     if cmd == nil { return nil }
 
+    // This frame's entity instances (staged by entities_update).
+    if gs.ent_upload_size > 0 {
+        cp := SDL.BeginGPUCopyPass(cmd)
+        SDL.UploadToGPUBuffer(cp,
+            SDL.GPUTransferBufferLocation{transfer_buffer = gs.ent_transfer, offset = 0},
+            SDL.GPUBufferRegion{buffer = gs.entity_buf, offset = u32(gs.ent_dyn_base * 16), size = u32(gs.ent_upload_size)},
+            false)
+        SDL.EndGPUCopyPass(cp)
+        gs.ent_upload_size = 0
+    }
+
     fwd, right, up := camera_view_basis(gs.camera)
     render_pos := gs.camera.pos + gs.camera.view_offset
     render_pos.y += gs.camera.step_visual_offset
@@ -562,6 +579,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         cave_factor    = gs.cave_factor,
         sun_intensity  = gs.sun_intensity,
         far_enabled    = gs.far_enabled ? 1 : 0,
+        ent_debug      = i32(gs.ent_debug),
         // Columns whose centers lie within near_r of the player's column are
         // loaded; shrink by a column's half-diagonal so the circle only
         // covers loaded voxels.
@@ -663,6 +681,7 @@ gpu_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.light_index_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.light_pool_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.entity_buf)
+    SDL.ReleaseGPUTransferBuffer(gs.gpu_device, gs.ent_transfer)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.vol_pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.comp_pipeline)

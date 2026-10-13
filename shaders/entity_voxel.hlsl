@@ -4,7 +4,8 @@
 //   int u_entity_count;
 // Every entity is a few rigid parts; each part is a small voxel grid with its
 // own (finer than terrain) voxel size and a world -> grid affine transform.
-// A ray tests the entity boxes, then the part boxes, then walks the part's
+// A ray tests the entities its screen tile / sun-grid cell lists (bitmasks
+// built on the CPU), then their part boxes, then walks the part's
 // grid with a two-level DDA: 4^3 bricks with a 64-bit occupancy mask (one
 // load per brick), then bit tests per voxel — the palette byte is only
 // fetched for the voxel that was hit.
@@ -16,18 +17,28 @@
 //  [ENT_PAL_BASE..]       palette, one uint per entry: rgb | flags << 24
 //  [ENT_MODEL_BASE + 2m]  model m: (dims.xyz, voxel word), (brick dims.xyz, mask word)
 //                         masks: 2 words per 4^3 brick, bit = x + 4y + 16z
-//  dynamic base:          header: (caster BVH root, view-only BVH root, -, -), 0xffffffff = none
+//  dynamic base:          header (Ent_Header): (tiles x, tiles y, -, -), (sun u axis, u0), (sun v axis, v0), -
 //  + ENT_ENTS_OFS:        MAX_ENTITIES x 2: (box min, first part), (box max, part count)
-//  + ENT_NODES_OFS:       BVH nodes x 2: (box min, right child | entity), (box max, leaf)
 //  + ENT_PARTS_OFS:       parts, 6 each: 3 rows world->grid, (box min, model), (box max, flags), (tint, -)
+//  + ENT_TILES_OFS:       64-bit entity mask per 16x16 screen tile (2 per uint4)
+//  + ENT_SUN_OFS:         64-bit shadow-caster mask per sun-grid cell (2 per uint4)
+// See ent_build_masks in voxel_models.odin for how the masks are built.
 #define ENT_PAL_BASE    1
 #define ENT_MODEL_BASE  65
 #define ENT_MAX         64
 #define ENT_PART_STRIDE 6
-#define ENT_ENTS_OFS    1
-#define ENT_NODES_OFS   (1 + ENT_MAX * 2)
-#define ENT_PARTS_OFS   (1 + ENT_MAX * 6)
-#define ENT_NO_ROOT     0xffffffffu
+#define ENT_MAX_PARTS   256
+#define ENT_TILE        16
+#define ENT_TILE_COUNT  2500  // (TEX_W / 16) * (TEX_H / 16), TEX_W = TEX_H = 800
+#define ENT_SUN_GRID    64
+#define ENT_SUN_CELL    4.0
+#define ENT_ENTS_OFS    4
+#define ENT_PARTS_OFS   (ENT_ENTS_OFS + ENT_MAX * 2)
+#define ENT_TILES_OFS   (ENT_PARTS_OFS + ENT_MAX_PARTS * ENT_PART_STRIDE)
+#define ENT_SUN_OFS     (ENT_TILES_OFS + ENT_TILE_COUNT / 2)
+
+// This pixel's screen-tile mask; the tracer sets it before tracing view rays.
+static uint2 g_ent_tile_mask;
 
 #define PAL_TINT 1u
 #define PAL_EMIT 2u
@@ -163,78 +174,84 @@ bool ent_trace_part(uint p, float3 ro_w, float3 rd_w, float t_max,
     return false;
 }
 
-// Walk the entity BVHs; for each entity whose box the ray enters, trace its
-// parts. any_hit: shadow rays — stop at the first hit, and only walk the
-// shadow casters' tree.
-bool ent_traverse(float3 ro, float3 rd, float t_max, bool any_hit, inout EntityHit hit) {
+uint2 ent_mask_at(uint base, uint k) {
+    uint4 q = ent_data[base + (k >> 1)];
+    return (k & 1u) != 0u ? q.zw : q.xy;
+}
+
+// Mask of the 16x16 tile holding pixel `pix` (call once per pixel).
+void ent_set_pixel(uint2 pix) {
+    g_ent_tile_mask = uint2(0, 0);
+    if (u_entity_count == 0) return; // masks weren't uploaded this frame
+    uint dyn = ent_dyn_base();
+    uint tiles_x = ent_data[dyn].x;
+    g_ent_tile_mask = ent_mask_at(dyn + ENT_TILES_OFS, (pix.y / ENT_TILE) * tiles_x + pix.x / ENT_TILE);
+}
+
+// Trace the entities in `mask` (bit i = entity i). any_hit: stop at the
+// first hit (shadow rays).
+bool ent_trace_mask(uint2 mask, float3 ro, float3 rd, float t_max, bool any_hit, inout EntityHit hit) {
     float3 inv = 1.0 / ent_safe_dir(rd);
     uint dyn = ent_dyn_base();
     float best = t_max;
     bool found = false;
-    uint4 hdr = ent_data[dyn];
-    uint stack[12];
-    int sp = 0;
-    uint node = hdr.x;
-    if (!any_hit && hdr.y != ENT_NO_ROOT) {
-        if (node == ENT_NO_ROOT) node = hdr.y;
-        else stack[sp++] = hdr.y;
-    }
-    if (node == ENT_NO_ROOT) return false;
-    for (int it = 0; it < 256; it++) {
-        uint4 n0 = ent_data[dyn + ENT_NODES_OFS + node * 2u];
-        uint4 n1 = ent_data[dyn + ENT_NODES_OFS + node * 2u + 1u];
+    [loop]
+    while ((mask.x | mask.y) != 0u) {
+        uint e;
+        if (mask.x != 0u) { e = firstbitlow(mask.x); mask.x &= mask.x - 1u; }
+        else              { e = 32u + firstbitlow(mask.y); mask.y &= mask.y - 1u; }
+        uint4 e0 = ent_data[dyn + ENT_ENTS_OFS + e * 2u];
+        uint4 e1 = ent_data[dyn + ENT_ENTS_OFS + e * 2u + 1u];
         float t0, t1;
-        bool enter = ent_box(ro, inv, asfloat(n0.xyz), asfloat(n1.xyz), t0, t1) && t0 <= best;
-        if (enter && n1.w == 0u) {
-            // Interior: left child follows; right waits on the stack.
-            if (sp < 12) stack[sp++] = n0.w;
-            node = node + 1u;
-            continue;
+        if (!ent_box(ro, inv, asfloat(e0.xyz), asfloat(e1.xyz), t0, t1) || t0 > best) continue;
+        for (uint p = e0.w; p < e0.w + e1.w; p++) {
+            uint pb = dyn + ENT_PARTS_OFS + p * ENT_PART_STRIDE;
+            if (!ent_box(ro, inv, asfloat(ent_data[pb + 3].xyz), asfloat(ent_data[pb + 4].xyz), t0, t1) || t0 > best) continue;
+            float t; float3 ng; int3 v; uint pal;
+            if (!ent_trace_part(p, ro, rd, best, t, ng, v, pal)) continue;
+            found = true;
+            if (any_hit) return true;
+            best = t;
+            float4 r0 = asfloat(ent_data[pb + 0]);
+            float4 r1 = asfloat(ent_data[pb + 1]);
+            float4 r2 = asfloat(ent_data[pb + 2]);
+            hit.index  = int(p);
+            hit.t      = t;
+            hit.normal = normalize(ng.x * r0.xyz + ng.y * r1.xyz + ng.z * r2.xyz);
+            hit.pal    = pal;
+            uint h = uint(v.x) * 73856093u ^ uint(v.y) * 19349663u ^ uint(v.z) * 83492791u ^ p * 2654435761u;
+            hit.vhash  = (h ^ (h >> 13)) * 1274126177u;
         }
-        if (enter) {
-            uint4 e0 = ent_data[dyn + ENT_ENTS_OFS + n0.w * 2u];
-            uint4 e1 = ent_data[dyn + ENT_ENTS_OFS + n0.w * 2u + 1u];
-            for (uint p = e0.w; p < e0.w + e1.w; p++) {
-                uint pb = dyn + ENT_PARTS_OFS + p * ENT_PART_STRIDE;
-                if (!ent_box(ro, inv, asfloat(ent_data[pb + 3].xyz), asfloat(ent_data[pb + 4].xyz), t0, t1) || t0 > best) continue;
-                float t; float3 ng; int3 v; uint pal;
-                if (!ent_trace_part(p, ro, rd, best, t, ng, v, pal)) continue;
-                found = true;
-                if (any_hit) return true;
-                best = t;
-                float4 r0 = asfloat(ent_data[pb + 0]);
-                float4 r1 = asfloat(ent_data[pb + 1]);
-                float4 r2 = asfloat(ent_data[pb + 2]);
-                hit.index  = int(p);
-                hit.t      = t;
-                hit.normal = normalize(ng.x * r0.xyz + ng.y * r1.xyz + ng.z * r2.xyz);
-                hit.pal    = pal;
-                uint h = uint(v.x) * 73856093u ^ uint(v.y) * 19349663u ^ uint(v.z) * 83492791u ^ p * 2654435761u;
-                hit.vhash  = (h ^ (h >> 13)) * 1274126177u;
-            }
-        }
-        if (sp == 0) break;
-        node = stack[--sp];
     }
     return found;
 }
 
-// Nearest entity hit closer than t_max.
+// Nearest entity hit closer than t_max along a view ray of the current
+// pixel (ent_set_pixel).
 EntityHit trace_entities(float3 ro, float3 rd, float t_max) {
     EntityHit hit;
     hit.index = -1; hit.t = 1e30; hit.hit_pos = float3(0, 0, 0);
     hit.normal = float3(0, 1, 0); hit.pal = 0u; hit.vhash = 0u;
-    if (u_entity_count > 0 && ent_traverse(ro, rd, t_max, false, hit)) hit.hit_pos = ro + rd * hit.t;
+    if (u_entity_count > 0 && t_max > 0.0 && (g_ent_tile_mask.x | g_ent_tile_mask.y) != 0u &&
+        ent_trace_mask(g_ent_tile_mask, ro, rd, t_max, false, hit)) hit.hit_pos = ro + rd * hit.t;
     return hit;
 }
 
-// Any-hit shadow test: 0 = blocked by an entity, 1 = clear.
+// Any-hit sun shadow test from ro (rd = the sun direction): 0 = blocked by
+// an entity, 1 = clear. Only casters whose sun-grid cells cover ro are traced.
 float entity_shadow_transmittance(float3 ro, float3 rd, float max_t) {
     if (u_entity_count == 0) return 1.0;
+    uint dyn = ent_dyn_base();
+    float4 hu = asfloat(ent_data[dyn + 1]);
+    float4 hv = asfloat(ent_data[dyn + 2]);
+    int cu = clamp(int(floor((dot(ro, hu.xyz) - hu.w) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1);
+    int cv = clamp(int(floor((dot(ro, hv.xyz) - hv.w) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1);
+    uint2 mask = ent_mask_at(dyn + ENT_SUN_OFS, uint(cv * ENT_SUN_GRID + cu));
+    if ((mask.x | mask.y) == 0u) return 1.0;
     EntityHit h;
     h.index = -1; h.t = 1e30; h.hit_pos = float3(0, 0, 0);
     h.normal = float3(0, 1, 0); h.pal = 0u; h.vhash = 0u;
-    return ent_traverse(ro, rd, max_t, true, h) ? 0.0 : 1.0;
+    return ent_trace_mask(mask, ro, rd, max_t, true, h) ? 0.0 : 1.0;
 }
 
 // Surface colour and flags of a hit: palette colour (tinted when the entry

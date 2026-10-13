@@ -2,6 +2,8 @@ package main
 
 import "core:math"
 import "core:math/rand"
+import "core:mem"
+import "core:time"
 import SDL "vendor:sdl3"
 
 // Entities (foxes, hovering crystals, eagles circling in thermals). The CPU
@@ -86,10 +88,13 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
         return
     }
     if t >= birds_next_manage {
+        t0 := time.tick_now()
         birds_manage(gs)
+        profile_add(.Ent_Birds, t0)
         birds_next_manage = t + 1
     }
 
+    t_ai := time.tick_now()
     for &e in gs.entities {
         switch e.kind {
         case .Crystal: // hovers in place; motion is in the pose
@@ -122,6 +127,7 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
         }
     }
 
+    profile_add(.Ent_AI, t_ai)
     entities_upload(gs, cands[:n], t)
 }
 
@@ -226,6 +232,7 @@ fox_update :: proc(gs: ^Game_State, e: ^Entity, dt, t: f32) {
 // Build the part instances for the culled entities (+ glider, player) and upload.
 @(private="file")
 entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
+    t0 := time.tick_now()
     frame := new(Ent_Frame, context.temp_allocator)
     // Player things first, so a full list never drops them.
     glider_add_parts(gs, frame)
@@ -248,11 +255,18 @@ entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
     }
     gs.entity_count = i32(frame.n_ents)
     if frame.n_ents == 0 { return }
-    ent_build_bvh(frame)
-    // Header, entity records and BVHs at fixed slot ranges, parts right after.
-    size := int(offset_of(Ent_Frame, parts)) + frame.n_parts * size_of(Part_Gpu)
-    #assert(offset_of(Ent_Frame, ents) == 16)
-    #assert(offset_of(Ent_Frame, nodes) == 16 + MAX_ENTITIES * size_of(Ent_Gpu))
-    #assert(offset_of(Ent_Frame, parts) == 16 + 3 * MAX_ENTITIES * size_of(Ent_Gpu))
-    gpu_upload_buffer(gs, gs.entity_buf, frame, size, gs.ent_dyn_base * 16)
+    ent_build_masks(frame, gs)
+    profile_add(.Ent_Build, t0)
+    t1 := time.tick_now()
+    defer profile_add(.Ent_Upload, t1)
+    // Fixed layout, mirrored by the ENT_*_OFS constants in entity_voxel.hlsl.
+    size := int(offset_of(Ent_Frame, n_ents))
+    #assert(offset_of(Ent_Frame, ents)  == 4 * 16)
+    #assert(offset_of(Ent_Frame, parts) == (4 + MAX_ENTITIES * 2) * 16)
+    #assert(offset_of(Ent_Frame, tiles) == (4 + MAX_ENTITIES * 2 + MAX_ENT_PARTS * 6) * 16)
+    #assert(offset_of(Ent_Frame, sun)   == (4 + MAX_ENTITIES * 2 + MAX_ENT_PARTS * 6) * 16 + ENT_TILES_X * ENT_TILES_Y * 8)
+    dst := SDL.MapGPUTransferBuffer(gs.gpu_device, gs.ent_transfer, true)
+    mem.copy(dst, frame, size)
+    SDL.UnmapGPUTransferBuffer(gs.gpu_device, gs.ent_transfer)
+    gs.ent_upload_size = size
 }

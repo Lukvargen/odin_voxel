@@ -2,6 +2,7 @@ package main
 
 import "core:math"
 import la "core:math/linalg"
+import "core:time"
 
 // Hang glider. G equips it; Space in mid-air opens the wing, Space again
 // lets go. In flight the mouse moves an aim point and the pilot flies toward
@@ -238,6 +239,8 @@ glider_update :: proc(gs: ^Game_State, mouse_dx, mouse_dy, dt: f32,
                       speed_bar, flare, roll_left, roll_right, free_look: bool) {
     g := &gs.glider
     cam := &gs.camera
+    t0 := time.tick_now()
+    defer profile_add(.Glider, t0)
 
     if free_look {
         g.look_yaw   = clamp(g.look_yaw + mouse_dx * 0.1, -170, 170)
