@@ -216,11 +216,12 @@ gpu_init :: proc(gs: ^Game_State) {
     // render resolution (gs.render_w/h). Recreated on render-scale change.
     gpu_create_scene_textures(gs)
 
-    // GPU buffers for voxel data (read-only in compute).
-    // gpu_voxels is 1 byte/voxel; the shader reads it as StructuredBuffer<uint>
-    // with 4 voxels packed per uint, so the buffer is the raw byte image rounded
-    // up to a 4-byte multiple (total*512 is always /4, so this never pads).
-    voxel_buf_size := u32((len(gs.gpu_voxels) + 3) / 4 * 4)
+    // GPU buffers for voxel data (read-only in compute). The voxel pool is
+    // 1 byte/voxel, read by the shader as StructuredBuffer<uint> (4 voxels
+    // per uint); the mask pool is 16 uints (512 occupancy bits) per brick.
+    // Both are filled per brick by flush_gpu_uploads.
+    voxel_buf_size := u32(MAX_RESIDENT_BRICKS * VOXELS_PER_BRICK)
+    mask_buf_size  := u32(MAX_RESIDENT_BRICKS * MASK_U32_PER_BRICK * size_of(u32))
     index_buf_size := u32(len(gs.gpu_index)  * size_of(i32))
 
     gs.voxel_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
@@ -255,22 +256,16 @@ gpu_init :: proc(gs: ^Game_State) {
     })
     assert(gs.light_pool_buf != nil, "Failed to create light pool buffer")
 
-    mask_buf_size := u32(len(gs.gpu_voxel_mask) * size_of(u32))
     gs.mask_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
         usage = {.COMPUTE_STORAGE_READ},
         size  = mask_buf_size,
     })
     assert(gs.mask_buf != nil, "Failed to create mask buffer")
 
-    // Pool-sized CPU arrays must match the pool buffers 1:1.
-    assert(len(gs.gpu_voxels)     == MAX_RESIDENT_BRICKS * VOXELS_PER_BRICK)
-    assert(len(gs.gpu_voxel_mask) == MAX_RESIDENT_BRICKS * MASK_U32_PER_BRICK)
-
-    // Bulk-upload all CPU arrays that were populated by generate_world/stream_chunks
-    gpu_upload_buffer(gs, gs.voxel_buf, raw_data(gs.gpu_voxels),      int(voxel_buf_size))
+    // Slot tables from the startup world; the startup bricks are queued in
+    // dirty_slots and go up with the first flush_gpu_uploads.
     gpu_upload_buffer(gs, gs.index_buf, raw_data(gs.gpu_index),       int(index_buf_size))
     gpu_upload_buffer(gs, gs.owner_buf, raw_data(gs.gpu_chunk_owner), int(owner_buf_size))
-    gpu_upload_buffer(gs, gs.mask_buf,  raw_data(gs.gpu_voxel_mask),  int(mask_buf_size))
     gpu_upload_buffer(gs, gs.light_index_buf, raw_data(gs.gpu_light_index), int(light_index_size))
 }
 
@@ -295,127 +290,92 @@ gpu_upload_buffer_range :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawp
     _ = SDL.SubmitGPUCommandBuffer(cmd)
 }
 
-// Pool-aware single-slot voxel upload (currently unused; flush_gpu_uploads is
-// the live path). Resolves the slot's pool id; air slots have no storage.
-gpu_upload_chunk :: proc(gs: ^Game_State, slot: int) {
-    pid := gs.gpu_index[slot]
-    if pid < 0 { return }
-    base := int(pid) * VOXELS_PER_BRICK
-    // 1 byte/voxel; base and VOXELS_PER_BRICK (512) are both /4 so the SDL
-    // copy region stays 4-aligned (required for the packed uint view).
-    gpu_upload_buffer_range(gs, gs.voxel_buf, raw_data(gs.gpu_voxels[base:]), VOXELS_PER_BRICK, base)
-}
-
-gpu_upload_owner_slot :: proc(gs: ^Game_State, slot: int) {
-    byte_off  := slot * size_of([2]i32)
-    byte_size := size_of([2]i32)
-    gpu_upload_buffer_range(gs, gs.owner_buf, &gs.gpu_chunk_owner[slot], byte_size, byte_off)
-}
-
 // Flush all dirty chunk slots accumulated this frame in a single GPU
-// submission. GPU_Upload cost is dominated by the NUMBER of
-// UploadToGPUBuffer calls (~6.7µs/call driver overhead), not bytes
-// (measured: 5108 calls / 882 KiB ≈ 34 ms). So the transfer buffer is
-// packed in destination order and emitted as a few large coalesced
-// uploads over contiguous destination runs, instead of one call per slot.
+// submission: each mixed chunk's voxels plus its occupancy mask (built here
+// from the voxels), and the slot tables if they changed. Upload cost is
+// dominated by the NUMBER of UploadToGPUBuffer calls (~6.7µs/call driver
+// overhead), not bytes, so the transfer buffer is packed in destination
+// order and emitted as a few coalesced uploads over contiguous runs.
 flush_gpu_uploads :: proc(gs: ^Game_State) {
     flush_light_uploads(gs)
-    if len(gs.dirty_slots) == 0 && !gs.index_dirty { return }
+    if len(gs.dirty_slots) == 0 && !gs.index_dirty && !gs.owner_dirty { return }
     t_up := time.tick_now()
     defer profile_add(.GPU_Upload, t_up)
 
-    voxels_per_chunk :: CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS
-    voxel_chunk_bytes :: voxels_per_chunk // 1 byte/voxel; 512 stays 4-aligned
-    mask_chunk_bytes  :: MASK_U32_PER_BRICK * size_of(u32) // 64 bytes/brick
-    owner_slot_bytes  :: size_of([2]i32)
-    index_buf_bytes   :: CHUNKS_W * CHUNKS_H * CHUNKS_W * size_of(i32)
+    mask_bytes  :: MASK_U32_PER_BRICK * size_of(u32)
+    index_bytes := len(gs.gpu_index) * size_of(i32)
+    owner_bytes := len(gs.gpu_chunk_owner) * size_of([2]i32)
 
-    n := len(gs.dirty_slots)
-
-    // De-duplicate dirty_slots (a slot may appear multiple times in one frame)
+    // Bricks to upload: the current pool id of each dirty slot that still
+    // holds a mixed chunk, sorted so contiguous ids coalesce.
+    Brick_Upload :: struct { pid: int, chunk: ^Chunk }
     seen: map[int]bool
     defer delete(seen)
-    unique: [dynamic]int
-    defer delete(unique)
+    ups: [dynamic]Brick_Upload
+    defer delete(ups)
     for s in gs.dirty_slots {
-        if !seen[s] { seen[s] = true; append(&unique, s) }
-    }
-
-    // Pool ids (voxel/mask destination) of the non-air dirty slots, sorted
-    // ascending so contiguous pool ids coalesce into single uploads. The
-    // free-list hands ids out roughly sequentially, so a freshly streamed
-    // column's layers tend to land in near-consecutive ids → long runs.
-    pids: [dynamic]int
-    defer delete(pids)
-    for s in unique {
+        if s in seen { continue }
+        seen[s] = true
         pid := gs.gpu_index[s]
-        if pid >= 0 { append(&pids, int(pid)) }
+        c := slot_chunk(gs, s)
+        if pid < 0 || c == nil || c.voxels == nil { continue }
+        append(&ups, Brick_Upload{int(pid), c})
     }
-    slice.sort(pids[:])
-    // Owner destination is the ring slot itself; sort slots ascending too.
-    oslots := make([]int, len(unique))
-    defer delete(oslots)
-    copy(oslots, unique[:])
-    slice.sort(oslots)
+    clear(&gs.dirty_slots)
+    slice.sort_by(ups[:], proc(a, b: Brick_Upload) -> bool { return a.pid < b.pid })
 
-    total_transfer := len(pids) * (voxel_chunk_bytes + mask_chunk_bytes) +
-                      len(oslots) * owner_slot_bytes + index_buf_bytes
-
+    mask_off  := len(ups) * VOXELS_PER_BRICK
+    index_off := mask_off + len(ups) * mask_bytes
+    owner_off := index_off + (gs.index_dirty ? index_bytes : 0)
+    total     := owner_off + (gs.owner_dirty ? owner_bytes : 0)
     transfer := SDL.CreateGPUTransferBuffer(gs.gpu_device, SDL.GPUTransferBufferCreateInfo{
         usage = .UPLOAD,
-        size  = u32(total_transfer),
+        size  = u32(total),
     })
     defer SDL.ReleaseGPUTransferBuffer(gs.gpu_device, transfer)
 
-    base_ptr := SDL.MapGPUTransferBuffer(gs.gpu_device, transfer, false)
-    write_off := 0
-
-    // --- Pack transfer buffer in destination-sorted order ---
-    voxel_write_off := write_off
-    for pid in pids {
-        mem.copy(rawptr(uintptr(base_ptr) + uintptr(write_off)),
-            raw_data(gs.gpu_voxels[pid * voxels_per_chunk:]), voxel_chunk_bytes)
-        write_off += voxel_chunk_bytes
+    base := uintptr(SDL.MapGPUTransferBuffer(gs.gpu_device, transfer, false))
+    pids := make([]int, len(ups))
+    defer delete(pids)
+    for u, i in ups {
+        pids[i] = u.pid
+        mem.copy(rawptr(base + uintptr(i * VOXELS_PER_BRICK)), u.chunk.voxels, VOXELS_PER_BRICK)
+        mask := ([^]u32)(rawptr(base + uintptr(mask_off + i * mask_bytes)))
+        for w in 0 ..< MASK_U32_PER_BRICK {
+            bits: u32
+            for b in 0 ..< 32 {
+                if u.chunk.voxels[w * 32 + b] != 0 { bits |= 1 << u32(b) }
+            }
+            mask[w] = bits
+        }
     }
-    mask_write_off := write_off
-    for pid in pids {
-        mem.copy(rawptr(uintptr(base_ptr) + uintptr(write_off)),
-            raw_data(gs.gpu_voxel_mask[pid * MASK_U32_PER_BRICK:]), mask_chunk_bytes)
-        write_off += mask_chunk_bytes
-    }
-    owner_write_off := write_off
-    for s in oslots {
-        mem.copy(rawptr(uintptr(base_ptr) + uintptr(write_off)),
-            &gs.gpu_chunk_owner[s], owner_slot_bytes)
-        write_off += owner_slot_bytes
-    }
-    index_write_off := write_off
-    mem.copy(rawptr(uintptr(base_ptr) + uintptr(write_off)),
-        raw_data(gs.gpu_index), index_buf_bytes)
-    write_off += index_buf_bytes
-
+    if gs.index_dirty { mem.copy(rawptr(base + uintptr(index_off)), raw_data(gs.gpu_index), index_bytes) }
+    if gs.owner_dirty { mem.copy(rawptr(base + uintptr(owner_off)), raw_data(gs.gpu_chunk_owner), owner_bytes) }
     SDL.UnmapGPUTransferBuffer(gs.gpu_device, transfer)
 
     cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
     copy_pass := SDL.BeginGPUCopyPass(cmd)
-
-    upload_runs(copy_pass, transfer, gs.voxel_buf, pids[:], voxel_chunk_bytes, voxel_write_off)
-    upload_runs(copy_pass, transfer, gs.mask_buf,  pids[:], mask_chunk_bytes,  mask_write_off)
-    upload_runs(copy_pass, transfer, gs.owner_buf, oslots,  owner_slot_bytes,  owner_write_off)
-    // Index: single wholesale upload. Per-slot was measured WORSE (added
-    // ~1536 tiny calls); one 4 MB copy is one call and the GPU DMA is free
-    // relative to call overhead.
-    SDL.UploadToGPUBuffer(copy_pass,
-        SDL.GPUTransferBufferLocation{transfer_buffer = transfer, offset = u32(index_write_off)},
-        SDL.GPUBufferRegion{buffer = gs.index_buf, offset = 0, size = u32(index_buf_bytes)},
-        false)
-
+    upload_runs(copy_pass, transfer, gs.voxel_buf, pids, VOXELS_PER_BRICK, 0)
+    upload_runs(copy_pass, transfer, gs.mask_buf,  pids, mask_bytes, mask_off)
+    // Slot tables: single wholesale uploads. Per-slot was measured WORSE
+    // (many tiny calls); one 4 MB copy is one call.
+    if gs.index_dirty {
+        SDL.UploadToGPUBuffer(copy_pass,
+            SDL.GPUTransferBufferLocation{transfer_buffer = transfer, offset = u32(index_off)},
+            SDL.GPUBufferRegion{buffer = gs.index_buf, offset = 0, size = u32(index_bytes)},
+            false)
+    }
+    if gs.owner_dirty {
+        SDL.UploadToGPUBuffer(copy_pass,
+            SDL.GPUTransferBufferLocation{transfer_buffer = transfer, offset = u32(owner_off)},
+            SDL.GPUBufferRegion{buffer = gs.owner_buf, offset = 0, size = u32(owner_bytes)},
+            false)
+    }
     SDL.EndGPUCopyPass(copy_pass)
     _ = SDL.SubmitGPUCommandBuffer(cmd)
 
-    clear(&gs.dirty_slots)
     gs.index_dirty = false
-    _ = n // suppress unused warning
+    gs.owner_dirty = false
 }
 
 // Coalesce a destination-sorted index list into one UploadToGPUBuffer
@@ -462,7 +422,7 @@ flush_light_uploads :: proc(gs: ^Game_State) {
         owner := gs.gpu_chunk_owner[slot]
         if owner[0] == 0x7fffffff { continue }
         key := [3]int{int(owner[0]), (slot / CHUNKS_W) % CHUNKS_H + WORLD_CHUNK_Y_MIN, int(owner[1])}
-        chunk := gs.chunk_map[key]
+        chunk := world_chunk(gs, key)
         lid := gs.gpu_light_index[slot]
         if chunk == nil || chunk.light == nil {
             if lid >= 0 { pool_free(&gs.light_pool, lid) }

@@ -1,25 +1,20 @@
 package main
 
+import "core:os"
 import "core:sync"
 import "core:thread"
 import "core:time"
 
-WORKER_COUNT :: 12
+MAX_WORKERS :: 16
 
 Chunk_Job :: struct {
-    key: [2]int, // world column coord (wcx, wcz)
+    key:       [2]int, // world column coord (wcx, wcz)
+    from_disk: bool,   // load the player-edited save instead of generating
 }
 
 Chunk_Result :: struct {
-    key:    [2]int,             // world column coord (wcx, wcz)
-    column: [CHUNKS_H]^Chunk,   // one chunk per Y layer
-    // Precomputed on the worker so the main-thread integrate avoids the
-    // 64×(512-voxel scan + conditional mask build) that was the streaming
-    // wall (~520µs/column → backlog while flying). empty[iy] true ⇒ layer
-    // is all air (no pool block). mask[iy] is the packed 512-bit occupancy
-    // the GPU consumes; main thread just mem.copy's it into the pool slot.
-    empty:  [CHUNKS_H]bool,
-    mask:   [CHUNKS_H][MASK_U32_PER_BRICK]u32,
+    key:    [2]int, // world column coord (wcx, wcz)
+    column: ^Column,
 }
 
 Worker_Pool :: struct {
@@ -37,7 +32,8 @@ Worker_Pool :: struct {
     // Number of jobs popped but not yet pushed to ready (in-flight).
     in_flight:   int,
 
-    threads:     [WORKER_COUNT]^thread.Thread,
+    threads:     [MAX_WORKERS]^thread.Thread,
+    thread_count: int,
     running:     bool,
 
     // Player column, atomically mirrored from the main thread on every
@@ -76,14 +72,16 @@ worker_pool_start :: proc(pool: ^Worker_Pool) {
     pool.ready   = make([dynamic]Chunk_Result)
     pool.queued  = make(map[[2]int]bool)
     pool.running = true
-    for i in 0 ..< WORKER_COUNT {
+    // One core stays free for the main thread.
+    pool.thread_count = clamp(os.get_processor_core_count() - 1, 1, MAX_WORKERS)
+    for i in 0 ..< pool.thread_count {
         pool.threads[i] = thread.create_and_start_with_data(pool, worker_proc)
     }
 }
 
 worker_pool_stop :: proc(pool: ^Worker_Pool) {
     pool.running = false
-    for i in 0 ..< WORKER_COUNT {
+    for i in 0 ..< pool.thread_count {
         thread.join(pool.threads[i])
         thread.destroy(pool.threads[i])
     }
@@ -92,7 +90,7 @@ worker_pool_stop :: proc(pool: ^Worker_Pool) {
     delete(pool.queued)
 }
 
-worker_pool_enqueue :: proc(pool: ^Worker_Pool, key: [2]int) {
+worker_pool_enqueue :: proc(pool: ^Worker_Pool, key: [2]int, from_disk: bool) {
     sync.mutex_lock(&pool.mu_queued)
     already := pool.queued[key]
     if !already { pool.queued[key] = true }
@@ -100,7 +98,7 @@ worker_pool_enqueue :: proc(pool: ^Worker_Pool, key: [2]int) {
     if already { return }
 
     sync.mutex_lock(&pool.mu_pending)
-    append(&pool.pending, Chunk_Job{key = key})
+    append(&pool.pending, Chunk_Job{key = key, from_disk = from_disk})
     sync.mutex_unlock(&pool.mu_pending)
 }
 
@@ -188,31 +186,19 @@ worker_proc :: proc(data: rawptr) {
         sync.mutex_unlock(&pool.mu_pending)
 
         if !job_ok {
-            thread.yield()
+            // Idle: sleep rather than spin, so idle workers don't take CPU
+            // from the main thread.
+            time.sleep(time.Millisecond)
             continue
         }
 
-        column := generate_column_at(job.key[0], job.key[1])
+        column: ^Column
+        if job.from_disk { column = load_column(job.key) }
+        if column == nil { column = generate_column_at(job.key[0], job.key[1]) }
         t_light := time.tick_now()
-        light_column_compute(&column)
+        light_column_compute(column)
         profile_add(.Light_Column, t_light)
-
-        // Precompute emptiness + occupancy mask here (worker side) so the
-        // main-thread integrate is just pool-alloc + two mem.copy. This is
-        // the work that was the streaming wall.
         res := Chunk_Result{key = job.key, column = column}
-        for iy in 0 ..< CHUNKS_H {
-            voxels := &column[iy].voxels
-            any := false
-            for vi in 0 ..< VOXELS_PER_BRICK {
-                v := voxels[vi]
-                if v != 0 {
-                    any = true
-                    res.mask[iy][vi >> 5] |= u32(1) << u32(vi & 31)
-                }
-            }
-            res.empty[iy] = !any
-        }
 
         sync.mutex_lock(&pool.mu_ready)
         append(&pool.ready, res)

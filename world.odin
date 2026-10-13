@@ -3,7 +3,6 @@ package main
 import "core:fmt"
 import "core:math"
 import "core:math/noise"
-import "core:mem"
 import "core:time"
 
 CHUNK_VOXELS :: 8
@@ -15,23 +14,20 @@ MASK_U32_PER_BRICK :: (CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS) / 32
 
 VOXELS_PER_BRICK :: CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS // 512
 
-// Stage 3 sparse brick pool. gpu_index[slot] is now a POOL ID in
-// [0, MAX_RESIDENT_BRICKS) or -1 (air / no storage). The pool id indexes
-// gpu_voxels (pool_id*512) and gpu_voxel_mask (pool_id*16). All-air bricks
-// consume zero pool blocks. Block = 512 + 64 bytes.
-//
-// This 64-tall world is mostly solid stone (Y=-256 up to the surface), so the
-// resident non-empty set is large. With LOAD_RADIUS_XZ=56 that's ~113x113
-// columns * ~45 non-empty Y chunks ≈ 575k bricks worst case. 1<<20 = 1048576
-// blocks (~576 MiB GPU + 576 MiB CPU mirror) covers it with margin. A
-// uniform-stone sentinel (future) would let this shrink substantially.
-MAX_RESIDENT_BRICKS :: 1 << 20
+// Sparse voxel brick pool on the GPU. gpu_index[slot] is a pool id in
+// [0, MAX_RESIDENT_BRICKS) for a chunk with mixed contents, or encodes a
+// uniform chunk with no storage: -1 = all air, -2 - b = all block b (see
+// chunk_index_uniform). Most of the world is uniform (open air, deep rock),
+// so only the surface, caves and trees use bricks: ~190k at LOAD_RADIUS_XZ.
+MAX_RESIDENT_BRICKS :: 3 << 17 // 393k bricks: 192 MiB voxels + 24 MiB masks
+
+chunk_index_uniform :: #force_inline proc(b: u8) -> i32 { return b == 0 ? -1 : -2 - i32(b) }
 
 // Light bricks (512 bytes each) exist only for chunks whose light varies:
 // mostly the terrain surface, tree canopies, cave mouths and around torches.
 // gpu_light_index[slot] is a light pool id, or light_index_uniform(v) for a
 // chunk whose every voxel has light v.
-MAX_LIGHT_BRICKS :: 1 << 18
+MAX_LIGHT_BRICKS :: 1 << 17
 
 light_index_uniform :: #force_inline proc(v: u8) -> i32 { return -1 - i32(v) }
 
@@ -90,13 +86,74 @@ Block_Type :: enum u8 {
     Stone  = 2,
     Log    = 3,
     Leaves = 4,
-    Torch  = 5,   // emissive — feeds the point-light list (lights.odin)
+    Torch  = 5,   // emissive: block light source (light.odin)
 }
 
+// One 8x8x8 chunk. Uniform chunks (all air, all stone) keep no voxel array.
 Chunk :: struct {
-    voxels:     [CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS]u8,
-    light:      ^[CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS]u8, // nil = all light_fill (light.odin)
+    voxels:     ^[VOXELS_PER_BRICK]u8, // nil = every voxel is `fill`
+    fill:       u8,
+    light:      ^[VOXELS_PER_BRICK]u8, // nil = all light_fill (light.odin)
     light_fill: u8,
+}
+
+// All CHUNKS_H chunks of one 8x8 footprint: the unit of generation,
+// streaming and saving. gs.columns holds exactly the resident columns.
+Column :: struct {
+    chunks:   [CHUNKS_H]Chunk,
+    modified: bool, // edited by the player: saved to disk when unloaded (save.odin)
+}
+
+chunk_voxel :: #force_inline proc(c: ^Chunk, vi: int) -> u8 {
+    return c.voxels == nil ? c.fill : c.voxels[vi]
+}
+
+// Returns true if the voxel changed.
+chunk_set_voxel :: proc(c: ^Chunk, vi: int, v: u8) -> bool {
+    if c.voxels == nil {
+        if v == c.fill { return false }
+        c.voxels = new([VOXELS_PER_BRICK]u8)
+        for &x in c.voxels { x = c.fill }
+    }
+    if c.voxels[vi] == v { return false }
+    c.voxels[vi] = v
+    return true
+}
+
+// Drop the voxel array of a chunk that became uniform. Only air and plain
+// opaque blocks can be uniform: the shader treats a uniform chunk as one
+// solid box, which would be wrong for see-through leaves or emitters.
+chunk_compact :: proc(c: ^Chunk) {
+    if c.voxels == nil { return }
+    first := c.voxels[0]
+    if first != 0 && (!block_opaque(first) || block_emission(first) > 0) { return }
+    for v in c.voxels { if v != first { return } }
+    free(c.voxels)
+    c.voxels = nil
+    c.fill = first
+}
+
+column_free :: proc(col: ^Column) {
+    for &c in col.chunks {
+        if c.voxels != nil { free(c.voxels) }
+        chunk_free_light(&c)
+    }
+    free(col)
+}
+
+// The resident chunk at a world chunk coordinate, or nil.
+world_chunk :: proc(gs: ^Game_State, key: [3]int) -> ^Chunk {
+    iy := chunk_y_index(key.y)
+    if iy < 0 { return nil }
+    col := gs.columns[{key.x, key.z}]
+    return col == nil ? nil : &col.chunks[iy]
+}
+
+// The resident chunk a ring slot currently holds, or nil.
+slot_chunk :: proc(gs: ^Game_State, slot: int) -> ^Chunk {
+    owner := gs.gpu_chunk_owner[slot]
+    if owner[0] == 0x7fffffff { return nil }
+    return world_chunk(gs, {int(owner[0]), (slot / CHUNKS_W) % CHUNKS_H + WORLD_CHUNK_Y_MIN, int(owner[1])})
 }
 
 LOAD_RADIUS_XZ  :: 56   // must stay < CHUNKS_W/2 (=64) so a chunk and its ring-twin never coexist
@@ -148,12 +205,8 @@ generate_world :: proc(gs: ^Game_State) {
     t0 := time.now()
 
     total := CHUNKS_W * CHUNKS_H * CHUNKS_W
-    gs.chunk_map       = make(map[[3]int]^Chunk)
-    gs.gpu_loaded      = make(map[[3]int]bool)
-    // Pool-sized: indexed by pool id, NOT slot.
-    gs.gpu_voxels      = make([]u8,  MAX_RESIDENT_BRICKS * VOXELS_PER_BRICK)
-    gs.gpu_voxel_mask  = make([]u32, MAX_RESIDENT_BRICKS * MASK_U32_PER_BRICK)
-    // Slot-sized: indexed by ring slot.
+    gs.columns         = make(map[[2]int]^Column)
+    // Indexed by ring slot.
     gs.gpu_index       = make([]i32,    total)
     gs.gpu_chunk_owner = make([][2]i32, total)
     gs.gpu_light_index = make([]i32,    total)
@@ -200,11 +253,9 @@ enqueue_radius :: proc(gs: ^Game_State, radius: int) {
     for dcz in -radius ..= radius {
         for dcx in -radius ..= radius {
             wcx := pcx + dcx; wcz := pcz + dcz
-            // Skip if the column is already fully loaded (check Y=0 as proxy;
-            // columns are integrated atomically so this is sufficient).
-            probe := [3]int{wcx, 0, wcz}
-            if probe in gs.gpu_loaded { continue }
-            worker_pool_enqueue(&gs.pool, [2]int{wcx, wcz})
+            key := [2]int{wcx, wcz}
+            if key in gs.columns { continue }
+            worker_pool_enqueue(&gs.pool, key, key in gs.saved_columns)
         }
     }
 }
@@ -213,74 +264,73 @@ enqueue_chunks :: proc(gs: ^Game_State) {
     enqueue_radius(gs, LOAD_RADIUS_XZ)
 }
 
-// Upload a chunk into the GPU ring. Called on main thread after chunk is
-// fully built. `empty` and `mask` are precomputed on the worker (see
-// Chunk_Result) so this does no per-voxel scanning — only pool bookkeeping
-// and two mem.copy.
-integrate_chunk :: proc(gs: ^Game_State, key: [3]int, chunk: ^Chunk, empty: bool, mask: ^[MASK_U32_PER_BRICK]u32, gpu_ready: bool) {
-    wcx := key[0]; wcy := key[1]; wcz := key[2]
-    if key in gs.gpu_loaded { return }
-
-    slot := ring_slot(wcx, wcy, wcz)
-
-    // Eviction: the slot is being reassigned. Drop the old owner, then free
-    // any pool id this slot holds EXACTLY ONCE (set to -1 in the same breath
-    // so a second free is structurally impossible). Covers implicit
-    // eviction-by-owner, same-slot re-integration, and air slots (id == -1).
-    old := gs.gpu_chunk_owner[slot]
-    if old[0] != 0x7fffffff {
-        old_key := [3]int{int(old[0]), wcy, int(old[1])}
-        delete_key(&gs.gpu_loaded, old_key)
-        worker_pool_unqueue(&gs.pool, [2]int{int(old[0]), int(old[1])})
-    }
-    old_id := gs.gpu_index[slot]
-    if old_id >= 0 {
-        pool_free(&gs.brick_pool, old_id)
-        gs.gpu_index[slot] = -1
-    }
-    if lid := gs.gpu_light_index[slot]; lid >= 0 {
-        pool_free(&gs.light_pool, lid)
-        gs.gpu_light_index[slot] = light_index_uniform(LIGHT_SKY)
-    }
-
-    gs.gpu_loaded[key]       = true
-    gs.gpu_chunk_owner[slot] = {i32(wcx), i32(wcz)}
-
-    if empty {
-        gs.gpu_index[slot] = -1 // air: zero pool blocks
-    } else {
-        pid := pool_alloc(&gs.brick_pool)
-        if pid < 0 {
-            pool_exhaustion_warn()
-            gs.gpu_index[slot] = -1 // graceful: render as air, no leak
-        } else {
-            base      := int(pid) * VOXELS_PER_BRICK
-            mask_base := int(pid) * MASK_U32_PER_BRICK
-            // Bulk copies — the per-voxel scan/mask build already ran on the
-            // worker. mem.copy is SIMD memcpy, ~tens of ns vs the old ~520µs
-            // byte loop that was the streaming wall.
-            mem.copy(&gs.gpu_voxels[base], &chunk.voxels[0], VOXELS_PER_BRICK)
-            mem.copy(&gs.gpu_voxel_mask[mask_base], &mask[0], MASK_U32_PER_BRICK * size_of(u32))
-            gs.gpu_index[slot] = pid
+// Point a ring slot's GPU index at the chunk it holds: a uniform chunk is
+// encoded in the index, a mixed one gets a pool brick and is queued for
+// voxel upload. Call after the slot's chunk was loaded or edited.
+gpu_sync_slot :: proc(gs: ^Game_State, slot: int) {
+    old := gs.gpu_index[slot]
+    c := slot_chunk(gs, slot)
+    if c != nil { chunk_compact(c) }
+    idx := i32(-1)
+    if c != nil && c.voxels == nil {
+        idx = chunk_index_uniform(c.fill)
+    } else if c != nil {
+        idx = old
+        if idx < 0 {
+            idx = pool_alloc(&gs.brick_pool)
+            if idx < 0 { pool_exhaustion_warn() } // renders as air, no leak
         }
+        if idx >= 0 { append(&gs.dirty_slots, slot) }
     }
-
-    if gpu_ready {
-        append(&gs.dirty_slots, slot)
-        append(&gs.light_dirty, slot)
+    if old >= 0 && idx != old { pool_free(&gs.brick_pool, old) }
+    if idx != old {
+        gs.gpu_index[slot] = idx
         gs.index_dirty = true
     }
 }
 
-// Drain finished columns from the worker pool and integrate them. Each column
-// arrives complete (terrain + trees clipped per chunk), so this just uploads.
-// Max columns integrated on the main thread per frame. The per-voxel scan +
-// mask build now runs on the worker (see Chunk_Result), so a column is just
-// 64×(pool alloc + 512B/64B mem.copy + map ops) — roughly an order of
-// magnitude cheaper than the old ~520µs. Active flight enqueues ~19 cols/
-// frame; 24 keeps the backlog (and the holes-when-moving) from growing while
-// staying well under the old ~3 ms/frame integrate cost. Tune from the
-// Integrate profile zone if needed.
+// Make a freshly loaded column resident: evict whatever column held its ring
+// position, then point the ring slots at it.
+integrate_column :: proc(gs: ^Game_State, key: [2]int, col: ^Column) {
+    owner := gs.gpu_chunk_owner[ring_slot(key.x, WORLD_CHUNK_Y_MIN, key.y)]
+    if owner[0] != 0x7fffffff && (int(owner[0]) != key.x || int(owner[1]) != key.y) {
+        unload_column(gs, {int(owner[0]), int(owner[1])})
+    }
+    gs.columns[key] = col
+    for iy in 0 ..< CHUNKS_H {
+        slot := ring_slot(key.x, iy + WORLD_CHUNK_Y_MIN, key.y)
+        gs.gpu_chunk_owner[slot] = {i32(key.x), i32(key.y)}
+        gpu_sync_slot(gs, slot)
+        append(&gs.light_dirty, slot)
+    }
+    gs.owner_dirty = true
+    append(&gs.stitch_queue, key)
+}
+
+// Drop a resident column (saving it first if the player edited it) and free
+// its GPU bricks. Unedited columns are simply regenerated if needed again.
+unload_column :: proc(gs: ^Game_State, key: [2]int) {
+    col := gs.columns[key]
+    if col == nil { return }
+    if col.modified { save_column(gs, key, col) }
+    for iy in 0 ..< CHUNKS_H {
+        slot := ring_slot(key.x, iy + WORLD_CHUNK_Y_MIN, key.y)
+        pool_free(&gs.brick_pool, gs.gpu_index[slot])
+        pool_free(&gs.light_pool, gs.gpu_light_index[slot])
+        gs.gpu_index[slot]       = -1
+        gs.gpu_light_index[slot] = light_index_uniform(LIGHT_SKY)
+        gs.gpu_chunk_owner[slot] = {0x7fffffff, 0x7fffffff}
+    }
+    gs.index_dirty = true
+    gs.owner_dirty = true
+    delete_key(&gs.columns, key)
+    worker_pool_unqueue(&gs.pool, key)
+    column_free(col)
+}
+
+// Drain finished columns from the worker pool and integrate them. Each
+// column arrives complete (terrain, trees, its own sky light), so this is
+// pool bookkeeping plus queueing uploads.
 INTEGRATE_BUDGET_PER_FRAME :: 24
 
 integrate_ready_chunks :: proc(gs: ^Game_State) {
@@ -288,24 +338,12 @@ integrate_ready_chunks :: proc(gs: ^Game_State) {
     defer delete(results)
     if len(results) == 0 { return }
     t_int := time.tick_now()
-    for &r in results {
-        wcx := r.key[0]; wcz := r.key[1]
-        probe := [3]int{wcx, 0, wcz}
-        if probe in gs.gpu_loaded {
-            // Column already present — discard the duplicate.
-            for cy in 0 ..< CHUNKS_H {
-                chunk_free_light(r.column[cy])
-                free(r.column[cy])
-            }
+    for r in results {
+        if r.key in gs.columns {
+            column_free(r.column) // already resident: discard the duplicate
             continue
         }
-        for iy in 0 ..< CHUNKS_H {
-            wcy := iy + WORLD_CHUNK_Y_MIN
-            key := [3]int{wcx, wcy, wcz}
-            gs.chunk_map[key] = r.column[iy]
-            integrate_chunk(gs, key, r.column[iy], r.empty[iy], &r.mask[iy], true)
-        }
-        append(&gs.stitch_queue, [2]int{wcx, wcz})
+        integrate_column(gs, r.key, r.column)
     }
     profile_add(.Integrate, t_int)
 }
@@ -334,10 +372,9 @@ streaming_idle :: proc(gs: ^Game_State) -> bool {
 // Generate an entire XZ column: all CHUNKS_H Y chunks at world chunk coord
 // (wcx, *, wcz). Terrain noise and the tree scan run once for the whole column
 // instead of once per Y chunk — eliminating the 16× redundancy that dominated
-// streaming cost.
-generate_column_at :: proc(wcx, wcz: int) -> [CHUNKS_H]^Chunk {
-    column: [CHUNKS_H]^Chunk
-    for cy in 0 ..< CHUNKS_H { column[cy] = new(Chunk) }
+// streaming cost. Chunks that end up uniform keep no voxel array.
+generate_column_at :: proc(wcx, wcz: int) -> ^Column {
+    column := new(Column)
 
     gx := wcx * CHUNK_VOXELS
     gz := wcz * CHUNK_VOXELS
@@ -367,24 +404,23 @@ generate_column_at :: proc(wcx, wcz: int) -> [CHUNKS_H]^Chunk {
 
     t_fill := time.tick_now()
     for iy in 0 ..< CHUNKS_H {
-        chunk := column[iy]
+        chunk := &column.chunks[iy]
         wcy := iy + WORLD_CHUNK_Y_MIN
         gy  := wcy * CHUNK_VOXELS         // world voxel Y of this chunk's base
         cy0 := f64(gy)
         cy1 := f64(gy + CHUNK_VOXELS)     // exclusive top
 
-        // Fast path 1: chunk entirely above the highest surface → all Air.
-        // new(Chunk) already zeroed voxels to Air, so nothing to write.
+        // Fast path 1: chunk entirely above the highest surface → all Air
+        // (the zeroed fill).
         if cy0 >= surf_max { continue }
 
-        // Fast path 2: chunk entirely below the cave band → solid Stone fill,
-        // no per-voxel noise needed.
+        // Fast path 2: chunk entirely below the cave band → solid Stone, no
+        // per-voxel noise needed.
         if cy1 <= f64(CAVE_FLOOR_Y) {
-            for vi in 0 ..< CHUNK_VOXELS*CHUNK_VOXELS*CHUNK_VOXELS {
-                chunk.voxels[vi] = u8(Block_Type.Stone)
-            }
+            chunk.fill = u8(Block_Type.Stone)
             continue
         }
+        chunk.voxels = new([VOXELS_PER_BRICK]u8)
 
         // Mixed chunk: per-voxel terrain + cave carve.
         for z in 0 ..< CHUNK_VOXELS {
@@ -427,7 +463,7 @@ generate_column_at :: proc(wcx, wcz: int) -> [CHUNKS_H]^Chunk {
 
     // One tree scan for the whole column. Trees write into whichever Y chunk
     // their voxels land in via set_voxel_world.
-    tgt := Tree_Target{chunks = column, ox = gx, oz = gz}
+    tgt := Tree_Target{col = column, ox = gx, oz = gz}
     t_scan := time.tick_now()
     for wz in gz - TREE_VOXEL_REACH ..< gz + CHUNK_VOXELS + TREE_VOXEL_REACH {
         for wx in gx - TREE_VOXEL_REACH ..< gx + CHUNK_VOXELS + TREE_VOXEL_REACH {
@@ -439,6 +475,7 @@ generate_column_at :: proc(wcx, wcz: int) -> [CHUNKS_H]^Chunk {
         }
     }
     profile_add(.Tree_Scan, t_scan)
+    for &c in column.chunks { chunk_compact(&c) }
     return column
 }
 
@@ -462,8 +499,8 @@ surface_height_at :: proc(wx, wz: int) -> int {
 // regenerated by every column it overlaps, so cross-column edges stay seamless
 // with no shared state — but within a column the scan runs exactly once.
 Tree_Target :: struct {
-    chunks:   [CHUNKS_H]^Chunk, // one per Y chunk
-    ox, oz:   int,              // world voxel coord of local (0, *, 0)
+    col:      ^Column,
+    ox, oz:   int,     // world voxel coord of local (0, *, 0)
 }
 
 // Max horizontal voxel reach of a tree from its base (trunk wander + branch +
@@ -478,7 +515,7 @@ set_voxel_world :: proc(t: ^Tree_Target, wx, wy, wz: int, block: Block_Type) {
     iy  := chunk_y_index(wcy)
     if iy < 0 { return }
     ly := wy - wcy * CHUNK_VOXELS
-    t.chunks[iy].voxels[lx + ly*CHUNK_VOXELS + lz*CHUNK_VOXELS*CHUNK_VOXELS] = u8(block)
+    chunk_set_voxel(&t.col.chunks[iy], lx + ly*CHUNK_VOXELS + lz*CHUNK_VOXELS*CHUNK_VOXELS, u8(block))
 }
 
 // True if a world-space AABB [lo, hi] (inclusive) overlaps this column's XZ
@@ -512,8 +549,8 @@ place_leaves :: proc(t: ^Tree_Target, wx, wy, wz: int) {
     if iy < 0 { return }
     ly := wy - wcy * CHUNK_VOXELS
     vi := lx + ly*CHUNK_VOXELS + lz*CHUNK_VOXELS*CHUNK_VOXELS
-    if t.chunks[iy].voxels[vi] != u8(Block_Type.Log) {
-        t.chunks[iy].voxels[vi] = u8(Block_Type.Leaves)
+    if chunk_voxel(&t.col.chunks[iy], vi) != u8(Block_Type.Log) {
+        chunk_set_voxel(&t.col.chunks[iy], vi, u8(Block_Type.Leaves))
     }
 }
 
@@ -714,35 +751,14 @@ should_place_tree :: proc(wx, wz: int) -> bool {
 }
 
 get_voxel :: proc(gs: ^Game_State, wx, wy, wz: int) -> u32 {
-    cx := floor_div(wx, CHUNK_VOXELS); cy := floor_div(wy, CHUNK_VOXELS); cz := floor_div(wz, CHUNK_VOXELS)
-    if chunk_y_index(cy) < 0 { return 0 }
-    slot := ring_slot(cx, cy, cz)
-    // Validate ring ownership
-    owner := gs.gpu_chunk_owner[slot]
-    if owner[0] != i32(cx) || owner[1] != i32(cz) { return 0 }
-    pid := gs.gpu_index[slot]
-    if pid == -1 { return 0 }
-    lx := wx - cx * CHUNK_VOXELS; ly := wy - cy * CHUNK_VOXELS; lz := wz - cz * CHUNK_VOXELS
-    base := int(pid) * VOXELS_PER_BRICK
-    return u32(gs.gpu_voxels[base + lx + ly * CHUNK_VOXELS + lz * CHUNK_VOXELS * CHUNK_VOXELS])
+    c := world_chunk(gs, {wx >> 3, wy >> 3, wz >> 3}) // CHUNK_VOXELS == 8
+    if c == nil { return 0 }
+    return u32(chunk_voxel(c, (wx & 7) + (wy & 7) * CHUNK_VOXELS + (wz & 7) * CHUNK_VOXELS * CHUNK_VOXELS))
 }
 
 // CPU-side DDA raycast — mirrors the shader's two-level traversal.
 // Returns the integer world position of the hit voxel and the surface normal.
 raycast_voxel :: proc(gs: ^Game_State, origin, dir: [3]f32, max_dist: f32) -> (hit_pos: [3]int, normal: [3]int, ok: bool) {
-    sample :: proc(gs: ^Game_State, wx, wy, wz: int) -> u32 {
-        cx := floor_div(wx, CHUNK_VOXELS); cy := floor_div(wy, CHUNK_VOXELS); cz := floor_div(wz, CHUNK_VOXELS)
-        if chunk_y_index(cy) < 0 { return 0 }
-        slot := ring_slot(cx, cy, cz)
-        owner := gs.gpu_chunk_owner[slot]
-        if owner[0] != i32(cx) || owner[1] != i32(cz) { return 0 }
-        pid := gs.gpu_index[slot]
-        if pid == -1 { return 0 }
-        lx := wx - cx * CHUNK_VOXELS; ly := wy - cy * CHUNK_VOXELS; lz := wz - cz * CHUNK_VOXELS
-        base := int(pid) * VOXELS_PER_BRICK
-        return u32(gs.gpu_voxels[base + lx + ly * CHUNK_VOXELS + lz * CHUNK_VOXELS * CHUNK_VOXELS])
-    }
-
     dx := dir[0]; dy := dir[1]; dz := dir[2]
     ox := f64(origin[0]); oy := f64(origin[1]); oz := f64(origin[2])
 
@@ -767,7 +783,7 @@ raycast_voxel :: proc(gs: ^Game_State, origin, dir: [3]f32, max_dist: f32) -> (h
     nx, ny, nz := 0, 0, 0
 
     for t := 0.0; t < f64(max_dist); {
-        if sample(gs, xi, yi, zi) != 0 {
+        if get_voxel(gs, xi, yi, zi) != 0 {
             return {xi, yi, zi}, {nx, ny, nz}, true
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {
@@ -788,8 +804,8 @@ BRUSH_RADIUS :: 5
 
 // Sets all voxels within a sphere of `radius` around center to `block`
 // (radius 0 = single voxel, used for torch placement). Marks each affected
-// chunk slot in `dirty` and appends every voxel that changed to `changed`
-// (the caller relights them with light_on_edit).
+// chunk slot in `dirty` (the caller then runs gpu_sync_slot on each) and
+// appends every voxel that changed to `changed` (relit by light_on_edit).
 edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^map[int]bool, changed: ^[dynamic][3]int, radius := BRUSH_RADIUS) {
     r := radius
     for dz in -r ..= r {
@@ -799,83 +815,17 @@ edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^
                 wx := center[0] + dx
                 wy := center[1] + dy
                 wz := center[2] + dz
-                cx := floor_div(wx, CHUNK_VOXELS); cy := floor_div(wy, CHUNK_VOXELS); cz := floor_div(wz, CHUNK_VOXELS)
-                if chunk_y_index(cy) < 0 { continue }
-                key := [3]int{cx, cy, cz}
-                slot := ring_slot(cx, cy, cz)
-                // Only edit if this slot is owned by the expected chunk
-                owner := gs.gpu_chunk_owner[slot]
-                if owner[0] != i32(cx) || owner[1] != i32(cz) { continue }
-                chunk := gs.chunk_map[key]
-                if chunk == nil { continue }
-                lx := wx - cx * CHUNK_VOXELS
-                ly := wy - cy * CHUNK_VOXELS
-                lz := wz - cz * CHUNK_VOXELS
-                vi := lx + ly * CHUNK_VOXELS + lz * CHUNK_VOXELS * CHUNK_VOXELS
-                // Write only the authoritative chunk; the pool-aware
-                // refresh_chunk_index (called per dirty slot) syncs the
-                // pool-id voxel + mask blocks, handling air<->solid.
-                if chunk.voxels[vi] == u8(block) { continue }
-                chunk.voxels[vi] = u8(block)
-                dirty[slot] = true
+                cx := wx >> 3; cy := wy >> 3; cz := wz >> 3 // CHUNK_VOXELS == 8
+                iy := chunk_y_index(cy)
+                if iy < 0 { continue }
+                col := gs.columns[{cx, cz}]
+                if col == nil { continue }
+                vi := (wx & 7) + (wy & 7) * CHUNK_VOXELS + (wz & 7) * CHUNK_VOXELS * CHUNK_VOXELS
+                if !chunk_set_voxel(&col.chunks[iy], vi, u8(block)) { continue }
+                col.modified = true
+                dirty[ring_slot(cx, cy, cz)] = true
                 append(changed, [3]int{wx, wy, wz})
             }
         }
     }
 }
-
-// Pool-aware re-sync of a slot after an edit. Reads the authoritative
-// chunk.voxels, decides emptiness, allocates/frees the pool id as needed,
-// rewrites the pool-id voxel + mask blocks. Returns true if gpu_index[slot]
-// changed (caller must then set index_dirty).
-refresh_chunk_index :: proc(gs: ^Game_State, slot: int) -> bool {
-    owner := gs.gpu_chunk_owner[slot]
-    if owner[0] == 0x7fffffff { return false }
-    // Invert ring_slot: iy = (slot / CHUNKS_W) % CHUNKS_H, wcy = iy + WORLD_CHUNK_Y_MIN.
-    key := [3]int{
-        int(owner[0]),
-        (slot / CHUNKS_W) % CHUNKS_H + WORLD_CHUNK_Y_MIN,
-        int(owner[1]),
-    }
-    chunk := gs.chunk_map[key]
-    if chunk == nil { return false }
-
-    old_id := gs.gpu_index[slot]
-
-    empty := true
-    for vi in 0 ..< VOXELS_PER_BRICK {
-        if chunk.voxels[vi] != 0 { empty = false; break }
-    }
-
-    if empty {
-        if old_id >= 0 {
-            pool_free(&gs.brick_pool, old_id)
-            gs.gpu_index[slot] = -1
-        }
-        return gs.gpu_index[slot] != old_id
-    }
-
-    pid := old_id
-    if pid < 0 {
-        pid = pool_alloc(&gs.brick_pool)
-        if pid < 0 {
-            pool_exhaustion_warn()
-            gs.gpu_index[slot] = -1
-            return -1 != old_id
-        }
-        gs.gpu_index[slot] = pid
-    }
-
-    base      := int(pid) * VOXELS_PER_BRICK
-    mask_base := int(pid) * MASK_U32_PER_BRICK
-    for m in 0 ..< MASK_U32_PER_BRICK { gs.gpu_voxel_mask[mask_base + m] = 0 }
-    for vi in 0 ..< VOXELS_PER_BRICK {
-        v := chunk.voxels[vi]
-        gs.gpu_voxels[base + vi] = v
-        if v != 0 {
-            gs.gpu_voxel_mask[mask_base + (vi >> 5)] |= u32(1) << u32(vi & 31)
-        }
-    }
-    return gs.gpu_index[slot] != old_id
-}
-

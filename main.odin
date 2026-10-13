@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:os"
+import "core:time"
 import SDL "vendor:sdl3"
 
 DOUBLE_TAP_MS :: u64(300)
@@ -15,20 +16,21 @@ Game_State :: struct {
     camera: Camera,
 
     // World
-    chunk_map:       map[[3]int]^Chunk,  // persistent world: all ever-generated chunks
-    gpu_loaded:      map[[3]int]bool,    // which chunks are currently on the GPU ring
+    columns:         map[[2]int]^Column, // resident columns (world.odin)
+    saved_columns:   map[[2]int]bool,    // columns with a save file (save.odin)
     pool:            Worker_Pool,
-    dirty_slots:     [dynamic]int,   // slots needing GPU upload this frame
-    index_dirty:     bool,
-    gpu_voxels:      []u8,
-    gpu_voxel_mask:  []u32,              // 16 u32 (512-bit occupancy) per ring slot
-    gpu_index:       []i32,
+    dirty_slots:     [dynamic]int,   // slots whose brick needs GPU upload
+    index_dirty:     bool,           // gpu_index changed
+    owner_dirty:     bool,           // gpu_chunk_owner changed
+    gpu_index:       []i32,              // ring slot -> brick pool id, or uniform chunk
     gpu_chunk_owner: [][2]i32,           // ring slot -> (world_cx, world_cz)
     brick_pool:      Brick_Pool,         // free-list allocator over pool ids
     gpu_light_index: []i32,              // ring slot -> light pool id, or uniform light (light.odin)
     light_pool:      Brick_Pool,         // free-list allocator over light pool ids
     light_dirty:     [dynamic]int,       // slots whose light needs GPU upload
     stitch_queue:    [dynamic][2]int,    // integrated columns awaiting light stitching
+    save_enabled:    bool,               // off in bench mode, so benches never touch saves
+    last_autosave:   time.Tick,
     player_chunk:    [3]int,
     prof_frames:     int,
 
@@ -138,6 +140,7 @@ main :: proc() {
     gs.light_dirty = make([dynamic]int)
     defer delete(gs.light_dirty)
     defer delete(gs.stitch_queue)
+    if !bench { save_init(&gs) }
     generate_world(&gs)
     gpu_init(&gs)
     defer gpu_destroy(&gs)
@@ -265,7 +268,10 @@ main :: proc() {
             }
         }
 
-        if quit { break }
+        if quit {
+            if gs.save_enabled { save_all_modified(&gs) }
+            break
+        }
 
         // Keyboard held-state for movement
         kb := SDL.GetKeyboardState(nil)
@@ -360,10 +366,7 @@ main :: proc() {
                     defer delete(changed)
                     edit_sphere(&gs, target, block, &dirty, &changed, radius)
                     light_on_edit(&gs, changed[:])
-                    for slot in dirty {
-                        if refresh_chunk_index(&gs, slot) { gs.index_dirty = true }
-                        append(&gs.dirty_slots, slot)
-                    }
+                    for slot in dirty { gpu_sync_slot(&gs, slot) }
                 }
             }
         }
@@ -372,6 +375,7 @@ main :: proc() {
         entities_update(&gs, dt)
         gpu_render(&gs)
         ui_build_and_render(&gs, dt)
+        autosave_tick(&gs)
 
         gs.prof_frames += 1
         if gs.prof_frames >= 300 {

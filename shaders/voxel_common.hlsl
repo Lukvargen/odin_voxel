@@ -90,6 +90,7 @@ uint sample_voxel(float3 world_pos) {
 
     int ci = chunk_index[slot];
     if (ci == -1) return 0u;
+    if (ci < -1) return uint(-ci - 2); // uniform chunk
 
     int3 local = int3(floor(world_pos)) - chunk_coord * BRICK_CHUNK_SIZE;
     local = clamp(local, int3(0,0,0), int3(BRICK_CHUNK_SIZE-1, BRICK_CHUNK_SIZE-1, BRICK_CHUNK_SIZE-1));
@@ -233,6 +234,7 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
                 int2 owner = chunk_owner[slot_i];
                 if (owner.x != x_i || owner.y != z_i) ci = -1;
             }
+            if (ci < -1) return 0.0; // uniform chunks are always opaque
             if (ci != -1) {
                 // Precision-safe local entry, same pattern as the primary
                 // tracer: subtract exact int chunk coords in chunk units,
@@ -356,9 +358,11 @@ struct HitInfo {
 //   axis, computed precision-safe in the caller. Drives the index, t_max,
 //   and vkey — the precision-critical path.
 // chunk_ic: EXACT integer chunk coords (outer DDA integers, no float floor).
+// uniform_id: non-zero for a uniform chunk (no brick): every voxel is that
+//   block, so the entry voxel is the hit.
 HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
                                 float3 dir, int3 chunk_ic,
-                                int chunk_i, float3 entry_normal) {
+                                int chunk_i, uint uniform_id, float3 entry_normal) {
     float t_delta_x = abs(1.0 / dir.x);
     float t_delta_y = abs(1.0 / dir.y);
     float t_delta_z = abs(1.0 / dir.z);
@@ -394,7 +398,8 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
     if (x_i >= 0 && y_i >= 0 && z_i >= 0 &&
         x_i < BRICK_CHUNK_SIZE && y_i < BRICK_CHUNK_SIZE && z_i < BRICK_CHUNK_SIZE) {
         int lvi = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
-        if (voxel_solid(chunk_i, lvi)) hit_block_id = load_voxel(global_chunk_i + lvi);
+        if (uniform_id != 0u) hit_block_id = uniform_id;
+        else if (voxel_solid(chunk_i, lvi)) hit_block_id = load_voxel(global_chunk_i + lvi);
     }
 
     while (i < 23 && hit_block_id == 0u) {
@@ -498,8 +503,9 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
                 float3 local_entry = ((chunk_origin + dir * t) - float3(chunk_ic))
                                      * float(BRICK_CHUNK_SIZE);   // [0,8) per axis
                 HitInfo vhit = trace_ray_chunk_voxels(entry_pos, local_entry, dir,
-                                                      chunk_ic,
-                                                      ci, chunk_entry_normal);
+                                                      chunk_ic, max(ci, 0),
+                                                      ci < -1 ? uint(-ci - 2) : 0u,
+                                                      chunk_entry_normal);
                 if (vhit.block_id != 0u) {
                     hit_block_id = vhit.block_id;
                     t += vhit.t / float(BRICK_CHUNK_SIZE);

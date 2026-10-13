@@ -65,6 +65,7 @@ bench_run :: proc(gs: ^Game_State) {
         time.sleep(time.Millisecond)
     }
     fmt.printf("bench: world streamed in %.1f s\n", time.duration_seconds(time.since(t0)))
+    bench_world_stats(gs)
 
     gs.camera.fly_mode = true
     for v in views {
@@ -140,10 +141,7 @@ bench_place_torches :: proc(gs: ^Game_State) {
         edit_sphere(gs, key, .Torch, &dirty, &changed, 0)
     }
     light_on_edit(gs, changed[:])
-    for slot in dirty {
-        if refresh_chunk_index(gs, slot) { gs.index_dirty = true }
-        append(&gs.dirty_slots, slot)
-    }
+    for slot in dirty { gpu_sync_slot(gs, slot) }
 }
 
 // A sealed room around the camera with one torch on the floor ahead.
@@ -158,10 +156,7 @@ bench_carve_cave :: proc(gs: ^Game_State) {
     torch := [3]int{c.x + int(fwd.x * 4), c.y - 6, c.z + int(fwd.z * 4)}
     edit_sphere(gs, torch, .Torch, &dirty, &changed, 0)
     light_on_edit(gs, changed[:])
-    for slot in dirty {
-        if refresh_chunk_index(gs, slot) { gs.index_dirty = true }
-        append(&gs.dirty_slots, slot)
-    }
+    for slot in dirty { gpu_sync_slot(gs, slot) }
 }
 
 // Save the current out_texture (tone-mapped RGBA16F) as a BMP.
@@ -197,4 +192,18 @@ bench_screenshot :: proc(gs: ^Game_State, path: string) {
     defer SDL.DestroySurface(surf)
     cpath := strings.clone_to_cstring(path, context.temp_allocator)
     if !SDL.SaveBMP(surf, cpath) { fmt.eprintln("SaveBMP failed:", SDL.GetError()) }
+}
+
+// Brick counts for the resident world.
+bench_world_stats :: proc(gs: ^Game_State) {
+    air, solid, mixed := 0, 0, 0
+    for _, col in gs.columns {
+        for c in col.chunks {
+            if c.voxels != nil { mixed += 1 } else if c.fill == 0 { air += 1 } else { solid += 1 }
+        }
+    }
+    fmt.printf("bench: %d columns, chunks: %d air, %d uniform solid, %d mixed\n", len(gs.columns), air, solid, mixed)
+    fmt.printf("bench: voxel bricks %d of %d, light bricks %d of %d\n",
+        MAX_RESIDENT_BRICKS - gs.brick_pool.free_top, MAX_RESIDENT_BRICKS,
+        MAX_LIGHT_BRICKS - gs.light_pool.free_top, MAX_LIGHT_BRICKS)
 }

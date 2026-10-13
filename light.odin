@@ -102,18 +102,46 @@ col_step_ok :: #force_inline proc(i, d: int) -> bool {
     }
 }
 
-// Sky light for a freshly generated column (no block light: world gen places
-// no emitters). Light that would cross into neighbouring columns is left to
+// Spread one channel's light inside the column from every queued index.
+@(private="file")
+col_flood :: proc(level: []u8, blocks: []u8, queue: ^[dynamic]int, ch: Light_Channel) {
+    for head := 0; head < len(queue); head += 1 {
+        i := queue[head]
+        l := level[i]
+        for d in 0 ..< 6 {
+            if !col_step_ok(i, d) { continue }
+            ni := i + COL_STEP[d]
+            if block_opaque(blocks[ni]) { continue }
+            nl := spread_level(l, ch, d, blocks[ni])
+            if nl > level[ni] {
+                level[ni] = nl
+                append(queue, ni)
+            }
+        }
+    }
+}
+
+// Light for a freshly generated or loaded column, computed on its own: sky
+// light, plus block light from any emitters (torches in a saved column).
+// Light that would cross into neighbouring columns is left to
 // light_stitch_column on the main thread.
-light_column_compute :: proc(column: ^[CHUNKS_H]^Chunk) {
+light_column_compute :: proc(column: ^Column) {
     blocks := make([]u8, COL_N)
     sky    := make([]u8, COL_N)
+    blk    := make([]u8, COL_N)
     defer delete(blocks)
     defer delete(sky)
+    defer delete(blk)
 
     for iy in 0 ..< CHUNKS_H {
+        c := &column.chunks[iy]
         for lz in 0 ..< CHUNK_VOXELS {
-            copy(blocks[lz * COL_DZ + iy * 64:][:64], column[iy].voxels[lz * 64:][:64])
+            dst := blocks[lz * COL_DZ + iy * 64:][:64]
+            if c.voxels == nil {
+                for &v in dst { v = c.fill }
+            } else {
+                copy(dst, c.voxels[lz * 64:][:64])
+            }
         }
     }
 
@@ -134,8 +162,7 @@ light_column_compute :: proc(column: ^[CHUNKS_H]^Chunk) {
         }
     }
 
-    // Flood fill inside the column from every full-sky voxel next to a
-    // darker non-opaque one.
+    // Sky flood from every full-sky voxel next to a darker non-opaque one.
     queue := make([dynamic]int, 0, 1024)
     defer delete(queue)
     for z in 0 ..< CHUNK_VOXELS {
@@ -154,44 +181,49 @@ light_column_compute :: proc(column: ^[CHUNKS_H]^Chunk) {
             }
         }
     }
-    for head := 0; head < len(queue); head += 1 {
-        i := queue[head]
-        l := sky[i]
-        for d in 0 ..< 6 {
-            if !col_step_ok(i, d) { continue }
-            ni := i + COL_STEP[d]
-            if block_opaque(blocks[ni]) { continue }
-            nl := spread_level(l, .Sky, d, blocks[ni])
-            if nl > sky[ni] {
-                sky[ni] = nl
-                append(&queue, ni)
+    col_flood(sky, blocks, &queue, .Sky)
+
+    // Block light from emitters. Generated terrain has none, so this only
+    // scans chunks that hold voxel arrays (emitters are never uniform).
+    clear(&queue)
+    for iy in 0 ..< CHUNKS_H {
+        if column.chunks[iy].voxels == nil { continue }
+        for lz in 0 ..< CHUNK_VOXELS {
+            base := lz * COL_DZ + iy * 64
+            for k in 0 ..< 64 {
+                if e := block_emission(blocks[base + k]); e > 0 {
+                    blk[base + k] = e
+                    append(&queue, base + k)
+                }
             }
         }
     }
+    col_flood(blk, blocks, &queue, .Block)
 
     // Store per chunk: uniform chunks keep no array.
     for iy in 0 ..< CHUNKS_H {
-        c := column[iy]
-        first := sky[iy * 64]
+        c := &column.chunks[iy]
+        first := sky[iy * 64] << 4 | blk[iy * 64]
         uniform := true
         check: for lz in 0 ..< CHUNK_VOXELS {
-            for v in sky[lz * COL_DZ + iy * 64:][:64] {
-                if v != first { uniform = false; break check }
+            base := lz * COL_DZ + iy * 64
+            for k in 0 ..< 64 {
+                if sky[base + k] << 4 | blk[base + k] != first { uniform = false; break check }
             }
         }
-        c.light_fill = first << 4
+        c.light_fill = first
         if uniform { continue }
         c.light = new([VOXELS_PER_BRICK]u8)
         for lz in 0 ..< CHUNK_VOXELS {
-            src := sky[lz * COL_DZ + iy * 64:][:64]
-            for v, k in src { c.light[lz * 64 + k] = v << 4 }
+            base := lz * COL_DZ + iy * 64
+            for k in 0 ..< 64 { c.light[lz * 64 + k] = sky[base + k] << 4 | blk[base + k] }
         }
     }
 }
 
 // ---- Main thread: world-space flood fill ----------------------------------------
 
-// World voxel access through chunk_map. Flood fills touch the same few chunks
+// World voxel access through gs.columns. Flood fills touch the same few chunks
 // over and over, so lookups go through a small direct-mapped chunk cache.
 @(private="file") LW_CACHE :: 64
 
@@ -212,7 +244,7 @@ lw_chunk :: proc(w: ^Light_World, p: [3]int) -> (c: ^Chunk, vi: int, key: [3]int
     key = {p.x >> 3, p.y >> 3, p.z >> 3} // CHUNK_VOXELS == 8; >> floors negatives
     h := (key.x * 7 + key.y * 3 + key.z * 13) & (LW_CACHE - 1)
     if !w.cache_used[h] || w.cache_key[h] != key {
-        w.cache_ptr[h]  = w.gs.chunk_map[key] // nil if never generated
+        w.cache_ptr[h]  = world_chunk(w.gs, key) // nil if not resident
         w.cache_key[h]  = key
         w.cache_used[h] = true
     }
@@ -244,7 +276,7 @@ lw_flood :: proc(w: ^Light_World, queue: ^[dynamic][3]int, ch: Light_Channel) {
             n := p + d
             nc, nvi, nkey := lw_chunk(w, n)
             if nc == nil { continue }
-            b := nc.voxels[nvi]
+            b := chunk_voxel(nc, nvi)
             if block_opaque(b) { continue }
             nl := spread_level(l, ch, di, b)
             if nl > chan_get(chunk_light(nc, nvi), ch) {
@@ -272,7 +304,7 @@ lw_unflood :: proc(w: ^Light_World, rem: ^[dynamic]Light_Removal, add: ^[dynamic
             if nl == 0 { continue }
             fed_by_r := nl < r.level ||
                 (ch == .Sky && di == DIR_DOWN && r.level == LIGHT_MAX && nl == LIGHT_MAX)
-            if fed_by_r && !(ch == .Block && block_emission(nc.voxels[nvi]) > 0) {
+            if fed_by_r && !(ch == .Block && block_emission(chunk_voxel(nc, nvi)) > 0) {
                 lw_set(w, nc, nvi, nkey, ch, 0)
                 append(rem, Light_Removal{n, nl})
             } else {
@@ -314,8 +346,8 @@ light_stitch_column :: proc(gs: ^Game_State, wcx, wcz: int) {
         ncx, ncz := wcx + s[0], wcz + s[1]
         for iy in 0 ..< CHUNKS_H {
             wcy := iy + WORLD_CHUNK_Y_MIN
-            a := gs.chunk_map[{wcx, wcy, wcz}]
-            b := gs.chunk_map[{ncx, wcy, ncz}]
+            a := world_chunk(gs, {wcx, wcy, wcz})
+            b := world_chunk(gs, {ncx, wcy, ncz})
             if a == nil || b == nil { continue }
             // Uniform chunks within one level of each other can't exchange light.
             if a.light == nil && b.light == nil {
@@ -338,7 +370,7 @@ light_stitch_column :: proc(gs: ^Game_State, wcx, wcz: int) {
                     }
                     ai := ax + ly * CHUNK_VOXELS + az * CHUNK_VOXELS * CHUNK_VOXELS
                     bi := bx + ly * CHUNK_VOXELS + bz * CHUNK_VOXELS * CHUNK_VOXELS
-                    if block_opaque(a.voxels[ai]) || block_opaque(b.voxels[bi]) { continue }
+                    if block_opaque(chunk_voxel(a, ai)) || block_opaque(chunk_voxel(b, bi)) { continue }
                     la, lb := chunk_light(a, ai), chunk_light(b, bi)
                     wy := wcy * CHUNK_VOXELS + ly
                     pa := [3]int{wcx * CHUNK_VOXELS + ax, wy, wcz * CHUNK_VOXELS + az}
@@ -376,7 +408,7 @@ light_on_edit :: proc(gs: ^Game_State, changed: [][3]int) {
             for p in changed {
                 c, vi, key := lw_chunk(&w, p)
                 if c == nil { continue }
-                if e := block_emission(c.voxels[vi]); e > 0 {
+                if e := block_emission(chunk_voxel(c, vi)); e > 0 {
                     lw_set(&w, c, vi, key, .Block, e)
                     append(&add, p)
                 }
