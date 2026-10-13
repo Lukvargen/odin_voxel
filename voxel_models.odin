@@ -13,13 +13,14 @@ import "core:slice"
 // The tracer side is shaders/entity_voxel.hlsl.
 
 Model_Id :: enum u32 {
-    Blob_Body,
-    Blob_Leg,
     Crystal,
     Glider_Wing,
     Rod,        // thin metal tube along +z, 1 m long: scale z to the length
-    Arm,        // sleeve + glove along +z, 1 m long
-    Pilot_Body,
+    Arm,        // sleeve + hand along +z, 1 m long (first-person glider arms)
+    // creatures.odin
+    Fox_Body, Fox_Head, Fox_Leg, Fox_Tail,
+    Bird_Body, Bird_Wing,
+    Hum_Head, Hum_Torso, Hum_Arm, Hum_Leg,
 }
 
 Voxel_Model :: struct {
@@ -37,45 +38,55 @@ PAL_THIN :: 4 // thin fabric: the sun shines through from behind
 
 Pal :: enum u8 {
     Empty,
-    Blob, Blob_Belly, Eye, Pupil,
+    Eye, Eye_White,
     Crystal, Crystal_Core,
     Sail, Sail_White, Sail_Navy,
-    Metal, Suit, Helmet, Glove, Harness,
+    Metal,
+    Fur, Fur_Light, Fur_Dark, Nose,
+    Feather, Feather_Dark, Feather_White, Beak,
+    Skin, Hair, Shirt, Shirt_Trim, Pants, Boot, Belt,
 }
 
 @(private="file")
 pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     switch p {
-    case .Empty:        return {0, 0, 0}, 0
-    case .Blob:         return {255, 255, 255}, PAL_TINT
-    case .Blob_Belly:   return {255, 236, 205}, PAL_TINT
-    case .Eye:          return {245, 245, 240}, 0
-    case .Pupil:        return {20, 20, 28}, 0
-    case .Crystal:      return {115, 190, 255}, PAL_EMIT
-    case .Crystal_Core: return {200, 240, 255}, PAL_EMIT
-    case .Sail:         return {242, 92, 32}, PAL_THIN
-    case .Sail_White:   return {235, 235, 225}, PAL_THIN
-    case .Sail_Navy:    return {22, 42, 108}, PAL_THIN
-    case .Metal:        return {158, 163, 173}, 0
-    case .Suit:         return {28, 36, 58}, 0
-    case .Helmet:       return {210, 40, 36}, 0
-    case .Glove:        return {18, 18, 20}, 0
-    case .Harness:      return {60, 62, 70}, 0
+    case .Empty:         return {0, 0, 0}, 0
+    case .Eye:           return {16, 16, 22}, 0
+    case .Eye_White:     return {240, 240, 235}, 0
+    case .Crystal:       return {115, 190, 255}, PAL_EMIT
+    case .Crystal_Core:  return {200, 240, 255}, PAL_EMIT
+    case .Sail:          return {242, 92, 32}, PAL_THIN
+    case .Sail_White:    return {235, 235, 225}, PAL_THIN
+    case .Sail_Navy:     return {22, 42, 108}, PAL_THIN
+    case .Metal:         return {158, 163, 173}, 0
+    case .Fur:           return {255, 255, 255}, PAL_TINT
+    case .Fur_Light:     return {240, 232, 220}, 0
+    case .Fur_Dark:      return {40, 30, 26}, 0
+    case .Nose:          return {22, 18, 18}, 0
+    case .Feather:       return {110, 72, 40}, 0
+    case .Feather_Dark:  return {52, 36, 26}, 0
+    case .Feather_White: return {236, 232, 222}, 0
+    case .Beak:          return {232, 178, 40}, 0
+    case .Skin:          return {232, 184, 142}, 0
+    case .Hair:          return {84, 52, 30}, 0
+    case .Shirt:         return {255, 255, 255}, PAL_TINT
+    case .Shirt_Trim:    return {205, 205, 205}, PAL_TINT
+    case .Pants:         return {58, 66, 104}, 0
+    case .Boot:          return {62, 42, 30}, 0
+    case .Belt:          return {40, 30, 24}, 0
     }
     return {255, 0, 255}, 0
 }
 
 // ─── Shape helpers (model space, metres) ───────────────────────────────────
 
-@(private="file")
-sd_capsule :: proc(p, a, b: [3]f32, r: f32) -> f32 {
+vm_capsule :: proc(p, a, b: [3]f32, r: f32) -> f32 {
     pa, ba := p - a, b - a
     h := clamp(la.dot(pa, ba) / la.dot(ba, ba), 0, 1)
     return la.length(pa - ba * h) - r
 }
 
-@(private="file")
-smin :: proc(a, b, k: f32) -> f32 {
+vm_smin :: proc(a, b, k: f32) -> f32 {
     h := clamp(0.5 + 0.5 * (b - a) / k, 0, 1)
     return math.lerp(b, a, h) - k * h * (1 - h)
 }
@@ -100,37 +111,18 @@ ud_triangle :: proc(p, a, b, c: [3]f32) -> f32 {
 }
 
 // A tube at least one voxel thick, so thin rods never break up.
-@(private="file")
-tube :: proc(p, a, b: [3]f32, r, voxel: f32) -> bool {
-    return sd_capsule(p, a, b, 0) < max(r, voxel * 0.55)
+vm_tube :: proc(p, a, b: [3]f32, r, voxel: f32) -> bool {
+    return vm_capsule(p, a, b, 0) < max(r, voxel * 0.55)
+}
+
+// Rounded box centred at c with half size h and corner radius r.
+vm_round_box :: proc(p, c, h: [3]f32, r: f32) -> f32 {
+    q := la.abs(p - c) - (h - r)
+    return la.length(la.max(q, 0)) + min(max(q.x, max(q.y, q.z)), 0) - r
 }
 
 // ─── Shapes ─────────────────────────────────────────────────────────────────
 // Each returns the palette entry at model-space point p (a voxel centre).
-
-// Blob critter body: pear-shaped, two big eyes on the +z face. Feet are
-// separate parts (Blob_Leg) so they can swing.
-@(private="file")
-shape_blob_body :: proc(p: [3]f32, voxel: f32) -> Pal {
-    for side in ([2]f32{-1, 1}) {
-        eye := [3]f32{0.17 * side, 0.74, 0.30}
-        if la.length(p - eye) < 0.1 {
-            pupil := eye + [3]f32{0.0, 0.0, 0.07}
-            return la.length(p - pupil) < 0.06 ? .Pupil : .Eye
-        }
-    }
-    body := la.length(p - [3]f32{0, 0.62, 0}) - 0.42
-    base := la.length(p - [3]f32{0, 0.42, 0}) - 0.34
-    d := smin(body, base, 0.18)
-    if d >= 0 { return .Empty }
-    return p.y < 0.4 && p.z > 0.05 ? .Blob_Belly : .Blob
-}
-
-// One stubby leg, pivot at the hip.
-@(private="file")
-shape_blob_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
-    return sd_capsule(p, {0, 0, 0}, {0.03, -0.26, 0.02}, 0.09) < 0 ? .Blob : .Empty
-}
 
 // Crystal: stretched octahedron, pivot at its centre, brighter core.
 @(private="file")
@@ -151,10 +143,10 @@ shape_glider_wing :: proc(p: [3]f32, voxel: f32) -> Pal {
     q := [3]f32{abs(p.x), p.y, p.z} // symmetric
     nose, tail, tip := GLIDER_NOSE, GLIDER_TAIL, GLIDER_TIP
     // Tubes: leading edge, keel, crossbar, king post.
-    if tube(q, nose, tip, 0.055, voxel) ||
-       tube(p, nose, {0, 1.32, -1.95}, 0.05, voxel) ||
-       tube(q, {0, 1.17, -0.2}, {1.9, 1.17, -0.2}, 0.04, voxel) ||
-       tube(p, {0, 1.3, 0.1}, {0, 1.95, 0.1}, 0.035, voxel) {
+    if vm_tube(q, nose, tip, 0.055, voxel) ||
+       vm_tube(p, nose, {0, 1.32, -1.95}, 0.05, voxel) ||
+       vm_tube(q, {0, 1.17, -0.2}, {1.9, 1.17, -0.2}, 0.04, voxel) ||
+       vm_tube(p, {0, 1.3, 0.1}, {0, 1.95, 0.1}, 0.035, voxel) {
         return .Metal
     }
     // Sail, billowing up between tip and keel at the trailing edge.
@@ -180,27 +172,15 @@ shape_rod :: proc(p: [3]f32, voxel: f32) -> Pal {
 @(private="file")
 shape_arm :: proc(p: [3]f32, voxel: f32) -> Pal {
     r := math.sqrt(p.x * p.x + p.y * p.y)
-    if p.z > 0.86 && r < 0.075 { return .Glove }
-    return r < 0.055 ? .Suit : .Empty
-}
-
-// Prone pilot under the wing (third person only).
-@(private="file")
-shape_pilot_body :: proc(p: [3]f32, voxel: f32) -> Pal {
-    head := [3]f32{0, 0.02, 0.24}
-    if la.length(p - head) < 0.16 { return p.z > 0.33 && p.y < 0.06 ? .Pupil : .Helmet }
-    if tube(p, {0, 1.25, -0.2}, {0, 0.0, -0.45}, 0.02, voxel) { return .Harness }
-    body := sd_capsule(p, {0, -0.08, -0.05}, {0, -0.3, -1.45}, 0.21)
-    if body < 0 { return body > -0.06 && p.y < -0.2 ? .Harness : .Suit }
-    return .Empty
+    if p.z > 0.86 && r < 0.075 { return .Skin }
+    return r < 0.06 ? .Shirt : .Empty
 }
 
 // ─── Baking and GPU packing ────────────────────────────────────────────────
 
 ent_models: [Model_Id]Voxel_Model
 
-@(private="file")
-bake :: proc(lo, hi: [3]f32, voxel: f32, shape: proc(p: [3]f32, voxel: f32) -> Pal) -> Voxel_Model {
+model_bake :: proc(lo, hi: [3]f32, voxel: f32, shape: proc(p: [3]f32, voxel: f32) -> Pal) -> Voxel_Model {
     m := Voxel_Model{voxel = voxel, lo = lo}
     for a in 0 ..< 3 {
         n := int(math.ceil((hi[a] - lo[a]) / voxel))
@@ -219,13 +199,11 @@ bake :: proc(lo, hi: [3]f32, voxel: f32, shape: proc(p: [3]f32, voxel: f32) -> P
 }
 
 ent_models_bake :: proc() {
-    ent_models[.Blob_Body]    = bake({-0.6, 0.12, -0.6}, {0.6, 1.12, 0.6}, 1.0 / 16, shape_blob_body)
-    ent_models[.Blob_Leg]     = bake({-0.14, -0.4, -0.14}, {0.18, 0.1, 0.18}, 1.0 / 16, shape_blob_leg)
-    ent_models[.Crystal]      = bake({-0.3, -0.52, -0.3}, {0.3, 0.52, 0.3}, 1.0 / 16, shape_crystal)
-    ent_models[.Glider_Wing]  = bake({-3.85, 0.95, -2.05}, {3.85, 2.05, 2.0}, 1.0 / 12, shape_glider_wing)
-    ent_models[.Rod]          = bake({-0.05, -0.05, 0}, {0.05, 0.05, 1}, 1.0 / 24, shape_rod)
-    ent_models[.Arm]          = bake({-0.08, -0.08, 0}, {0.08, 0.08, 1}, 1.0 / 24, shape_arm)
-    ent_models[.Pilot_Body]   = bake({-0.3, -0.56, -1.7}, {0.3, 1.3, 0.45}, 1.0 / 16, shape_pilot_body)
+    creature_models_bake()
+    ent_models[.Crystal]      = model_bake({-0.3, -0.52, -0.3}, {0.3, 0.52, 0.3}, 1.0 / 16, shape_crystal)
+    ent_models[.Glider_Wing]  = model_bake({-3.85, 0.95, -2.05}, {3.85, 2.05, 2.0}, 1.0 / 12, shape_glider_wing)
+    ent_models[.Rod]          = model_bake({-0.05, -0.05, 0}, {0.05, 0.05, 1}, 1.0 / 24, shape_rod)
+    ent_models[.Arm]          = model_bake({-0.08, -0.08, 0}, {0.08, 0.08, 1}, 1.0 / 24, shape_arm)
 }
 
 // GPU layout of gs.entity_buf, in uint4 units (shaders/entity_voxel.hlsl):
@@ -234,8 +212,8 @@ ent_models_bake :: proc() {
 //   [ENT_MODEL_BASE..+2/model) model table: (dims, voxel word), (brick dims, brick word)
 //   ...                       per model: voxel bytes, then one 64-bit occupancy
 //                             mask per 4^3 brick (bit = x + 4y + 16z)
-//   [dyn_base..]              per frame: MAX_ENTITIES entity records, then the
-//                             entity BVH (2 * MAX_ENTITIES nodes), then parts
+//   [dyn_base..]              per frame: header (BVH roots), MAX_ENTITIES entity
+//                             records, the entity BVHs (2 * MAX_ENTITIES nodes), parts
 ENT_PAL_BASE   :: 1
 ENT_MODEL_BASE :: ENT_PAL_BASE + 64
 ENT_DATA_BASE  :: ENT_MODEL_BASE + 2 * len(Model_Id)
@@ -309,20 +287,31 @@ Bvh_Node_Gpu :: struct #packed {
     bmax: [3]f32, leaf: u32,
 }
 
+ENT_NO_ROOT :: 0xffffffff
+
 Ent_Frame :: struct {
+    // Roots of the two BVHs: shadow casters, and entities only seen
+    // directly (far birds — shadow rays never walk that tree).
+    root_caster, root_view: u32,
+    _hdr_pad:   [2]u32,
     ents:   [MAX_ENTITIES]Ent_Gpu,
     nodes:  [2 * MAX_ENTITIES]Bvh_Node_Gpu,
     parts:  [MAX_ENT_PARTS]Part_Gpu,
     n_ents, n_parts, n_nodes: int,
+    no_shadow: [MAX_ENTITIES]bool,
 }
 
 // BVH over the entity boxes, so a ray far from every entity costs one box
 // test instead of one per entity. Rebuilt every frame (<= 64 leaves).
 ent_build_bvh :: proc(f: ^Ent_Frame) {
     f.n_nodes = 0
-    if f.n_ents == 0 { return }
+    f.root_caster, f.root_view = ENT_NO_ROOT, ENT_NO_ROOT
+    // Casters first, view-only entities after.
     ids: [MAX_ENTITIES]int
-    for i in 0 ..< f.n_ents { ids[i] = i }
+    nc := 0
+    for i in 0 ..< f.n_ents { if !f.no_shadow[i] { ids[nc] = i; nc += 1 } }
+    nv := nc
+    for i in 0 ..< f.n_ents { if f.no_shadow[i] { ids[nv] = i; nv += 1 } }
     build :: proc(f: ^Ent_Frame, ids: []int) -> u32 {
         node := f.n_nodes
         f.n_nodes += 1
@@ -351,12 +340,13 @@ ent_build_bvh :: proc(f: ^Ent_Frame) {
         f.nodes[node] = {bmin = mn, a = right, bmax = mx, leaf = 0}
         return u32(node)
     }
-    build(f, ids[:f.n_ents])
+    if nc > 0 { f.root_caster = build(f, ids[:nc]) }
+    if nv > nc { f.root_view = build(f, ids[nc:nv]) }
 }
 
 // A part stretched from a to b along its model +z (Rod, Arm); `up` picks
 // the roll around the length.
-ent_segment :: proc(f: ^Ent_Frame, model: Model_Id, a, b, up: [3]f32) {
+ent_segment :: proc(f: ^Ent_Frame, model: Model_Id, a, b, up: [3]f32, tint: [3]f32 = {1, 1, 1}) {
     d := b - a
     l := la.length(d)
     if l < 1e-4 { return }
@@ -364,7 +354,7 @@ ent_segment :: proc(f: ^Ent_Frame, model: Model_Id, a, b, up: [3]f32) {
     x := la.cross(up, z)
     if la.length2(x) < 1e-6 { x = la.cross([3]f32{1, 0, 0}, z) }
     x = la.normalize(x)
-    ent_part(f, model, a, basis_from_axes(x, la.cross(z, x), z), {1, 1, l})
+    ent_part(f, model, a, basis_from_axes(x, la.cross(z, x), z), {1, 1, l}, tint)
 }
 
 // Rotation (columns = model x, y, z axes in world space).
@@ -386,8 +376,10 @@ basis_rot_x :: proc(a: f32) -> Basis {
     return basis_from_axes({1, 0, 0}, {0, c, s}, {0, -s, c})
 }
 
-ent_begin :: proc(f: ^Ent_Frame) -> bool {
+// casts_shadow = false: only seen directly, never in shadow rays.
+ent_begin :: proc(f: ^Ent_Frame, casts_shadow := true) -> bool {
     if f.n_ents >= MAX_ENTITIES { return false }
+    f.no_shadow[f.n_ents] = !casts_shadow
     f.ents[f.n_ents] = {
         aabb_min = {1e9, 1e9, 1e9}, aabb_max = {-1e9, -1e9, -1e9},
         first_part = u32(f.n_parts),

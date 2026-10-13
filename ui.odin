@@ -213,6 +213,7 @@ hud_layout :: proc(gs: ^Game_State) {
         hud_text(fmt.tprintf("block:  %v (keys 1-0)", gs.selected_block))
         hud_text(fmt.tprintf("brush:  %d (ctrl+scroll, ctrl+click = single)", gs.brush_radius))
         if !gs.glider.equipped { hud_text("G: hang glider") }
+        hud_text("V: third person")
 
         if !ui.options_open {
             hud_text("press O for options")

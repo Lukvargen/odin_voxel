@@ -16,15 +16,18 @@
 //  [ENT_PAL_BASE..]       palette, one uint per entry: rgb | flags << 24
 //  [ENT_MODEL_BASE + 2m]  model m: (dims.xyz, voxel word), (brick dims.xyz, mask word)
 //                         masks: 2 words per 4^3 brick, bit = x + 4y + 16z
-//  dynamic base:          MAX_ENTITIES x 2: (box min, first part), (box max, part count)
+//  dynamic base:          header: (caster BVH root, view-only BVH root, -, -), 0xffffffff = none
+//  + ENT_ENTS_OFS:        MAX_ENTITIES x 2: (box min, first part), (box max, part count)
 //  + ENT_NODES_OFS:       BVH nodes x 2: (box min, right child | entity), (box max, leaf)
 //  + ENT_PARTS_OFS:       parts, 6 each: 3 rows world->grid, (box min, model), (box max, flags), (tint, -)
 #define ENT_PAL_BASE    1
 #define ENT_MODEL_BASE  65
 #define ENT_MAX         64
 #define ENT_PART_STRIDE 6
-#define ENT_NODES_OFS   (ENT_MAX * 2)
-#define ENT_PARTS_OFS   (ENT_MAX * 6)
+#define ENT_ENTS_OFS    1
+#define ENT_NODES_OFS   (1 + ENT_MAX * 2)
+#define ENT_PARTS_OFS   (1 + ENT_MAX * 6)
+#define ENT_NO_ROOT     0xffffffffu
 
 #define PAL_TINT 1u
 #define PAL_EMIT 2u
@@ -160,16 +163,23 @@ bool ent_trace_part(uint p, float3 ro_w, float3 rd_w, float t_max,
     return false;
 }
 
-// Walk the entity BVH; for each entity whose box the ray enters, trace its
-// parts. any_hit: stop at the first hit (shadow rays).
+// Walk the entity BVHs; for each entity whose box the ray enters, trace its
+// parts. any_hit: shadow rays — stop at the first hit, and only walk the
+// shadow casters' tree.
 bool ent_traverse(float3 ro, float3 rd, float t_max, bool any_hit, inout EntityHit hit) {
     float3 inv = 1.0 / ent_safe_dir(rd);
     uint dyn = ent_dyn_base();
     float best = t_max;
     bool found = false;
+    uint4 hdr = ent_data[dyn];
     uint stack[12];
     int sp = 0;
-    uint node = 0u;
+    uint node = hdr.x;
+    if (!any_hit && hdr.y != ENT_NO_ROOT) {
+        if (node == ENT_NO_ROOT) node = hdr.y;
+        else stack[sp++] = hdr.y;
+    }
+    if (node == ENT_NO_ROOT) return false;
     for (int it = 0; it < 256; it++) {
         uint4 n0 = ent_data[dyn + ENT_NODES_OFS + node * 2u];
         uint4 n1 = ent_data[dyn + ENT_NODES_OFS + node * 2u + 1u];
@@ -182,8 +192,8 @@ bool ent_traverse(float3 ro, float3 rd, float t_max, bool any_hit, inout EntityH
             continue;
         }
         if (enter) {
-            uint4 e0 = ent_data[dyn + n0.w * 2u];
-            uint4 e1 = ent_data[dyn + n0.w * 2u + 1u];
+            uint4 e0 = ent_data[dyn + ENT_ENTS_OFS + n0.w * 2u];
+            uint4 e1 = ent_data[dyn + ENT_ENTS_OFS + n0.w * 2u + 1u];
             for (uint p = e0.w; p < e0.w + e1.w; p++) {
                 uint pb = dyn + ENT_PARTS_OFS + p * ENT_PART_STRIDE;
                 if (!ent_box(ro, inv, asfloat(ent_data[pb + 3].xyz), asfloat(ent_data[pb + 4].xyz), t0, t1) || t0 > best) continue;

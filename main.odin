@@ -17,6 +17,7 @@ Game_State :: struct {
     // Camera
     camera: Camera,
     glider: Glider, // hang glider (glider.odin)
+    player_anim: Player_Anim, // third-person body animation (creatures.odin)
 
     // World
     columns:         map[[2]int]^Column, // resident columns (world.odin)

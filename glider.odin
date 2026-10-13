@@ -79,6 +79,26 @@ thermal_hash :: proc(x, z: int, salt: u32) -> f32 {
     return f32(h & 0xffffff) / f32(0x1000000)
 }
 
+Thermal :: struct {
+    centre:   [2]f32, // at ground level; the column leans downwind with height
+    radius:   f32,
+    strength: f32,    // m/s of updraft in the core
+    top:      f32,    // height above ground where it fades out
+}
+
+// The thermal of grid cell (gx, gz), if that cell has one (~60% do).
+thermal_cell :: proc(gx, gz: int) -> (th: Thermal, ok: bool) {
+    if thermal_hash(gx, gz, 1) > 0.62 { return }
+    th.centre = {
+        (f32(gx) + 0.2 + 0.6 * thermal_hash(gx, gz, 2)) * THERMAL_CELL,
+        (f32(gz) + 0.2 + 0.6 * thermal_hash(gx, gz, 3)) * THERMAL_CELL,
+    }
+    th.radius   = 12 + 16 * thermal_hash(gx, gz, 4)
+    th.strength = 3.0 + 4.5 * thermal_hash(gx, gz, 5)
+    th.top      = 90 + 110 * thermal_hash(gx, gz, 6)
+    return th, true
+}
+
 // Rising air at p from thermals: a soft-edged core with a ring of sinking
 // air around it, drifting downwind with height like a real thermal leans.
 // `ground` is the terrain height under p; thermals weaken toward their top.
@@ -92,20 +112,12 @@ thermal_lift :: proc(p: [3]f32, ground: f32, wind: [3]f32) -> f32 {
     lift: f32 = 0
     for dz in -1 ..= 1 {
         for dx in -1 ..= 1 {
-            gx, gz := cx + dx, cz + dz
-            if thermal_hash(gx, gz, 1) > 0.62 { continue } // ~60% of cells have one
-            centre := [2]f32{
-                (f32(gx) + 0.2 + 0.6 * thermal_hash(gx, gz, 2)) * THERMAL_CELL,
-                (f32(gz) + 0.2 + 0.6 * thermal_hash(gx, gz, 3)) * THERMAL_CELL,
-            }
-            radius   := 12 + 16 * thermal_hash(gx, gz, 4)
-            strength := 3.0 + 4.5 * thermal_hash(gx, gz, 5)
-            top      := 90 + 110 * thermal_hash(gx, gz, 6)
-            d := la.length([2]f32{q.x, q.z} - centre) / radius
-            fade := clamp((top - height) / 30, 0, 1) * clamp(height / 12, 0, 1)
+            th := thermal_cell(cx + dx, cz + dz) or_continue
+            d := la.length([2]f32{q.x, q.z} - th.centre) / th.radius
+            fade := clamp((th.top - height) / 30, 0, 1) * clamp(height / 12, 0, 1)
             if d < 1 {
                 k := 1 - d * d
-                lift += strength * k * k * fade
+                lift += th.strength * k * k * fade
             } else if d < 1.8 {
                 s := math.sin((d - 1) / 0.8 * math.PI)
                 lift -= 0.9 * s * fade
@@ -373,7 +385,8 @@ glider_step :: proc(gs: ^Game_State, dt: f32, air: [3]f32,
 }
 
 // Every frame: view feel (roll, FOV, shake, chase camera), flying or not,
-// so everything eases back to normal after landing.
+// so everything eases back to normal after landing. The chase camera (V)
+// works on foot too (creatures.odin draws the player's body).
 glider_view_update :: proc(gs: ^Game_State, dt: f32) {
     g := &gs.glider
     cam := &gs.camera
@@ -401,7 +414,7 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
 
     // Third-person chase camera, pulled in when terrain is in the way.
     want: f32 = 0
-    if g.deployed && g.third_person { want = 6.5 }
+    if g.third_person { want = g.deployed ? 6.5 : 4.0 }
     view_fwd := camera_forward(cam^)
     back := -view_fwd
     if want > 0 {
@@ -440,9 +453,12 @@ glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     ent_segment(f, .Rod, apex, bar_l, up)
     ent_segment(f, .Rod, apex, bar_r, up)
     ent_segment(f, .Rod, bar_l, bar_r, up)
-    ent_segment(f, .Arm, at(p, rot, {0.2, -0.16, -0.05}), at(p, rot, {0.48, -0.42, 0.72}), up)
-    ent_segment(f, .Arm, at(p, rot, {-0.2, -0.16, -0.05}), at(p, rot, {-0.48, -0.42, 0.72}), up)
-    if g.chase_dist > 1.5 { ent_part(f, .Pilot_Body, p, rot) }
+    if g.chase_dist > 1.5 {
+        pilot_add_parts(f, p, rot) // whole body in the chase view
+    } else {
+        ent_segment(f, .Arm, at(p, rot, {0.2, -0.16, -0.05}), at(p, rot, {0.48, -0.42, 0.72}), up, PLAYER_TINT)
+        ent_segment(f, .Arm, at(p, rot, {-0.2, -0.16, -0.05}), at(p, rot, {-0.48, -0.42, 0.72}), up, PLAYER_TINT)
+    }
     ent_end(f)
 }
 

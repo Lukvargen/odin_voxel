@@ -324,15 +324,22 @@ bench_glider_run :: proc(gs: ^Game_State) {
     ms := bench_measure(gs)
     fmt.printf("  %-14s %6.2f ms\n", "no glider", ms)
 
-    // Close-ups of the first blob and crystal.
+    // Close-ups of one entity of each kind, then the player's body in the
+    // third-person view.
     if bench_shot_dir == "" { return }
+    g.third_person, g.chase_dist = false, 0 // no player body around the camera
     for kind in Entity_Kind {
         for e in gs.entities {
             if e.kind != kind { continue }
-            target := e.pos + [3]f32{0, 0.6, 0}
-            cam.pos = target + [3]f32{1.4, 0.7, 1.4}
-            ground := f32(surface_height_at(int(math.floor(cam.pos.x)), int(math.floor(cam.pos.z))))
-            cam.pos.y = max(cam.pos.y, ground + 2.2)
+            target := e.pos + [3]f32{0, kind == .Bird ? 0 : 0.5, 0}
+            dist: f32 = kind == .Bird ? 3.2 : 1.6
+            // First direction around the target with a clear view of it.
+            for i in 0 ..< 16 {
+                a := f32(i) / 16 * 2 * math.PI
+                cam.pos = target + [3]f32{math.cos(a) * dist, dist * 0.5, math.sin(a) * dist}
+                _, _, blocked := raycast_voxel(gs, target, la.normalize(cam.pos - target), dist * 1.2)
+                if !blocked { break }
+            }
             d := la.normalize(target - cam.pos)
             cam.yaw   = math.to_degrees(math.atan2(d.x, d.z))
             cam.pitch = math.to_degrees(math.asin(d.y))
@@ -342,4 +349,17 @@ bench_glider_run :: proc(gs: ^Game_State) {
             break
         }
     }
+
+    // Player mid-stride, from the chase camera.
+    sx, sz := int(spawn.x), int(spawn.z)
+    cam.pos = {f32(sx) + 0.5, f32(surface_height_at(sx, sz)) + 1 + PLAYER_EYE_HEIGHT, f32(sz) + 0.5}
+    cam.on_ground = true
+    cam.yaw, cam.pitch = 150, -12
+    g.third_person, g.chase_dist = true, 4
+    gs.player_anim = {body_yaw = -math.to_radians(f32(120)), walk_phase = 1.2, amp = 0.9}
+    back := -camera_forward(cam^)
+    cam.view_offset = back * g.chase_dist + [3]f32{0, 1.2, 0}
+    entities_update(gs, 0)
+    gpu_render(gs)
+    bench_screenshot(gs, fmt.tprintf("%s/entity_Player.bmp", bench_shot_dir))
 }
