@@ -1,5 +1,6 @@
 package main
 
+import "core:math"
 import "core:os"
 import "core:slice"
 import "core:sync"
@@ -53,6 +54,25 @@ Worker_Pool :: struct {
     // gs.player_chunk directly.
     player_cx:   int,
     player_cz:   int,
+    // Flat view direction (x, z) * 1000, so jobs ahead of the camera go first.
+    view_fx:     int,
+    view_fz:     int,
+}
+
+// Called from the main thread every frame with the flat camera forward.
+worker_pool_set_view :: proc(pool: ^Worker_Pool, fx, fz: f32) {
+    sync.atomic_store(&pool.view_fx, int(fx * 1000))
+    sync.atomic_store(&pool.view_fz, int(fz * 1000))
+}
+
+// Order in which a job at offset (dx, dz) from the player is built: by
+// distance, with jobs behind the camera counted up to twice as far, so
+// terrain fills in ahead of you first. fx, fz: view direction * 1000.
+job_priority :: proc(dx, dz, fx, fz: int) -> f32 {
+    d2 := f32(dx*dx + dz*dz)
+    if d2 == 0 { return 0 }
+    cos_a := f32(dx*fx + dz*fz) / (1000 * math.sqrt(d2))
+    return d2 * (1.5 - 0.5 * cos_a)
 }
 
 // Called from the main thread on startup and every chunk-boundary cross.
@@ -125,11 +145,14 @@ worker_pool_enqueue_far :: proc(pool: ^Worker_Pool, jobs: []Far_Job, player_tile
         pool.far_queued[j.key] = true
         append(&pool.far_pending, j)
     }
-    context.user_ptr = &pool.far_player
+    // Farthest (lowest priority) first: workers pop the end.
+    Sort_Ctx :: struct { p: [2]int, fx, fz: int }
+    ctx := Sort_Ctx{player_tile, sync.atomic_load(&pool.view_fx), sync.atomic_load(&pool.view_fz)}
+    context.user_ptr = &ctx
     slice.sort_by(pool.far_pending[:], proc(a, b: Far_Job) -> bool {
-        p := (^[2]int)(context.user_ptr)^
-        da, db := a.key - p, b.key - p
-        return da.x*da.x + da.y*da.y > db.x*db.x + db.y*db.y
+        c := (^Sort_Ctx)(context.user_ptr)
+        da, db := a.key - c.p, b.key - c.p
+        return job_priority(da.x, da.y, c.fx, c.fz) > job_priority(db.x, db.y, c.fx, c.fz)
     })
 }
 
@@ -194,26 +217,27 @@ worker_proc :: proc(data: rawptr) {
         // and is what keeps fast flight spending workers on visible terrain.
         pcx := sync.atomic_load(&pool.player_cx)
         pcz := sync.atomic_load(&pool.player_cz)
+        vfx := sync.atomic_load(&pool.view_fx)
+        vfz := sync.atomic_load(&pool.view_fz)
 
         job_ok := false
         job: Chunk_Job
         sync.mutex_lock(&pool.mu_pending)
         best_i    := -1
-        best_dist := max(int)
+        best_prio := max(f32)
         i := 0
         for i < len(pool.pending) {
             k := pool.pending[i].key
             ddx := k[0] - pcx
             ddz := k[1] - pcz
-            if abs(ddx) > LOAD_RADIUS_XZ || abs(ddz) > LOAD_RADIUS_XZ {
+            if ddx*ddx + ddz*ddz > LOAD_RADIUS_XZ * LOAD_RADIUS_XZ {
                 worker_pool_unqueue(pool, k)        // stale: re-enqueueable later
                 n := len(pool.pending)
                 pool.pending[i] = pool.pending[n-1] // swap-remove
                 pop(&pool.pending)
                 continue                            // re-test swapped-in elem
             }
-            d := ddx*ddx + ddz*ddz
-            if d < best_dist { best_dist = d; best_i = i }
+            if p := job_priority(ddx, ddz, vfx, vfz); p < best_prio { best_prio = p; best_i = i }
             i += 1
         }
         if best_i >= 0 {
@@ -258,7 +282,7 @@ worker_far_job :: proc(pool: ^Worker_Pool) -> bool {
     for len(pool.far_pending) > 0 {
         j := pop(&pool.far_pending)
         d := j.key - pool.far_player
-        if abs(d.x) > FAR_RADIUS_TILES || abs(d.y) > FAR_RADIUS_TILES {
+        if d.x*d.x + d.y*d.y > FAR_RADIUS_TILES * FAR_RADIUS_TILES {
             delete_key(&pool.far_queued, j.key) // stale: re-enqueueable later
             continue
         }

@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:math"
 import "core:math/noise"
+import "core:slice"
 import "core:time"
 
 CHUNK_VOXELS :: 8
@@ -275,13 +276,16 @@ generate_world :: proc(gs: ^Game_State) {
 // LOAD_RADIUS_XZ streams in during gameplay via the per-frame enqueue.
 STARTUP_RADIUS_XZ :: 10
 
-// Enqueue all XZ columns within `radius` of the player. The whole vertical
-// column (all CHUNKS_H Y chunks) is generated as one job.
+// Enqueue all XZ columns within a circle of `radius` around the player (a
+// square's corners are farther than anything straight ahead: 21% more
+// columns for terrain mostly lost in fog). The whole vertical column (all
+// CHUNKS_H Y chunks) is generated as one job.
 enqueue_radius :: proc(gs: ^Game_State, radius: int) {
     pcx := gs.player_chunk[0]
     pcz := gs.player_chunk[2]
     for dcz in -radius ..= radius {
         for dcx in -radius ..= radius {
+            if dcx*dcx + dcz*dcz > radius*radius { continue }
             wcx := pcx + dcx; wcz := pcz + dcz
             key := [2]int{wcx, wcz}
             if key in gs.columns { continue }
@@ -862,21 +866,32 @@ edit_sphere :: proc(gs: ^Game_State, center: [3]int, block: Block_Type, dirty: ^
     }
 }
 
-// Radius (in columns, square around the player's column) out to which every
-// column is loaded. Columns stream in nearest-first, so this grows as a
-// solid square; past it the far terrain stands in.
+// Column offsets within LOAD_RADIUS_XZ, nearest first (built once).
+@(private="file")
+g_load_offsets: [dynamic][2]int
+
+// Radius (in columns) of the circle around the player's column inside which
+// every column is loaded. Columns stream in nearest-first, so this grows as a
+// solid disc; past it the far terrain stands in.
 loaded_radius :: proc(gs: ^Game_State) -> int {
-    pc := [2]int{gs.player_chunk.x, gs.player_chunk.z}
-    resident :: proc(gs: ^Game_State, x, z: int) -> bool {
-        owner := gs.gpu_chunk_owner[ring_slot(x, WORLD_CHUNK_Y_MIN, z)]
-        return int(owner[0]) == x && int(owner[1]) == z
-    }
-    for r in 0 ..= LOAD_RADIUS_XZ {
-        for i in -r ..= r {
-            if !resident(gs, pc.x + i, pc.y - r) || !resident(gs, pc.x + i, pc.y + r) ||
-               !resident(gs, pc.x - r, pc.y + i) || !resident(gs, pc.x + r, pc.y + i) {
-                return max(r - 1, 0)
+    if len(g_load_offsets) == 0 {
+        R :: LOAD_RADIUS_XZ
+        for dz in -R ..= R {
+            for dx in -R ..= R {
+                if dx*dx + dz*dz <= R*R { append(&g_load_offsets, [2]int{dx, dz}) }
             }
+        }
+        slice.sort_by(g_load_offsets[:], proc(a, b: [2]int) -> bool {
+            return a.x*a.x + a.y*a.y < b.x*b.x + b.y*b.y
+        })
+    }
+    pc := [2]int{gs.player_chunk.x, gs.player_chunk.z}
+    for o in g_load_offsets {
+        x, z := pc.x + o.x, pc.y + o.y
+        owner := gs.gpu_chunk_owner[ring_slot(x, WORLD_CHUNK_Y_MIN, z)]
+        if int(owner[0]) != x || int(owner[1]) != z {
+            // Largest whole radius strictly inside the first missing column.
+            return max(int(math.ceil(math.sqrt(f64(o.x*o.x + o.y*o.y)))) - 1, 0)
         }
     }
     return LOAD_RADIUS_XZ

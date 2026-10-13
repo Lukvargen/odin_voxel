@@ -39,14 +39,19 @@ float far_span_hit(float3 o, float3 d, float t0, float t1, float ya, float yb,
     return (lo - o.y) / d.y;
 }
 
-// Distance along the ray to where it leaves the near voxel region (an XZ
-// box), and which axis it leaves through (0 = x, 1 = z).
+// Distance along the ray to where it leaves the near voxel region (a
+// circle in XZ around the player), and the axis it mostly leaves along
+// (0 = x, 1 = z; the normal of a far side hit right at the edge).
 float near_exit_t(float3 o, float3 d, out int axis) {
-    d = safe_dir(d);
-    float tx = ((d.x > 0.0 ? float(u_near_box.z) : float(u_near_box.x)) - o.x) / d.x;
-    float tz = ((d.z > 0.0 ? float(u_near_box.w) : float(u_near_box.y)) - o.z) / d.z;
-    axis = tx < tz ? 0 : 1;
-    return max(0.0, min(tx, tz));
+    axis = abs(d.x) > abs(d.z) ? 0 : 1;
+    float2 p = o.xz - u_near_circle.xy;
+    float  r = u_near_circle.z;
+    float  a = dot(d.xz, d.xz);
+    float  c = dot(p, p) - r * r;
+    if (c >= 0.0) return 0.0;                 // outside: no near region ahead
+    if (a < 1e-8) return RAY_MAX_LENGTH;      // straight up/down: never leaves
+    float b = dot(p, d.xz);
+    return (-b + sqrt(b * b - a * c)) / a;
 }
 
 // Cells of one tile between t_in and t_out. axis_in: axis of the step that

@@ -25,7 +25,7 @@ cbuffer CameraUniforms : register(b0, space2) {
     float  u_sun_intensity;
     int    u_far_enabled;
     float2 _pad5;
-    int4   u_near_box;       // voxel XZ box of the near (voxel) region: min x, min z, max x, max z
+    float4 u_near_circle;    // near (voxel) region: XZ center, radius in voxels, unused
 };
 
 #endif // CAMERA_UNIFORMS_HLSL

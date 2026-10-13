@@ -342,6 +342,8 @@ main :: proc() {
         }
 
         // Integrate finished chunks from worker threads
+        flat := camera_flat_forward(gs.camera)
+        worker_pool_set_view(&gs.pool, flat.x, flat.z)
         integrate_ready_chunks(&gs)
         far_enqueue(&gs)
         integrate_far_tiles(&gs)

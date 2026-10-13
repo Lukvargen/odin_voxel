@@ -42,7 +42,7 @@ Camera_Uniform :: struct #packed {
     sun_intensity:  f32,   // sun direct-light multiplier
     far_enabled:    i32,
     _pad5:          [2]f32,
-    near_box:       [4]i32, // voxel XZ box of the near (voxel) region: min x, min z, max x, max z
+    near_circle:    [4]f32, // near (voxel) region: XZ center, radius in voxels, unused
 }
 
 // (Re)create the scene color, depth, and half-res volumetric textures at the
@@ -553,11 +553,14 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         cave_factor    = gs.cave_factor,
         sun_intensity  = gs.sun_intensity,
         far_enabled    = gs.far_enabled ? 1 : 0,
-        near_box       = {
-            i32((gs.player_chunk.x - near_r) * CHUNK_VOXELS),
-            i32((gs.player_chunk.z - near_r) * CHUNK_VOXELS),
-            i32((gs.player_chunk.x + near_r + 1) * CHUNK_VOXELS),
-            i32((gs.player_chunk.z + near_r + 1) * CHUNK_VOXELS),
+        // Columns whose centers lie within near_r of the player's column are
+        // loaded; shrink by a column's half-diagonal so the circle only
+        // covers loaded voxels.
+        near_circle    = {
+            f32(gs.player_chunk.x * CHUNK_VOXELS + CHUNK_VOXELS / 2),
+            f32(gs.player_chunk.z * CHUNK_VOXELS + CHUNK_VOXELS / 2),
+            max(f32(near_r * CHUNK_VOXELS) - 6, 0),
+            0,
         },
     }
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))

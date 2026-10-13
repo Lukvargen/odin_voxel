@@ -219,7 +219,7 @@ far_init :: proc(gs: ^Game_State) {
     gs.far_player_tile = {max(int), max(int)}
 }
 
-// Queue every missing tile within FAR_RADIUS_TILES, nearest first. Cheap
+// Queue every missing tile within a circle of FAR_RADIUS_TILES. Cheap
 // enough to run on every tile-boundary crossing.
 far_enqueue :: proc(gs: ^Game_State) {
     pt := [2]int{int(math.floor(gs.camera.pos.x)) >> 5, int(math.floor(gs.camera.pos.z)) >> 5} // FAR_TILE == 32
@@ -228,6 +228,7 @@ far_enqueue :: proc(gs: ^Game_State) {
     jobs := make([dynamic]Far_Job, context.temp_allocator)
     for dz in -FAR_RADIUS_TILES ..= FAR_RADIUS_TILES {
         for dx in -FAR_RADIUS_TILES ..= FAR_RADIUS_TILES {
+            if dx*dx + dz*dz > FAR_RADIUS_TILES * FAR_RADIUS_TILES { continue }
             key := pt + {dx, dz}
             t := gs.far_tiles[far_tile_slot(key)]
             if int(t.x) == key.x && int(t.y) == key.y { continue }
