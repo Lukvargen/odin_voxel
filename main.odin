@@ -26,6 +26,10 @@ Game_State :: struct {
     dirty_slots:     [dynamic]int,   // slots whose brick needs GPU upload
     index_dirty:     bool,           // gpu_index changed
     owner_dirty:     bool,           // gpu_chunk_owner changed
+    // Which ring Z-planes (CHUNKS_W * CHUNKS_H slots each — one column's
+    // slots all sit in one plane) of each slot table changed: only those
+    // are uploaded, not the multi-MB tables.
+    index_planes, owner_planes, light_planes: [CHUNKS_W]bool,
     region_count:    []u32,          // non-air slots per 4^3-chunk region (world.odin)
     region_dirty:    bool,
 
@@ -70,6 +74,8 @@ Game_State :: struct {
     entity_buf:   ^SDL.GPUBuffer,     // entity voxel models + instances (voxel_models.odin)
     ent_dyn_base: int,                // uint4 index of the per-frame part of entity_buf
     ent_debug:    int,                // bench only: see Camera_Uniform.ent_debug
+    stage_voxel, stage_light, stage_far: Staging, // upload staging (gpu.odin)
+    upload_cmd:   ^SDL.GPUCommandBuffer,  // this frame's upload commands, if any
     ent_transfer: ^SDL.GPUTransferBuffer, // persistent staging for the per-frame entity data
     ent_upload_size: int,             // bytes staged this frame, copied at the start of gpu_render
 
@@ -140,6 +146,7 @@ main :: proc() {
             case a == "quick": bench_quick = true
             case a == "glider": bench_glider = true
             case a == "entcost": bench_entcost = true
+            case a == "stream": bench_stream = true
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])

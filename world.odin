@@ -50,6 +50,7 @@ set_slot_index :: proc(gs: ^Game_State, slot: int, idx: i32) {
     }
     gs.gpu_index[slot] = idx
     gs.index_dirty = true
+    gs.index_planes[slot / PLANE_SLOTS] = true
 }
 
 // Light bricks (512 bytes each) exist only for chunks whose light varies:
@@ -241,6 +242,8 @@ chunk_y_index :: proc(wcy: int) -> int {
 
 // Returns the GPU ring-buffer slot for a world chunk coordinate. Caller must
 // ensure wcy is in range (chunk_y_index >= 0).
+PLANE_SLOTS :: CHUNKS_W * CHUNKS_H // ring slots per Z-plane (slot / PLANE_SLOTS = sz)
+
 ring_slot :: proc(wcx, wcy, wcz: int) -> int {
     sx := ((wcx % CHUNKS_W) + CHUNKS_W) % CHUNKS_W
     sz := ((wcz % CHUNKS_W) + CHUNKS_W) % CHUNKS_W
@@ -356,6 +359,7 @@ integrate_column :: proc(gs: ^Game_State, key: [2]int, col: ^Column) {
         append(&gs.light_dirty, slot)
     }
     gs.owner_dirty = true
+    gs.owner_planes[ring_slot(key.x, WORLD_CHUNK_Y_MIN, key.y) / PLANE_SLOTS] = true
     append(&gs.stitch_queue, key)
     far_update_column(gs, key)
 }
@@ -375,6 +379,9 @@ unload_column :: proc(gs: ^Game_State, key: [2]int) {
         gs.gpu_chunk_owner[slot] = {0x7fffffff, 0x7fffffff}
     }
     gs.owner_dirty = true
+    plane := ring_slot(key.x, WORLD_CHUNK_Y_MIN, key.y) / PLANE_SLOTS
+    gs.owner_planes[plane] = true
+    gs.light_planes[plane] = true
     delete_key(&gs.columns, key)
     worker_pool_unqueue(&gs.pool, key)
     column_free(col)

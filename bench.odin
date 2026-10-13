@@ -44,6 +44,9 @@ bench_glider: bool
 // `bench entcost`: per view, the GPU cost of entity view rays and entity
 // shadow rays, configs interleaved in one process so clock swings hit all.
 bench_entcost: bool
+// `bench stream`: fly in a straight line at 60 m/s (real-time paced) and
+// time the main-thread upload flush while terrain streams in.
+bench_stream: bool
 
 bench_run :: proc(gs: ^Game_State) {
     views := []Bench_View{
@@ -83,6 +86,10 @@ bench_run :: proc(gs: ^Game_State) {
     bench_world_stats(gs)
     if bench_glider {
         bench_glider_run(gs)
+        return
+    }
+    if bench_stream {
+        bench_stream_run(gs)
         return
     }
 
@@ -126,6 +133,61 @@ bench_run :: proc(gs: ^Game_State) {
             }
         }
     }
+}
+
+bench_stream_run :: proc(gs: ^Game_State) {
+    cam := &gs.camera
+    cam.fly_mode = true
+    cam.yaw, cam.pitch = 30, -10
+    cam.pos.y += 40
+    FRAMES :: 900
+    flush_ms: [FRAMES]f64
+    profile_reset()
+    defer profile_dump("stream")
+    for i in 0 ..< FRAMES {
+        frame_start := time.tick_now()
+        cam.pos += camera_flat_forward(cam^) * (60.0 / 60.0)
+        pc := [3]int{floor_div(int(cam.pos.x), CHUNK_VOXELS), floor_div(int(cam.pos.y), CHUNK_VOXELS), floor_div(int(cam.pos.z), CHUNK_VOXELS)}
+        if pc != gs.player_chunk {
+            gs.player_chunk = pc
+            worker_pool_set_player(&gs.pool, pc[0], pc[2])
+            enqueue_chunks(gs)
+        }
+        flat := camera_flat_forward(cam^)
+        worker_pool_set_view(&gs.pool, flat.x, flat.z)
+        integrate_ready_chunks(gs)
+        far_enqueue(gs)
+        integrate_far_tiles(gs)
+        stitch_pending_columns(gs)
+        t := time.tick_now()
+        flush_gpu_uploads(gs)
+        flush_ms[i] = time.duration_milliseconds(time.tick_since(t))
+        entities_update(gs, 1.0 / 60)
+        gpu_render(gs)
+        free_all(context.temp_allocator)
+        // Real-time pacing so the workers keep up the way they do in game.
+        for time.duration_milliseconds(time.tick_since(frame_start)) < 16.6 { time.sleep(200 * time.Microsecond) }
+    }
+    if bench_shot_dir != "" {
+        // Let streaming settle, then a frame to compare against other builds.
+        for _ in 0 ..< 120 {
+            integrate_ready_chunks(gs); far_enqueue(gs); integrate_far_tiles(gs); stitch_pending_columns(gs)
+            flush_gpu_uploads(gs)
+            time.sleep(10 * time.Millisecond)
+        }
+        gs.entities_enabled = false
+        entities_update(gs, 0)
+        cam.yaw += 180 // back over the terrain that just streamed in
+        cam.pitch = -35
+        gpu_render(gs)
+        bench_screenshot(gs, fmt.tprintf("%s/stream_end.bmp", bench_shot_dir))
+    }
+    sum, worst: f64
+    for m in flush_ms { sum += m; worst = max(worst, m) }
+    sorted := flush_ms
+    slice.sort(sorted[:])
+    fmt.printf("  stream: flush_gpu_uploads avg %.3f ms, p95 %.3f ms, max %.3f ms over %d frames\n",
+        sum / FRAMES, sorted[FRAMES * 95 / 100], worst, FRAMES)
 }
 
 bench_entity_cost :: proc(gs: ^Game_State) {

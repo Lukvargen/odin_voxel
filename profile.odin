@@ -13,7 +13,8 @@ Profile_Zone :: enum {
     Tree_Scan,       // tree_at scan loop
     Tree_Generate,   // generate_tree calls
     Integrate,       // main-thread column integrate (scan+pool+dirty mark)
-    GPU_Upload,      // main-thread flush_gpu_uploads (transfer + copy pass)
+    GPU_Upload,      // main-thread voxel brick + slot table staging (transfer + copy pass)
+    Upload_All,      // whole flush_gpu_uploads incl. light, far and the submit
     Light_Column,    // worker: sky light flood fill for a new column
     Light_Stitch,    // main thread: light exchange with neighbour columns
     Far_Tile,        // worker: far terrain tile summary (far.odin)

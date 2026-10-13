@@ -325,17 +325,15 @@ flush_far_uploads :: proc(gs: ^Game_State) {
     table_bytes := len(gs.far_tiles) * size_of([4]i32)
     table_off   := len(slots) * tile_bytes
     total       := table_off + (gs.far_tiles_dirty ? table_bytes : 0)
-    transfer := SDL.CreateGPUTransferBuffer(gs.gpu_device, {usage = .UPLOAD, size = u32(total)})
-    defer SDL.ReleaseGPUTransferBuffer(gs.gpu_device, transfer)
-    base := ([^]u8)(SDL.MapGPUTransferBuffer(gs.gpu_device, transfer, false))
+    base := ([^]u8)(staging_map(gs, &gs.stage_far, total))
+    transfer := gs.stage_far.buf
     for s, i in slots {
         copy(base[i * tile_bytes:][:tile_bytes], slice.to_bytes(gs.far_cells[s * FAR_CELLS_PER_TILE:][:FAR_CELLS_PER_TILE]))
     }
     if gs.far_tiles_dirty { copy(base[table_off:][:table_bytes], slice.to_bytes(gs.far_tiles)) }
     SDL.UnmapGPUTransferBuffer(gs.gpu_device, transfer)
 
-    cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
-    copy_pass := SDL.BeginGPUCopyPass(cmd)
+    copy_pass := SDL.BeginGPUCopyPass(upload_cmd(gs))
     upload_runs(copy_pass, transfer, gs.far_buf, slots[:], tile_bytes, 0, FAR_TABLE_BYTES)
     if gs.far_tiles_dirty {
         SDL.UploadToGPUBuffer(copy_pass,
@@ -344,6 +342,5 @@ flush_far_uploads :: proc(gs: ^Game_State) {
             false)
     }
     SDL.EndGPUCopyPass(copy_pass)
-    _ = SDL.SubmitGPUCommandBuffer(cmd)
     gs.far_tiles_dirty = false
 }
