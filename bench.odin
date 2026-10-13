@@ -428,9 +428,21 @@ bench_glider_run :: proc(gs: ^Game_State) {
             back := -camera_forward(cam^)
             cam.view_offset = back * g.chase_dist + [3]f32{0, 1.2, 0}
         }
-        ms := bench_measure(gs)
-        fmt.printf("  %-14s %6.2f ms\n", sh.name, ms)
-        if bench_shot_dir != "" { bench_screenshot(gs, fmt.tprintf("%s/%s.bmp", bench_shot_dir, sh.name)) }
+        // Same pose with and without the glider, interleaved (best of 3)
+        // so GPU clock swings hit both.
+        with, without: f64 = 1e9, 1e9
+        for _ in 0 ..< 3 {
+            with = min(with, bench_measure(gs))
+            g.deployed = false
+            without = min(without, bench_measure(gs))
+            g.deployed = true
+        }
+        fmt.printf("  %-14s %6.2f ms  (glider %+.2f ms)\n", sh.name, with, with - without)
+        if bench_shot_dir != "" {
+            entities_update(gs, 0) // the last timed frame was the one without the glider
+            gpu_render(gs)
+            bench_screenshot(gs, fmt.tprintf("%s/%s.bmp", bench_shot_dir, sh.name))
+        }
     }
     g.deployed = false
     cam.roll, cam.view_offset = 0, {}

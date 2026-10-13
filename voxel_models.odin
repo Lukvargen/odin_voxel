@@ -313,8 +313,56 @@ Ent_Frame :: struct {
     // CPU only below
     n_ents, n_parts: int,
     no_shadow: [MAX_ENTITIES]bool,
+    corners: [MAX_ENT_PARTS][8][3]f32, // oriented part boxes, for the screen masks
 }
 #assert(ENT_TILES_X * ENT_TILES_Y % 2 == 0)
+
+// Pixel rect (x0, y0, x1, y1) of part p's oriented box, or false when it's
+// entirely behind the eye or off screen.
+@(private="file")
+part_screen_rect :: proc(f: ^Ent_Frame, p: int, eye, fwd, right, up: [3]f32, w, h: f32) -> (r: [4]f32, ok: bool) {
+    NEAR :: f32(0.05)
+    // Eye inside the box (in grid space, 0..dims): the whole screen.
+    part := f.parts[p]
+    dims := ent_models[Model_Id(part.model)].dims
+    inside := true
+    for a in 0 ..< 3 {
+        g := la.dot(part.rows[a].xyz, eye) + part.rows[a].w
+        if g < 0 || g > f32(dims[a]) { inside = false }
+    }
+    if inside { return {0, 0, w, h}, true }
+
+    pts: [20][3]f32 // corners in front + edge crossings of the eye plane
+    n := 0
+    cs := &f.corners[p]
+    zs: [8]f32
+    for c in 0 ..< 8 {
+        zs[c] = la.dot(cs[c] - eye, fwd)
+        if zs[c] >= NEAR { pts[n] = cs[c]; n += 1 }
+    }
+    if n == 0 { return }
+    for c in 0 ..< 8 {
+        for bit in ([3]int{1, 2, 4}) {
+            if c & bit != 0 { continue }
+            d := c | bit
+            if (zs[c] < NEAR) == (zs[d] < NEAR) { continue }
+            k := (NEAR - zs[c]) / (zs[d] - zs[c])
+            pts[n] = cs[c] + (cs[d] - cs[c]) * k
+            n += 1
+        }
+    }
+    r = {1e9, 1e9, -1e9, -1e9}
+    for q in pts[:n] {
+        dq := q - eye
+        z := max(la.dot(dq, fwd), NEAR)
+        nx := la.dot(dq, right) / z / la.length2(right)
+        ny := la.dot(dq, up) / z / la.length2(up)
+        px, py := (nx + 1) * 0.5 * w, (1 - ny) * 0.5 * h
+        r = {min(r[0], px), min(r[1], py), max(r[2], px), max(r[3], py)}
+    }
+    if r[2] < -1 || r[3] < -1 || r[0] > w + 1 || r[1] > h + 1 { return }
+    return r, true
+}
 
 // Fill the screen-tile and sun-grid masks for this frame's camera.
 ent_build_masks :: proc(f: ^Ent_Frame, gs: ^Game_State) {
@@ -337,31 +385,23 @@ ent_build_masks :: proc(f: ^Ent_Frame, gs: ^Game_State) {
     for i in 0 ..< f.n_ents {
         e := f.ents[i]
         bit := u64(1) << u64(i)
-        // Screen rect of the box: skipped when wholly behind the eye, the
-        // whole screen when it straddles the eye plane (e.g. the glider).
-        x0, y0, x1, y1 := f32(1e9), f32(1e9), f32(-1e9), f32(-1e9)
-        behind := 0
+        // Screen tiles: each part's oriented box, clipped at the eye plane.
+        // Only a part whose box holds the eye covers the whole screen; the
+        // glider's wing and frame otherwise claim just the tiles they span.
+        for p in e.first_part ..< e.first_part + e.part_count {
+            r, ok := part_screen_rect(f, int(p), eye, fwd, right, up, w, h)
+            if !ok { continue }
+            ax := clamp(int(math.floor((r[0] - 1) / ENT_TILE)), 0, tx - 1)
+            bx := clamp(int(math.floor((r[2] + 1) / ENT_TILE)), 0, tx - 1)
+            ay := clamp(int(math.floor((r[1] - 1) / ENT_TILE)), 0, ty - 1)
+            by := clamp(int(math.floor((r[3] + 1) / ENT_TILE)), 0, ty - 1)
+            for yy in ay ..= by { for xx in ax ..= bx { f.tiles[yy * tx + xx] |= bit } }
+        }
         umin, vmin, umax, vmax := f32(1e9), f32(1e9), f32(-1e9), f32(-1e9)
         for c in 0 ..< 8 {
-            p := [3]f32{c & 1 != 0 ? e.aabb_max.x : e.aabb_min.x, c & 2 != 0 ? e.aabb_max.y : e.aabb_min.y, c & 4 != 0 ? e.aabb_max.z : e.aabb_min.z}
-            u, v := la.dot(p, su), la.dot(p, sv)
+            q := [3]f32{c & 1 != 0 ? e.aabb_max.x : e.aabb_min.x, c & 2 != 0 ? e.aabb_max.y : e.aabb_min.y, c & 4 != 0 ? e.aabb_max.z : e.aabb_min.z}
+            u, v := la.dot(q, su), la.dot(q, sv)
             umin, umax, vmin, vmax = min(umin, u), max(umax, u), min(vmin, v), max(vmax, v)
-            d := p - eye
-            z := la.dot(d, fwd)
-            if z < 0.05 { behind += 1; continue }
-            nx := la.dot(d, right) / z / la.length2(right)
-            ny := la.dot(d, up) / z / la.length2(up)
-            px, py := (nx + 1) * 0.5 * w, (1 - ny) * 0.5 * h
-            x0, x1, y0, y1 = min(x0, px), max(x1, px), min(y0, py), max(y1, py)
-        }
-        if behind == 8 { x1 = -1e9 } else if behind > 0 { x0, y0, x1, y1 = 0, 0, w, h }
-        // +-1 px for the AA sample offsets.
-        if x1 >= -1 && y1 >= -1 && x0 <= w + 1 && y0 <= h + 1 {
-            ax := clamp(int(math.floor((x0 - 1) / ENT_TILE)), 0, tx - 1)
-            bx := clamp(int(math.floor((x1 + 1) / ENT_TILE)), 0, tx - 1)
-            ay := clamp(int(math.floor((y0 - 1) / ENT_TILE)), 0, ty - 1)
-            by := clamp(int(math.floor((y1 + 1) / ENT_TILE)), 0, ty - 1)
-            for yy in ay ..= by { for xx in ax ..= bx { f.tiles[yy * tx + xx] |= bit } }
         }
         if f.no_shadow[i] { continue }
         cu0 := clamp(int(math.floor((umin - f.hdr.u0) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1)
@@ -440,6 +480,7 @@ ent_part :: proc(f: ^Ent_Frame, model: Model_Id, pos: [3]f32, rot: Basis, scale:
     for c in 0 ..< 8 {
         corner := [3]f32{c & 1 != 0 ? hi.x : m.lo.x, c & 2 != 0 ? hi.y : m.lo.y, c & 4 != 0 ? hi.z : m.lo.z}
         w := pos + rot * (corner * scale)
+        f.corners[f.n_parts][c] = w
         mn = la.min(mn, w)
         mx = la.max(mx, w)
     }
