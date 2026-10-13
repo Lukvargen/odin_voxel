@@ -319,10 +319,9 @@ float4 shade_far(FarHit h, float3 dir) {
         float3 dirt  = float3(0.40, 0.27, 0.13) * 0.97;
         c = h.normal.y > 0.5 ? grass : lerp(dirt, grass, 0.35);
     } else if (h.block_id == BLOCK_LEAVES) {
-        // Darker than one leaf voxel, and less sun below: a crown shades
-        // itself inside, which a flat canopy top cannot. Matched against the
-        // voxel trees by rendering the same forest both ways (bench).
-        c = float3(0.125, 0.33, 0.078);
+        // Calibrated against the voxel trees by rendering the same forest
+        // both ways (bench config "far from 16 chunks").
+        c = float3(0.085, 0.198, 0.054);
     } else if (h.block_id == BLOCK_LOG) {
         c = float3(0.33, 0.21, 0.09);
     } else {
@@ -331,9 +330,18 @@ float4 shade_far(FarHit h, float3 dir) {
     c *= 1.0 + j * 0.08;
     // Ground under a canopy is in the crown's shade: no sun, little sky.
     float sky = h.under_canopy ? 0.3 : 1.0;
-    float sun = h.under_canopy ? 0.0 : saturate(dot(h.normal, light_dir_normalized)) * (h.block_id == BLOCK_LEAVES ? 0.6 : 1.0);
+    float sun = h.under_canopy ? 0.0 : saturate(dot(h.normal, light_dir_normalized));
     float3 lighting = (sky_ambient() * sky + MIN_AMBIENT) * face_shade(h.normal)
                     + sun_tint() * sun * u_sun_intensity;
+    if (h.block_id == BLOCK_LEAVES) {
+        // A crown is a rounded, self-shading clump, not the flat-roofed slab
+        // the cell is: lit like flat faces, every height step between cells
+        // shows as a bright stripe. Mostly use a direction-independent
+        // light instead (sky + partial sun scattered through the leaves).
+        float3 soft = (sky_ambient() + MIN_AMBIENT) * 0.85
+                    + sun_tint() * (0.35 + 0.5 * saturate(light_dir_normalized.y)) * 0.6 * u_sun_intensity;
+        lighting = lerp(lighting * float3(1, 1, 1), soft, 0.75);
+    }
     return apply_fog(float4(c * lighting, 1.0), h.t, dir);
 }
 
