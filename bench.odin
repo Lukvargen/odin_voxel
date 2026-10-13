@@ -461,9 +461,16 @@ bench_glider_run :: proc(gs: ^Game_State) {
             if e.kind != kind { continue }
             target := e.pos + [3]f32{0, kind == .Bird ? 0 : 0.5, 0}
             dist: f32 = kind == .Bird ? 3.2 : 1.6
+            // Foxes: a front-quarter view of the head, close in.
+            facing := math.atan2(math.cos(e.yaw), -math.sin(e.yaw)) // angle of {-sin, cos} in (x, z)
+            if kind == .Fox {
+                target = e.pos + [3]f32{-math.sin(e.yaw), 0, math.cos(e.yaw)} * (0.35 * e.scale) + [3]f32{0, 0.65 * e.scale, 0}
+                dist = 1.0
+            }
             // First direction around the target with a clear view of it.
             for i in 0 ..< 16 {
                 a := f32(i) / 16 * 2 * math.PI
+                if kind == .Fox { a = facing + 0.7 + f32(i) / 16 * 2 * math.PI }
                 cam.pos = target + [3]f32{math.cos(a) * dist, dist * 0.5, math.sin(a) * dist}
                 _, _, blocked := raycast_voxel(gs, target, la.normalize(cam.pos - target), dist * 1.2)
                 if !blocked { break }

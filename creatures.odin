@@ -21,27 +21,41 @@ shape_fox_body :: proc(p: [3]f32, voxel: f32) -> Pal {
     return .Fur
 }
 
-// Fox head, pivot at the neck: skull, pointed snout with a dark nose, tall
-// ears with dark tips, pale cheeks.
+// Fox head, pivot at the neck: round skull with pale cheeks, a muzzle that
+// tapers to a small black nose, dark eyes with a glint, and big pointed ears
+// with dark tips and pale insides.
 @(private="file")
 shape_fox_head :: proc(p: [3]f32, voxel: f32) -> Pal {
     q := [3]f32{abs(p.x), p.y, p.z}
-    if la.length(q - [3]f32{0.085, 0.15, 0.205}) < 0.035 { return .Eye }
-    // Ears: tapering wedges on top of the skull.
-    if q.y > 0.18 && q.y < 0.37 {
-        k := (q.y - 0.18) / 0.19
-        w := 0.065 * (1 - k) + 0.012
-        if abs(q.x - 0.085) < w && abs(q.z - 0.04) < 0.035 * (1 - k * 0.6) {
-            return k > 0.62 ? .Fur_Dark : .Fur
+    // Ears: triangles rising from the top of the skull, tilted outward.
+    if q.y > 0.18 && q.y < 0.43 {
+        k := (q.y - 0.18) / 0.25            // 0 at the base .. 1 at the tip
+        cx := 0.095 + 0.03 * k               // leans outward
+        half := 0.075 * (1 - k) + 0.008
+        if abs(q.x - cx) < half && abs(p.z - 0.04) < 0.03 {
+            if k > 0.68 { return .Fur_Dark }
+            if p.z > 0.05 && abs(q.x - cx) < half * 0.55 && k < 0.6 { return .Fur_Light } // inner ear
+            return .Fur
         }
     }
-    snout := vm_round_box(p, {0, 0.05, 0.25}, {0.065, 0.055, 0.08}, 0.03)
-    if snout < 0 {
-        if p.z > 0.31 && p.y > 0.04 { return .Nose }
-        return p.y < 0.05 ? .Fur_Light : .Fur
+    // Muzzle: narrows and drops toward the nose.
+    if p.z > 0.13 && p.z < 0.33 {
+        k := (p.z - 0.13) / 0.2
+        hw := 0.085 - 0.04 * k
+        top := 0.115 - 0.045 * k
+        if q.x < hw && p.y > 0.0 && p.y < top {
+            if p.z > 0.29 && p.y > top - 0.05 { return .Nose }
+            return p.y < 0.05 ? .Fur_Light : .Fur
+        }
     }
-    if vm_round_box(p, {0, 0.1, 0.07}, {0.14, 0.12, 0.13}, 0.05) < 0 {
-        return p.y < 0.04 && p.z > 0.05 ? .Fur_Light : .Fur
+    // Skull.
+    if vm_round_box(p, {0, 0.11, 0.05}, {0.15, 0.13, 0.13}, 0.06) < 0 {
+        // Eyes on the front face, a little tall, with a glint.
+        if p.z > 0.13 && abs(q.x - 0.075) < 0.024 && abs(p.y - 0.135) < 0.036 {
+            return q.x < 0.07 && p.y > 0.15 ? .Eye_White : .Eye
+        }
+        if p.y < 0.07 && q.x > 0.055 { return .Fur_Light } // cheeks
+        return .Fur
     }
     return .Empty
 }
@@ -140,7 +154,7 @@ shape_hum_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
 
 creature_models_bake :: proc() {
     ent_models[.Fox_Body]  = model_bake({-0.2, -0.18, -0.34}, {0.2, 0.18, 0.34}, 1.0 / 16, shape_fox_body)
-    ent_models[.Fox_Head]  = model_bake({-0.16, -0.04, -0.08}, {0.16, 0.38, 0.36}, 1.0 / 16, shape_fox_head)
+    ent_models[.Fox_Head]  = model_bake({-0.19, -0.04, -0.1}, {0.19, 0.45, 0.35}, 1.0 / 20, shape_fox_head)
     ent_models[.Fox_Leg]   = model_bake({-0.07, -0.33, -0.07}, {0.07, 0.02, 0.07}, 1.0 / 16, shape_fox_leg)
     ent_models[.Fox_Tail]  = model_bake({-0.14, -0.2, -0.5}, {0.14, 0.14, 0.04}, 1.0 / 16, shape_fox_tail)
     ent_models[.Bird_Body] = model_bake({-0.14, -0.13, -0.5}, {0.14, 0.15, 0.46}, 1.0 / 16, shape_bird_body)
