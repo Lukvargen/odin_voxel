@@ -16,6 +16,7 @@ Profile_Zone :: enum {
     GPU_Upload,      // main-thread flush_gpu_uploads (transfer + copy pass)
     Light_Column,    // worker: sky light flood fill for a new column
     Light_Stitch,    // main thread: light exchange with neighbour columns
+    Far_Tile,        // worker: far terrain tile summary (far.odin)
 }
 
 @(private="file") prof_ns:    [Profile_Zone]i64

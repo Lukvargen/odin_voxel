@@ -14,7 +14,6 @@ StructuredBuffer<uint>    voxel_chunk  : register(t1, space0);
 StructuredBuffer<int>     chunk_index  : register(t2, space0);
 StructuredBuffer<int2>    chunk_owner  : register(t3, space0);
 StructuredBuffer<uint>    voxel_mask   : register(t4, space0);
-StructuredBuffer<uint>    region_occ   : register(t5, space0);
 
 RWTexture2D<float4>       vol_output  : register(u0, space1); // half-res inscatter
 

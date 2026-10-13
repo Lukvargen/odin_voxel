@@ -6,7 +6,7 @@
 
 // ---- Bindings ---------------------------------------------------------------
 // SPIR-V/SDL3 space0 order: RO storage bufs (t0..t7): voxel data, voxel
-// light, entities, region occupancy.
+// light, entities, far terrain. SDL allows at most 8 (see gpu.odin).
 // RW textures (set 1): img_output (u0), depth_output (u1).
 // Shared constants/functions come from voxel_common.hlsl AFTER these decls.
 StructuredBuffer<uint>     voxel_chunk      : register(t0, space0);
@@ -16,7 +16,7 @@ StructuredBuffer<uint>     voxel_mask       : register(t3, space0);
 StructuredBuffer<int>      light_index      : register(t4, space0); // per slot: light pool id, or -1-light if uniform
 StructuredBuffer<uint>     light_pool       : register(t5, space0); // 512 light bytes per brick
 StructuredBuffer<float4>   sdf_entities     : register(t6, space0); // ENTITY_STRIDE float4s/entity (entities.odin)
-StructuredBuffer<uint>     region_occ       : register(t7, space0); // per 4^3-chunk region: non-air chunk count
+StructuredBuffer<uint>     far_data         : register(t7, space0); // far terrain tile table, then cells (far.odin)
 
 RWTexture2D<float4>        img_output        : register(u0, space1);
 RWTexture2D<float>         depth_output      : register(u1, space1); // primary-hit dist, 1e30 = sky
@@ -27,6 +27,7 @@ RWTexture2D<float>         depth_output      : register(u1, space1); // primary-
 #define HAS_SDF_ENTITIES
 #include "entity_sdf.hlsl"
 #include "voxel_common.hlsl"
+#include "far_field.hlsl"
 
 // ---- Helpers ----------------------------------------------------------------
 
@@ -306,9 +307,47 @@ float4 shade_entity(EntityHit ehit, float3 dir) {
     return apply_fog(float4(col, 1.0), ehit.t, dir);
 }
 
-// hit0/ehit0/use_hit0: precomputed primary voxel + entity hits for the center
-// ray — when set, the first bounce of this sample skips its traces entirely.
-float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, EntityHit ehit0, bool use_hit0) {
+// Far terrain: one flat color per cell (per-voxel texture detail would only
+// alias at that distance), averaged from the near textures so the handover
+// at the near-region edge stays quiet. Fully sky-lit, sun without shadows.
+float4 shade_far(FarHit h, float3 dir) {
+    float  j = hash31i(int3(h.cell.x, 7, h.cell.y)) - 0.5;
+    float3 c;
+    if (h.block_id == BLOCK_GRASS) {
+        float  m     = fbm2(float2(h.cell * FAR_CELL) * 0.013);
+        float3 grass = lerp(float3(0.13, 0.40, 0.10), float3(0.28, 0.42, 0.14), m) * 0.98;
+        float3 dirt  = float3(0.40, 0.27, 0.13) * 0.97;
+        c = h.normal.y > 0.5 ? grass : lerp(dirt, grass, 0.35);
+    } else if (h.block_id == BLOCK_LEAVES) {
+        // Darker than one leaf voxel, and less sun below: a crown shades
+        // itself inside, which a flat canopy top cannot. Matched against the
+        // voxel trees by rendering the same forest both ways (bench).
+        c = float3(0.125, 0.33, 0.078);
+    } else if (h.block_id == BLOCK_LOG) {
+        c = float3(0.33, 0.21, 0.09);
+    } else {
+        c = float3(0.55, 0.55, 0.56) * 0.97;
+    }
+    c *= 1.0 + j * 0.08;
+    // Ground under a canopy is in the crown's shade: no sun, little sky.
+    float sky = h.under_canopy ? 0.3 : 1.0;
+    float sun = h.under_canopy ? 0.0 : saturate(dot(h.normal, light_dir_normalized)) * (h.block_id == BLOCK_LEAVES ? 0.6 : 1.0);
+    float3 lighting = (sky_ambient() * sky + MIN_AMBIENT) * face_shade(h.normal)
+                    + sun_tint() * sun * u_sun_intensity;
+    return apply_fog(float4(c * lighting, 1.0), h.t, dir);
+}
+
+// Where the primary ray's voxel walk stops: the near region's edge when far
+// terrain is on (it takes over from there), else the full ray length.
+float primary_max_len(float3 o, float3 d, out int exit_axis) {
+    float t = near_exit_t(o, d, exit_axis);
+    return u_far_enabled != 0 ? t : RAY_MAX_LENGTH;
+}
+
+// hit0/far0/ehit0/use_hit0: precomputed primary voxel, far terrain and
+// entity hits for the center ray — when set, the first bounce of this sample
+// skips its traces entirely.
+float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityHit ehit0, bool use_hit0) {
     float3 origin = u_cam_pos;
     float nx = (pixel.x * 2.0 - dims.x) / dims.x;
     float ny = -(pixel.y * 2.0 - dims.y) / dims.y;
@@ -319,16 +358,28 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, EntityHit ehit0, boo
 
     for (int i = 0; i < u_reflect_amount; i++) {
         HitInfo hit;
-        if (i == 0 && use_hit0) hit = hit0;
-        else                    hit = trace_ray_chunk(origin, dir, false);
+        FarHit  far_hit;
+        far_hit.hit = false;
+        if (i == 0 && use_hit0) {
+            hit     = hit0;
+            far_hit = far0;
+        } else if (i == 0) {
+            int exit_axis;
+            float near_len = primary_max_len(origin, dir, exit_axis);
+            hit = trace_ray_chunk(origin, dir, false, RAY_ITERATIONS, near_len);
+            if (hit.block_id == 0u && u_far_enabled != 0) far_hit = far_trace(origin, dir, near_len, exit_axis);
+        } else {
+            hit = trace_ray_chunk(origin, dir, false);
+        }
+        float hit_t = hit.block_id != 0u ? hit.t : (far_hit.hit ? far_hit.t : RAY_MAX_LENGTH);
 
         // Entities compete with the voxel hit on the primary view ray. The
         // voxel hit caps the trace so occluded entities exit on the AABB test.
         if (i == 0 && u_entity_count > 0) {
             EntityHit ehit;
             if (use_hit0) ehit = ehit0;
-            else          ehit = trace_entities(origin, dir, (hit.block_id != 0u) ? hit.t : RAY_MAX_LENGTH);
-            if (ehit.index >= 0 && (hit.block_id == 0u || ehit.t < hit.t)) {
+            else          ehit = trace_entities(origin, dir, hit_t);
+            if (ehit.index >= 0 && ehit.t < hit_t) {
                 pixel_color = lerp(pixel_color, shade_entity(ehit, dir), reflection_amount);
                 break; // terminal: entities don't spawn reflection bounces in v1
             }
@@ -406,6 +457,9 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, EntityHit ehit0, boo
 
             origin = hit_point + surf_normal * epsilon;
             dir    = dir - 2.0 * dot(dir, surf_normal) * surf_normal;
+        } else if (far_hit.hit) {
+            pixel_color = lerp(pixel_color, shade_far(far_hit, dir), reflection_amount);
+            break;
         } else {
             pixel_color = lerp(pixel_color, sky_color(normalize(dir)), reflection_amount);
             break;
@@ -432,18 +486,24 @@ void main(uint3 id : SV_DispatchThreadID) {
     float  cnx = (pf.x * 2.0 - dims.x) / dims.x;
     float  cny = -(pf.y * 2.0 - dims.y) / dims.y;
     float3 cdir = normalize(u_cam_fwd + cnx * u_cam_right + cny * u_cam_up);
-    HitInfo hit0 = trace_ray_chunk(u_cam_pos, cdir, false);
+    int exit_axis;
+    float near_len = primary_max_len(u_cam_pos, cdir, exit_axis);
+    HitInfo hit0 = trace_ray_chunk(u_cam_pos, cdir, false, RAY_ITERATIONS, near_len);
+    FarHit far0;
+    far0.hit = false;
+    if (hit0.block_id == 0u && u_far_enabled != 0) far0 = far_trace(u_cam_pos, cdir, near_len, exit_axis);
+    float hit0_t = hit0.block_id != 0u ? hit0.t : (far0.hit ? far0.t : 1e30);
     // Entities on the center ray: shared by AA sample 0 and merged into the
     // depth output (volumetric clamp + composite bilateral upscale read it).
-    EntityHit ehit0 = trace_entities(u_cam_pos, cdir, (hit0.block_id != 0u) ? hit0.t : RAY_MAX_LENGTH);
-    float prim_depth = (hit0.block_id != 0u) ? hit0.t : 1e30;
+    EntityHit ehit0 = trace_entities(u_cam_pos, cdir, min(hit0_t, RAY_MAX_LENGTH));
+    float prim_depth = hit0_t;
     if (ehit0.index >= 0) prim_depth = min(prim_depth, ehit0.t);
 
     // 2. AA loop — u_quality packs: AA = u_quality/10, shadow mode = u_quality%10
     int aa = clamp(u_quality / 10, 1, AA_SAMPLES);
     float4 color = float4(0, 0, 0, 0);
     for (int s = 0; s < aa; s++) {
-        color += trace_pixel(float2(ipix) + aa_offsets[s], dims, hit0, ehit0, s == 0);
+        color += trace_pixel(float2(ipix) + aa_offsets[s], dims, hit0, far0, ehit0, s == 0);
     }
     color /= float(aa);
 

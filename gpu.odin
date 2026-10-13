@@ -40,7 +40,9 @@ Camera_Uniform :: struct #packed {
     fog_density:    f32,   // base distance-fog density
     cave_factor:    f32,   // 0 surface .. 1 deep underground (CPU-smoothed)
     sun_intensity:  f32,   // sun direct-light multiplier
-    _pad5:          [3]f32,
+    far_enabled:    i32,
+    _pad5:          [2]f32,
+    near_box:       [4]i32, // voxel XZ box of the near (voxel) region: min x, min z, max x, max z
 }
 
 // (Re)create the scene color, depth, and half-res volumetric textures at the
@@ -145,7 +147,11 @@ gpu_init :: proc(gs: ^Game_State) {
         code_size                      = len(shader_bytes),
         entrypoint                     = "main",
         format                         = {.SPIRV},
-        num_readonly_storage_buffers   = 8, // voxel_chunk (t0), chunk_index (t1), chunk_owner (t2), voxel_mask (t3), light_index (t4), light_pool (t5), sdf_entities (t6), region_occ (t7)
+        // SDL GPU allows at most 8 storage buffers per stage (going over
+        // put the driver on a ~2x slower path), hence the shared buffers:
+        // region counts ride at the end of chunk_index, and the far tile
+        // table and cells share one buffer.
+        num_readonly_storage_buffers   = 8, // voxel_chunk (t0), chunk_index + region counts (t1), chunk_owner (t2), voxel_mask (t3), light_index (t4), light_pool (t5), sdf_entities (t6), far_data (t7)
         num_readwrite_storage_textures = 2, // img_output (u0), depth_output (u1)
         num_uniform_buffers            = 1, // CameraUniforms (b0)
         threadcount_x                  = 16,
@@ -164,7 +170,7 @@ gpu_init :: proc(gs: ^Game_State) {
         entrypoint                     = "main",
         format                         = {.SPIRV},
         num_readonly_storage_textures  = 1, // depth_input (t0)
-        num_readonly_storage_buffers   = 5, // voxel buffers (t1..t4), region_occ (t5)
+        num_readonly_storage_buffers   = 4, // voxel buffers (t1..t4)
         num_readwrite_storage_textures = 1, // vol_output (u0)
         num_uniform_buffers            = 1,
         threadcount_x = 16, threadcount_y = 16, threadcount_z = 1,
@@ -223,6 +229,7 @@ gpu_init :: proc(gs: ^Game_State) {
     voxel_buf_size := u32(MAX_RESIDENT_BRICKS * VOXELS_PER_BRICK)
     mask_buf_size  := u32(MAX_RESIDENT_BRICKS * MASK_U32_PER_BRICK * size_of(u32))
     index_buf_size := u32(len(gs.gpu_index)  * size_of(i32))
+    region_bytes   := u32(REGION_COUNT * size_of(u32)) // after the index (see pipeline above)
 
     gs.voxel_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
         usage = {.COMPUTE_STORAGE_READ},
@@ -232,7 +239,7 @@ gpu_init :: proc(gs: ^Game_State) {
 
     gs.index_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
         usage = {.COMPUTE_STORAGE_READ},
-        size  = index_buf_size,
+        size  = index_buf_size + region_bytes,
     })
     assert(gs.index_buf != nil, "Failed to create index buffer")
 
@@ -262,12 +269,14 @@ gpu_init :: proc(gs: ^Game_State) {
     })
     assert(gs.mask_buf != nil, "Failed to create mask buffer")
 
-    gs.region_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
-        usage = {.COMPUTE_STORAGE_READ},
-        size  = REGION_COUNT * size_of(u32),
-    })
-    assert(gs.region_buf != nil, "Failed to create region buffer")
     gs.region_dirty = true
+
+    gs.far_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
+        usage = {.COMPUTE_STORAGE_READ},
+        size  = u32(FAR_TABLE_BYTES + len(gs.far_cells) * size_of(u32)),
+    })
+    assert(gs.far_buf != nil, "Failed to create far terrain buffer")
+    gs.far_tiles_dirty = true
 
     // Slot tables from the startup world; the startup bricks are queued in
     // dirty_slots and go up with the first flush_gpu_uploads.
@@ -305,6 +314,7 @@ gpu_upload_buffer_range :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawp
 // order and emitted as a few coalesced uploads over contiguous runs.
 flush_gpu_uploads :: proc(gs: ^Game_State) {
     flush_light_uploads(gs)
+    flush_far_uploads(gs)
     if len(gs.dirty_slots) == 0 && !gs.index_dirty && !gs.owner_dirty && !gs.region_dirty { return }
     t_up := time.tick_now()
     defer profile_add(.GPU_Upload, t_up)
@@ -384,7 +394,7 @@ flush_gpu_uploads :: proc(gs: ^Game_State) {
     if gs.region_dirty {
         SDL.UploadToGPUBuffer(copy_pass,
             SDL.GPUTransferBufferLocation{transfer_buffer = transfer, offset = u32(region_off)},
-            SDL.GPUBufferRegion{buffer = gs.region_buf, offset = 0, size = u32(region_bytes)},
+            SDL.GPUBufferRegion{buffer = gs.index_buf, offset = u32(index_bytes), size = u32(region_bytes)},
             false)
     }
     SDL.EndGPUCopyPass(copy_pass)
@@ -400,7 +410,7 @@ flush_gpu_uploads :: proc(gs: ^Game_State) {
 // of the i-th packed element; transfer bytes are contiguous in the same
 // order, so a run of consecutive keys is one copy.
 upload_runs :: proc(copy_pass: ^SDL.GPUCopyPass, transfer: ^SDL.GPUTransferBuffer,
-    dst: ^SDL.GPUBuffer, keys: []int, block: int, base_xfer_off: int) {
+    dst: ^SDL.GPUBuffer, keys: []int, block: int, base_xfer_off: int, dst_base := 0) {
     i := 0
     for i < len(keys) {
         run_start := i
@@ -412,7 +422,7 @@ upload_runs :: proc(copy_pass: ^SDL.GPUCopyPass, transfer: ^SDL.GPUTransferBuffe
                 offset = u32(base_xfer_off + run_start * block)},
             SDL.GPUBufferRegion{
                 buffer = dst,
-                offset = u32(keys[run_start] * block),
+                offset = u32(dst_base + keys[run_start] * block),
                 size   = u32(run_len * block)},
             false)
         i += 1
@@ -521,6 +531,12 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     fwd, right, up := camera_basis(gs.camera)
     render_pos := gs.camera.pos
     render_pos.y += gs.camera.step_visual_offset
+    // Near region drawn as voxels: only as far out as columns are actually
+    // loaded, so while streaming catches up (fast travel) the far terrain
+    // fills in instead of empty space. The bench can shrink it further to
+    // compare the far terrain against the voxels it stands in for.
+    near_r := loaded_radius(gs)
+    if gs.near_radius_override > 0 { near_r = min(near_r, gs.near_radius_override) }
     uniform := Camera_Uniform{
         pos            = render_pos,
         fwd            = fwd,
@@ -536,13 +552,20 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         fog_density    = gs.fog_density,
         cave_factor    = gs.cave_factor,
         sun_intensity  = gs.sun_intensity,
+        far_enabled    = gs.far_enabled ? 1 : 0,
+        near_box       = {
+            i32((gs.player_chunk.x - near_r) * CHUNK_VOXELS),
+            i32((gs.player_chunk.z - near_r) * CHUNK_VOXELS),
+            i32((gs.player_chunk.x + near_r + 1) * CHUNK_VOXELS),
+            i32((gs.player_chunk.z + near_r + 1) * CHUNK_VOXELS),
+        },
     }
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
-    ro_bufs := [5]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.region_buf}
+    ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}
     // The tracer additionally reads the voxel light (t4, t5) and the SDF
     // entity list (t6).
-    ro_bufs_tracer := [8]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.light_index_buf, gs.light_pool_buf, gs.entity_buf, gs.region_buf}
+    ro_bufs_tracer := [8]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.light_index_buf, gs.light_pool_buf, gs.entity_buf, gs.far_buf}
 
     // Threadgroup counts at the current render resolution (ceil-divide by the
     // 16×16 group; shaders guard out-of-range threads so over-dispatch is safe).
@@ -572,7 +595,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         SDL.BindGPUComputePipeline(p2, gs.vol_pipeline)
         vol_ro_tex := [1]^SDL.GPUTexture{ gs.depth_texture }
         SDL.BindGPUComputeStorageTextures(p2, 0, raw_data(vol_ro_tex[:]), 1)
-        SDL.BindGPUComputeStorageBuffers(p2, 0, raw_data(ro_bufs[:]), 5)
+        SDL.BindGPUComputeStorageBuffers(p2, 0, raw_data(ro_bufs[:]), 4)
         SDL.DispatchGPUCompute(p2, hgroups_x, hgroups_y, 1)
         SDL.EndGPUComputePass(p2)
     }
@@ -624,7 +647,7 @@ gpu_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.index_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.owner_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.mask_buf)
-    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.region_buf)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.far_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.light_index_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.light_pool_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.entity_buf)

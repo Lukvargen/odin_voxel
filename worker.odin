@@ -1,6 +1,7 @@
 package main
 
 import "core:os"
+import "core:slice"
 import "core:sync"
 import "core:thread"
 import "core:time"
@@ -32,6 +33,14 @@ Worker_Pool :: struct {
     // Number of jobs popped but not yet pushed to ready (in-flight).
     in_flight:   int,
 
+    // Far terrain tiles (far.odin), behind mu_pending / mu_ready. Pending is
+    // sorted farthest-first so workers pop the nearest from the end; column
+    // jobs always go first.
+    far_pending: [dynamic]Far_Job,
+    far_queued:  map[[2]int]bool,
+    far_ready:   [dynamic]Far_Result,
+    far_player:  [2]int, // player tile at the last enqueue
+
     threads:     [MAX_WORKERS]^thread.Thread,
     thread_count: int,
     running:     bool,
@@ -58,11 +67,11 @@ worker_pool_set_player :: proc(pool: ^Worker_Pool, cx, cz: int) {
 // must not exit while any remain.
 worker_pool_idle :: proc(pool: ^Worker_Pool) -> bool {
     sync.mutex_lock(&pool.mu_pending)
-    pending := len(pool.pending)
+    pending := len(pool.pending) + len(pool.far_pending)
     sync.mutex_unlock(&pool.mu_pending)
     if pending != 0 || sync.atomic_load(&pool.in_flight) != 0 { return false }
     sync.mutex_lock(&pool.mu_ready)
-    ready := len(pool.ready)
+    ready := len(pool.ready) + len(pool.far_ready)
     sync.mutex_unlock(&pool.mu_ready)
     return ready == 0
 }
@@ -88,6 +97,9 @@ worker_pool_stop :: proc(pool: ^Worker_Pool) {
     delete(pool.pending)
     delete(pool.ready)
     delete(pool.queued)
+    delete(pool.far_pending)
+    delete(pool.far_queued)
+    delete(pool.far_ready)
 }
 
 worker_pool_enqueue :: proc(pool: ^Worker_Pool, key: [2]int, from_disk: bool) {
@@ -100,6 +112,35 @@ worker_pool_enqueue :: proc(pool: ^Worker_Pool, key: [2]int, from_disk: bool) {
     sync.mutex_lock(&pool.mu_pending)
     append(&pool.pending, Chunk_Job{key = key, from_disk = from_disk})
     sync.mutex_unlock(&pool.mu_pending)
+}
+
+// Queue far tiles not already queued, then re-sort the whole far queue by
+// distance to the player tile (farthest first).
+worker_pool_enqueue_far :: proc(pool: ^Worker_Pool, jobs: []Far_Job, player_tile: [2]int) {
+    sync.mutex_lock(&pool.mu_pending)
+    defer sync.mutex_unlock(&pool.mu_pending)
+    pool.far_player = player_tile
+    for j in jobs {
+        if j.key in pool.far_queued { continue }
+        pool.far_queued[j.key] = true
+        append(&pool.far_pending, j)
+    }
+    context.user_ptr = &pool.far_player
+    slice.sort_by(pool.far_pending[:], proc(a, b: Far_Job) -> bool {
+        p := (^[2]int)(context.user_ptr)^
+        da, db := a.key - p, b.key - p
+        return da.x*da.x + da.y*da.y > db.x*db.x + db.y*db.y
+    })
+}
+
+worker_pool_drain_far :: proc(pool: ^Worker_Pool, max_n: int) -> []Far_Result {
+    sync.mutex_lock(&pool.mu_ready)
+    defer sync.mutex_unlock(&pool.mu_ready)
+    take := min(len(pool.far_ready), max_n)
+    results := make([]Far_Result, take)
+    copy(results, pool.far_ready[len(pool.far_ready) - take:])
+    resize(&pool.far_ready, len(pool.far_ready) - take)
+    return results
 }
 
 // Remove a key from the queued set so it can be re-enqueued later.
@@ -186,6 +227,7 @@ worker_proc :: proc(data: rawptr) {
         sync.mutex_unlock(&pool.mu_pending)
 
         if !job_ok {
+            if worker_far_job(pool) { continue }
             // Idle: sleep rather than spin, so idle workers don't take CPU
             // from the main thread.
             time.sleep(time.Millisecond)
@@ -205,4 +247,36 @@ worker_proc :: proc(data: rawptr) {
         sync.mutex_unlock(&pool.mu_ready)
         sync.atomic_sub(&pool.in_flight, 1)
     }
+}
+
+// Pop and build the nearest far tile still in range. False if none.
+@(private="file")
+worker_far_job :: proc(pool: ^Worker_Pool) -> bool {
+    job: Far_Job
+    found := false
+    sync.mutex_lock(&pool.mu_pending)
+    for len(pool.far_pending) > 0 {
+        j := pop(&pool.far_pending)
+        d := j.key - pool.far_player
+        if abs(d.x) > FAR_RADIUS_TILES || abs(d.y) > FAR_RADIUS_TILES {
+            delete_key(&pool.far_queued, j.key) // stale: re-enqueueable later
+            continue
+        }
+        job, found = j, true
+        sync.atomic_add(&pool.in_flight, 1)
+        break
+    }
+    sync.mutex_unlock(&pool.mu_pending)
+    if !found { return false }
+
+    res := far_tile_compute(job)
+
+    sync.mutex_lock(&pool.mu_pending)
+    delete_key(&pool.far_queued, job.key)
+    sync.mutex_unlock(&pool.mu_pending)
+    sync.mutex_lock(&pool.mu_ready)
+    append(&pool.far_ready, res)
+    sync.mutex_unlock(&pool.mu_ready)
+    sync.atomic_sub(&pool.in_flight, 1)
+    return true
 }

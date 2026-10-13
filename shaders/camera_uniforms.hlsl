@@ -23,7 +23,9 @@ cbuffer CameraUniforms : register(b0, space2) {
     float  u_fog_density;
     float  u_cave_factor;
     float  u_sun_intensity;
-    float3 _pad5;
+    int    u_far_enabled;
+    float2 _pad5;
+    int4   u_near_box;       // voxel XZ box of the near (voxel) region: min x, min z, max x, max z
 };
 
 #endif // CAMERA_UNIFORMS_HLSL

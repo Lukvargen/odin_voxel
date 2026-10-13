@@ -24,6 +24,15 @@ Game_State :: struct {
     owner_dirty:     bool,           // gpu_chunk_owner changed
     region_count:    []u32,          // non-air slots per 4^3-chunk region (world.odin)
     region_dirty:    bool,
+
+    // Far terrain LOD (far.odin)
+    far_cells:       []u32,          // FAR_CELLS_PER_TILE packed cells per tile slot
+    far_tiles:       [][4]i32,       // per tile slot: owner tile x, z, max height, unused
+    far_dirty:       [dynamic]int,   // tile slots whose cells need upload
+    far_tiles_dirty: bool,
+    far_player_tile: [2]int,         // player tile at the last far_enqueue
+    far_enabled:     bool,
+    near_radius_override: int,       // bench: draw voxels only this many chunks out (0 = all)
     gpu_index:       []i32,              // ring slot -> brick pool id, or uniform chunk
     gpu_chunk_owner: [][2]i32,           // ring slot -> (world_cx, world_cz)
     brick_pool:      Brick_Pool,         // free-list allocator over pool ids
@@ -51,7 +60,7 @@ Game_State :: struct {
     index_buf:    ^SDL.GPUBuffer,
     owner_buf:    ^SDL.GPUBuffer,
     mask_buf:     ^SDL.GPUBuffer,
-    region_buf:   ^SDL.GPUBuffer,     // region_count, for empty-space skipping
+    far_buf:      ^SDL.GPUBuffer,     // far terrain tile table, then cells (far.odin)
     light_index_buf: ^SDL.GPUBuffer,  // per-slot light pool id / uniform light (light.odin)
     light_pool_buf:  ^SDL.GPUBuffer,  // 512-byte light bricks
     entity_buf:   ^SDL.GPUBuffer,     // SDF entity list (entities.odin)
@@ -109,11 +118,12 @@ main :: proc() {
     gs.render_h       = TEX_H / gs.render_scale
     gs.light_dir      = {0.6, 0.8, 0.4}
     gs.exposure       = 1.0
-    gs.fog_density    = 0.0012
+    gs.fog_density    = 0.0006 // far terrain reaches ~1900 voxels; haze starts showing past ~600
     gs.sun_intensity  = 1.9
     gs.selected_block = .Stone
     gs.brush_radius   = BRUSH_RADIUS
     gs.entities_enabled = true
+    gs.far_enabled      = true
     gs.camera.pos     = {0, 80, 0}
     gs.camera.yaw     = 0
     gs.camera.pitch   = -20
@@ -333,6 +343,8 @@ main :: proc() {
 
         // Integrate finished chunks from worker threads
         integrate_ready_chunks(&gs)
+        far_enqueue(&gs)
+        integrate_far_tiles(&gs)
         stitch_pending_columns(&gs)
 
         // Edits. The brush radius is user-set (Ctrl+scroll, 0 = single voxel)
@@ -370,6 +382,7 @@ main :: proc() {
                     edit_sphere(&gs, target, block, &dirty, &changed, radius)
                     light_on_edit(&gs, changed[:])
                     for slot in dirty { gpu_sync_slot(&gs, slot) }
+                    far_update_edited(&gs, changed[:])
                 }
             }
         }

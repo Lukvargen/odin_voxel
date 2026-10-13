@@ -17,10 +17,12 @@
 
 // Coarse occupancy: one counter per 4x4x4 chunks (32^3 voxels) of the ring,
 // non-zero if any chunk inside is not air (world.odin, region_count). Rays
-// cross empty regions without reading chunk data.
+// cross empty regions without reading chunk data. Stored after the slots in
+// chunk_index, at REGION_BASE.
 #define REGION_CHUNKS       4
 #define REGION_W            (CHUNK_COUNT_WIDTH / REGION_CHUNKS)   // 32
 #define REGION_H            (GPU_CHUNKS_HEIGHT / REGION_CHUNKS)   // 16
+#define REGION_BASE         (CHUNK_COUNT_WIDTH * GPU_CHUNKS_HEIGHT * CHUNK_COUNT_WIDTH)
 
 int region_of(int rx, int ry, int rz) {
     return (rx >> 2) + (ry >> 2) * REGION_W + (rz >> 2) * REGION_W * REGION_H;
@@ -86,7 +88,6 @@ float3 hash33i(int3 v) {
 // Required globals each including shader MUST declare before the include:
 //   StructuredBuffer<uint> voxel_chunk;   StructuredBuffer<int>  chunk_index;
 //   StructuredBuffer<int2> chunk_owner;   StructuredBuffer<uint> voxel_mask;
-//   StructuredBuffer<uint> region_occ;
 //   cbuffer CameraUniforms { ... u_light_dir_raw ... }  (only sun_tint_d uses it indirectly via arg)
 
 // Sun tint by elevation (pass-agnostic; takes normalized light dir).
@@ -262,7 +263,7 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
         } else {
             int rx = x_i & (ring_w - 1); // ring_w is a power of two
             int rz = z_i & (ring_w - 1); // ring_w is a power of two
-            if (region_occ[region_of(rx, ry, rz)] == 0u) {
+            if (chunk_index[REGION_BASE + region_of(rx, ry, rz)] == 0) {
                 SKIP_EMPTY_REGION
                 continue;
             }
@@ -469,7 +470,10 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
     return info;
 }
 
-HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters = RAY_ITERATIONS) {
+// max_len: stop after this distance (the primary view ray stops where the
+// near voxel region ends; far_field.hlsl takes over from there).
+HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters = RAY_ITERATIONS,
+                        float max_len = RAY_MAX_LENGTH) {
     dir = safe_dir(dir);
 
     float t_delta_x = abs(1.0 / dir.x);
@@ -506,7 +510,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
 
     while (i < max_iters) {
         i++;
-        if (t > RAY_MAX_LENGTH / float(BRICK_CHUNK_SIZE)) break;
+        if (t > max_len / float(BRICK_CHUNK_SIZE)) break;
 
         // Y is not wrapped — hard bounds against the resident world-Y range.
         int ry = y_i - WORLD_CHUNK_Y_MIN;
@@ -516,7 +520,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
             // Wrap X and Z into ring buffer space [0, ring_w).
             int rx = x_i & (ring_w - 1); // ring_w is a power of two
             int rz = z_i & (ring_w - 1); // ring_w is a power of two
-            if (region_occ[region_of(rx, ry, rz)] == 0u) {
+            if (chunk_index[REGION_BASE + region_of(rx, ry, rz)] == 0) {
                 SKIP_EMPTY_REGION
                 continue;
             }
