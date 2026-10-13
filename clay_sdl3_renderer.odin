@@ -323,7 +323,7 @@ SDL_Clay_RenderClayCommands :: proc(rendererData: ^Clay_SDL3RendererData, rcomma
 			text := ttcache_find(hash)
 			if text == nil {
 				text = TTF.CreateText(rendererData.textEngine, sizedFont,
-					transmute(cstring)config.stringContents.chars,
+					config.stringContents.chars,
 					uint(config.stringContents.length))
 				if text == nil { continue }
 				TTF.SetTextColor(text,

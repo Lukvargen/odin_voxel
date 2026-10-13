@@ -54,7 +54,7 @@ ui_measure_text :: proc "c" (text: clay.StringSlice, config: ^clay.TextElementCo
     if font == nil { return {} }
     w, h: i32
     TTF.SetFontSize(font, f32(config.fontSize))
-    if !TTF.GetStringSize(font, transmute(cstring)text.chars, uint(text.length), &w, &h) {
+    if !TTF.GetStringSize(font, text.chars, uint(text.length), &w, &h) {
         return {}
     }
     return clay.Dimensions{f32(w), f32(h)}
