@@ -22,6 +22,8 @@ Game_State :: struct {
     dirty_slots:     [dynamic]int,   // slots whose brick needs GPU upload
     index_dirty:     bool,           // gpu_index changed
     owner_dirty:     bool,           // gpu_chunk_owner changed
+    region_count:    []u32,          // non-air slots per 4^3-chunk region (world.odin)
+    region_dirty:    bool,
     gpu_index:       []i32,              // ring slot -> brick pool id, or uniform chunk
     gpu_chunk_owner: [][2]i32,           // ring slot -> (world_cx, world_cz)
     brick_pool:      Brick_Pool,         // free-list allocator over pool ids
@@ -49,6 +51,7 @@ Game_State :: struct {
     index_buf:    ^SDL.GPUBuffer,
     owner_buf:    ^SDL.GPUBuffer,
     mask_buf:     ^SDL.GPUBuffer,
+    region_buf:   ^SDL.GPUBuffer,     // region_count, for empty-space skipping
     light_index_buf: ^SDL.GPUBuffer,  // per-slot light pool id / uniform light (light.odin)
     light_pool_buf:  ^SDL.GPUBuffer,  // 512-byte light bricks
     entity_buf:   ^SDL.GPUBuffer,     // SDF entity list (entities.odin)

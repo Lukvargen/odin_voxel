@@ -23,6 +23,34 @@ MAX_RESIDENT_BRICKS :: 3 << 17 // 393k bricks: 192 MiB voxels + 24 MiB masks
 
 chunk_index_uniform :: #force_inline proc(b: u8) -> i32 { return b == 0 ? -1 : -2 - i32(b) }
 
+// Coarse occupancy for empty-space skipping in the shader: the ring is split
+// into regions of REGION_CHUNKS^3 chunk slots, each counting its non-air
+// slots (region_count). Rays skip regions with a count of zero.
+REGION_CHUNKS :: 4
+REGION_COUNT  :: (CHUNKS_W / REGION_CHUNKS) * (CHUNKS_H / REGION_CHUNKS) * (CHUNKS_W / REGION_CHUNKS)
+
+slot_region :: proc(slot: int) -> int {
+    sx := slot % CHUNKS_W
+    iy := (slot / CHUNKS_W) % CHUNKS_H
+    sz := slot / (CHUNKS_W * CHUNKS_H)
+    RW :: CHUNKS_W / REGION_CHUNKS
+    RH :: CHUNKS_H / REGION_CHUNKS
+    return sx / REGION_CHUNKS + (iy / REGION_CHUNKS) * RW + (sz / REGION_CHUNKS) * RW * RH
+}
+
+// Every write to gpu_index goes through here, keeping region_count in step.
+set_slot_index :: proc(gs: ^Game_State, slot: int, idx: i32) {
+    old := gs.gpu_index[slot]
+    if old == idx { return }
+    if old == -1 || idx == -1 {
+        r := slot_region(slot)
+        if old == -1 { gs.region_count[r] += 1 } else { gs.region_count[r] -= 1 }
+        gs.region_dirty = true
+    }
+    gs.gpu_index[slot] = idx
+    gs.index_dirty = true
+}
+
 // Light bricks (512 bytes each) exist only for chunks whose light varies:
 // mostly the terrain surface, tree canopies, cave mouths and around torches.
 // gpu_light_index[slot] is a light pool id, or light_index_uniform(v) for a
@@ -210,6 +238,7 @@ generate_world :: proc(gs: ^Game_State) {
     gs.gpu_index       = make([]i32,    total)
     gs.gpu_chunk_owner = make([][2]i32, total)
     gs.gpu_light_index = make([]i32,    total)
+    gs.region_count    = make([]u32,    REGION_COUNT)
 
     pool_init(&gs.brick_pool, MAX_RESIDENT_BRICKS)
     pool_init(&gs.light_pool, MAX_LIGHT_BRICKS)
@@ -283,10 +312,7 @@ gpu_sync_slot :: proc(gs: ^Game_State, slot: int) {
         if idx >= 0 { append(&gs.dirty_slots, slot) }
     }
     if old >= 0 && idx != old { pool_free(&gs.brick_pool, old) }
-    if idx != old {
-        gs.gpu_index[slot] = idx
-        gs.index_dirty = true
-    }
+    set_slot_index(gs, slot, idx)
 }
 
 // Make a freshly loaded column resident: evict whatever column held its ring
@@ -317,11 +343,10 @@ unload_column :: proc(gs: ^Game_State, key: [2]int) {
         slot := ring_slot(key.x, iy + WORLD_CHUNK_Y_MIN, key.y)
         pool_free(&gs.brick_pool, gs.gpu_index[slot])
         pool_free(&gs.light_pool, gs.gpu_light_index[slot])
-        gs.gpu_index[slot]       = -1
+        set_slot_index(gs, slot, -1)
         gs.gpu_light_index[slot] = light_index_uniform(LIGHT_SKY)
         gs.gpu_chunk_owner[slot] = {0x7fffffff, 0x7fffffff}
     }
-    gs.index_dirty = true
     gs.owner_dirty = true
     delete_key(&gs.columns, key)
     worker_pool_unqueue(&gs.pool, key)

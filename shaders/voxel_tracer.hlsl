@@ -5,8 +5,8 @@
 // shadow ray.
 
 // ---- Bindings ---------------------------------------------------------------
-// SPIR-V/SDL3 space0 order: RO storage bufs (t0..t6): voxel data, voxel
-// light, entities.
+// SPIR-V/SDL3 space0 order: RO storage bufs (t0..t7): voxel data, voxel
+// light, entities, region occupancy.
 // RW textures (set 1): img_output (u0), depth_output (u1).
 // Shared constants/functions come from voxel_common.hlsl AFTER these decls.
 StructuredBuffer<uint>     voxel_chunk      : register(t0, space0);
@@ -16,6 +16,7 @@ StructuredBuffer<uint>     voxel_mask       : register(t3, space0);
 StructuredBuffer<int>      light_index      : register(t4, space0); // per slot: light pool id, or -1-light if uniform
 StructuredBuffer<uint>     light_pool       : register(t5, space0); // 512 light bytes per brick
 StructuredBuffer<float4>   sdf_entities     : register(t6, space0); // ENTITY_STRIDE float4s/entity (entities.odin)
+StructuredBuffer<uint>     region_occ       : register(t7, space0); // per 4^3-chunk region: non-air chunk count
 
 RWTexture2D<float4>        img_output        : register(u0, space1);
 RWTexture2D<float>         depth_output      : register(u1, space1); // primary-hit dist, 1e30 = sky

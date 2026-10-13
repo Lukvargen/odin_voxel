@@ -14,6 +14,38 @@
 #define GPU_CHUNKS_HEIGHT   64
 #define WORLD_CHUNK_Y_MIN  (-32)
 #define RAY_MAX_LENGTH      1024.0
+
+// Coarse occupancy: one counter per 4x4x4 chunks (32^3 voxels) of the ring,
+// non-zero if any chunk inside is not air (world.odin, region_count). Rays
+// cross empty regions without reading chunk data.
+#define REGION_CHUNKS       4
+#define REGION_W            (CHUNK_COUNT_WIDTH / REGION_CHUNKS)   // 32
+#define REGION_H            (GPU_CHUNKS_HEIGHT / REGION_CHUNKS)   // 16
+
+int region_of(int rx, int ry, int rz) {
+    return (rx >> 2) + (ry >> 2) * REGION_W + (rz >> 2) * REGION_W * REGION_H;
+}
+
+// One step of the chunk-level DDA (shared by the primary and shadow walks).
+#define CHUNK_DDA_STEP                                              \
+    if (t_max_x < t_max_y && t_max_x < t_max_z) {                   \
+        x_i += step_x; t = t_max_x; t_max_x += t_delta_x; axis = 0; \
+    } else if (t_max_y < t_max_z) {                                 \
+        y_i += step_y; t = t_max_y; t_max_y += t_delta_y; axis = 1; \
+    } else {                                                        \
+        z_i += step_z; t = t_max_z; t_max_z += t_delta_z; axis = 2; \
+    }
+
+// Step out of the current (empty) region without touching memory. Leaving
+// a 4^3 box takes at most 10 steps.
+#define SKIP_EMPTY_REGION                                           \
+    {                                                               \
+        int3 rc = int3(x_i, y_i, z_i) >> 2;                         \
+        [loop] for (int k = 0; k < 12; k++) {                       \
+            CHUNK_DDA_STEP                                          \
+            if (any((int3(x_i, y_i, z_i) >> 2) != rc)) break;       \
+        }                                                           \
+    }
 #define RAY_ITERATIONS      3000
 
 #define BLOCK_AIR    0u
@@ -54,6 +86,7 @@ float3 hash33i(int3 v) {
 // Required globals each including shader MUST declare before the include:
 //   StructuredBuffer<uint> voxel_chunk;   StructuredBuffer<int>  chunk_index;
 //   StructuredBuffer<int2> chunk_owner;   StructuredBuffer<uint> voxel_mask;
+//   StructuredBuffer<uint> region_occ;
 //   cbuffer CameraUniforms { ... u_light_dir_raw ... }  (only sun_tint_d uses it indirectly via arg)
 
 // Sun tint by elevation (pass-agnostic; takes normalized light dir).
@@ -214,6 +247,7 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
     int ring_w = CHUNK_COUNT_WIDTH;
     float transmittance = 1.0;
     float t = 0.0; // in chunk units
+    int axis = 0;
 
     // Worst-case diagonal within RAY_MAX_LENGTH crosses ~3*128 chunks.
     for (int i = 0; i < 512; i++) {
@@ -228,6 +262,10 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
         } else {
             int rx = x_i & (ring_w - 1); // ring_w is a power of two
             int rz = z_i & (ring_w - 1); // ring_w is a power of two
+            if (region_occ[region_of(rx, ry, rz)] == 0u) {
+                SKIP_EMPTY_REGION
+                continue;
+            }
             int slot_i = rx + ry * ring_w + rz * ring_w * GPU_CHUNKS_HEIGHT;
             int ci = chunk_index[slot_i];
             if (ci != -1) {
@@ -250,13 +288,7 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
             }
         }
 
-        if (t_max_x < t_max_y && t_max_x < t_max_z) {
-            x_i += step_x; t = t_max_x; t_max_x += t_delta_x;
-        } else if (t_max_y < t_max_z) {
-            y_i += step_y; t = t_max_y; t_max_y += t_delta_y;
-        } else {
-            z_i += step_z; t = t_max_z; t_max_z += t_delta_z;
-        }
+        CHUNK_DDA_STEP
     }
     return transmittance;
 }
@@ -468,7 +500,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
     uint   hit_block_id      = 0u;
     float3 hit_side          = float3(0,0,0);
     int3   hit_vkey          = int3(0,0,0);
-    float3 chunk_entry_normal = float3(0,0,0);
+    int    axis = -1;             // axis of the last chunk step (-1: none yet)
 
     int ring_w = CHUNK_COUNT_WIDTH;
 
@@ -484,6 +516,10 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
             // Wrap X and Z into ring buffer space [0, ring_w).
             int rx = x_i & (ring_w - 1); // ring_w is a power of two
             int rz = z_i & (ring_w - 1); // ring_w is a power of two
+            if (region_occ[region_of(rx, ry, rz)] == 0u) {
+                SKIP_EMPTY_REGION
+                continue;
+            }
             int slot_i = rx + ry * ring_w + rz * ring_w * GPU_CHUNKS_HEIGHT;
             int ci = chunk_index[slot_i];
             if (ci != -1) {
@@ -502,6 +538,10 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
                 int3   chunk_ic    = int3(x_i, y_i, z_i);
                 float3 local_entry = ((chunk_origin + dir * t) - float3(chunk_ic))
                                      * float(BRICK_CHUNK_SIZE);   // [0,8) per axis
+                float3 chunk_entry_normal = float3(0, 0, 0);
+                if (axis == 0) chunk_entry_normal.x = -(float)step_x;
+                if (axis == 1) chunk_entry_normal.y = -(float)step_y;
+                if (axis == 2) chunk_entry_normal.z = -(float)step_z;
                 HitInfo vhit = trace_ray_chunk_voxels(entry_pos, local_entry, dir,
                                                       chunk_ic, max(ci, 0),
                                                       ci < -1 ? uint(-ci - 2) : 0u,
@@ -516,16 +556,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
             }
         }
 
-        if (t_max_x < t_max_y && t_max_x < t_max_z) {
-            x_i += step_x; t = t_max_x; t_max_x += t_delta_x;
-            chunk_entry_normal = float3(-(float)step_x, 0.0, 0.0);
-        } else if (t_max_y < t_max_z) {
-            y_i += step_y; t = t_max_y; t_max_y += t_delta_y;
-            chunk_entry_normal = float3(0.0, -(float)step_y, 0.0);
-        } else {
-            z_i += step_z; t = t_max_z; t_max_z += t_delta_z;
-            chunk_entry_normal = float3(0.0, 0.0, -(float)step_z);
-        }
+        CHUNK_DDA_STEP
     }
 
     float3 hit_pos = origin + dir * t * BRICK_CHUNK_SIZE;
