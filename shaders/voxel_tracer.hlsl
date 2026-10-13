@@ -354,11 +354,12 @@ static const float2 aa_offsets[4] = {
 float4 shade_entity(EntityHit ehit, float3 dir) {
     int    ei = ehit.index;
     float3 P  = ehit.hit_pos;
-    float3 N  = sdf_entity_normal(ei, P);
     int    kind   = int(sdf_entities[ei * ENTITY_STRIDE + 1].w + 0.5);
+    float3 N  = kind == ENTITY_KIND_GLIDER ? ehit.normal : sdf_entity_normal(ei, P);
     float  phase  = sdf_entities[ei * ENTITY_STRIDE + 2].w;
     float4 e3     = sdf_entities[ei * ENTITY_STRIDE + 3]; // color, seed
     float3 albedo = e3.rgb * (0.92 + 0.16 * e3.w);        // per-entity tone variety
+    if (kind == ENTITY_KIND_GLIDER) albedo = glider_albedo(ei, P, ehit.part);
 
     float3 l  = light_dir_normalized;
     // 0.05 offset vs the 0.01 shadow-trace epsilon: enough margin that
@@ -380,6 +381,11 @@ float4 shade_entity(EntityHit ehit, float3 dir) {
     float3 torch   = TORCH_LIGHT_COLOR * light_curve(float(lv & 15u));
 
     float3 col = albedo * (ambient + sun + torch);
+
+    // Glider sail is thin fabric: lit from behind, the sun glows through it.
+    if (kind == ENTITY_KIND_GLIDER && ehit.part == GLIDER_PART_SAIL && ndl < 0.0) {
+        col += albedo * (-ndl) * 0.6 * u_sun_intensity * trace_shadow_transmittance(P - N * 0.1, l);
+    }
 
     // Crystals glow on their own (unlit, like torch emission — trips bloom).
     if (kind == ENTITY_KIND_CRYSTAL) {

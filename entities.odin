@@ -27,6 +27,7 @@ ANIM_MARGIN :: f32(0.35)
 Entity_Kind :: enum u8 {
     Blob,
     Crystal,
+    Glider, // the player's hang glider (glider.odin); never in gs.entities
 }
 
 Entity :: struct {
@@ -61,6 +62,7 @@ entity_kind_bounds :: proc(kind: Entity_Kind) -> (half_xz: f32, height: f32) {
     switch kind {
     case .Blob:    return 0.55, 1.25
     case .Crystal: return 0.60, 1.60
+    case .Glider:  return 0, 0 // boxes come from glider_entities
     }
     return 0.6, 1.5
 }
@@ -96,8 +98,10 @@ entities_init :: proc(gs: ^Game_State) {
 // Per-frame: wander + ground-follow, then cull/pack/upload.
 // Called once per frame before gpu_render.
 entities_update :: proc(gs: ^Game_State, dt: f32) {
+    glider, glider_n := glider_entities(gs)
     if !gs.entities_enabled {
-        gs.entity_count = 0
+        gs.entity_count = i32(glider_n)
+        if glider_n > 0 { gpu_upload_buffer(gs, gs.entity_buf, &glider, glider_n * size_of(Entity_Gpu)) }
         return
     }
     t := f32(SDL.GetTicks()) / 1000.0
@@ -207,10 +211,13 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
         }
     }
 
-    gs.entity_count = i32(n)
-    if n == 0 { return }
+    // The glider takes the last slots if the list is full.
+    n = min(n, MAX_ENTITIES - glider_n)
+    gs.entity_count = i32(n + glider_n)
+    if gs.entity_count == 0 { return }
 
     packed: [MAX_ENTITIES]Entity_Gpu
+    for i in 0 ..< glider_n { packed[n + i] = glider[i] }
     for i in 0 ..< n {
         e := gs.entities[cands[i].idx]
         half_xz, height := entity_kind_bounds(e.kind)
@@ -228,5 +235,5 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
             scale      = e.scale,
         }
     }
-    gpu_upload_buffer(gs, gs.entity_buf, &packed, n * size_of(Entity_Gpu))
+    gpu_upload_buffer(gs, gs.entity_buf, &packed, int(gs.entity_count) * size_of(Entity_Gpu))
 }

@@ -156,6 +156,7 @@ ui_build_and_render :: proc(gs: ^Game_State, dt: f32) {
 
     clay.BeginLayout()
     hud_layout(gs)
+    glider_hud_layout(gs, f32(w), f32(h))
     if ui.options_open { options_panel_layout(gs) }
     cmds := clay.EndLayout()
 
@@ -211,9 +212,86 @@ hud_layout :: proc(gs: ^Game_State) {
         hud_text(fmt.tprintf("columns: %d loaded / %d pending", len(gs.columns), pending))
         hud_text(fmt.tprintf("block:  %v (keys 1-0)", gs.selected_block))
         hud_text(fmt.tprintf("brush:  %d (ctrl+scroll, ctrl+click = single)", gs.brush_radius))
+        if !gs.glider.equipped { hud_text("G: hang glider") }
 
         if !ui.options_open {
             hud_text("press O for options")
+        }
+    }
+}
+
+@(private="file")
+hud_text_col :: proc(text: string, color: clay.Color, size: u16 = 16) {
+    clay.TextDynamic(text, clay.TextConfig({textColor = color, fontId = FONT_ID_BODY, fontSize = size}))
+}
+
+// A small marker floating at screen position (x, y).
+@(private="file")
+hud_marker :: proc(id: string, x, y, size: f32, color: clay.Color, filled: bool) {
+    if clay.UI(clay.ID(id))({
+        layout   = {sizing = {clay.SizingFixed(size), clay.SizingFixed(size)}},
+        floating = {
+            attachTo = .Root, offset = {x - size * 0.5, y - size * 0.5}, zIndex = 5,
+            attachment = {element = .LeftTop, parent = .LeftTop},
+            pointerCaptureMode = .Passthrough,
+        },
+        backgroundColor = filled ? color : {},
+        cornerRadius    = {size * 0.5, size * 0.5, size * 0.5, size * 0.5},
+        border          = filled ? {} : {color = color, width = {2, 2, 2, 2, 0}},
+    }) {}
+}
+
+// Hang glider: instruments, aim and flight-path markers, hints.
+glider_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
+    g := &gs.glider
+    if !g.equipped { return }
+
+    if g.deployed {
+        // Where the mouse is steering (moves off-centre while free-looking),
+        // and where the glider is actually going.
+        aim := camera_forward(Camera{yaw = g.aim_yaw, pitch = g.aim_pitch})
+        if x, y, ok := glider_project(gs.camera, aim, w, h); ok {
+            hud_marker("GliderAim", x, y, 18, {255, 255, 255, 200}, false)
+        }
+        if v := gs.camera.velocity; v.x*v.x + v.y*v.y + v.z*v.z > 1 {
+            if x, y, ok := glider_project(gs.camera, v, w, h); ok {
+                hud_marker("GliderPath", x, y, 8, {120, 255, 160, 230}, true)
+            }
+        }
+    }
+
+    if clay.UI(clay.ID("GliderHud"))({
+        layout = {
+            layoutDirection = .TopToBottom,
+            padding = {12, 12, 8, 8}, childGap = 3,
+            childAlignment = {x = .Center},
+            sizing = {clay.SizingFit(), clay.SizingFit()},
+        },
+        floating = {
+            attachTo = .Root, offset = {0, -14}, zIndex = 10,
+            attachment = {element = .CenterBottom, parent = .CenterBottom},
+            pointerCaptureMode = .Passthrough,
+        },
+        backgroundColor = {0, 0, 0, 120},
+        cornerRadius    = {6, 6, 6, 6},
+    }) {
+        if !g.deployed {
+            hud_text("hang glider equipped - jump, then SPACE in the air to open  (G unequip)")
+        } else {
+            if clay.UI(clay.ID("GliderRow"))({layout = {childGap = 22}}) {
+                hud_text(fmt.tprintf("speed %3.0f km/h", g.airspeed * 3.6))
+                vario_col := clay.Color{220, 230, 255, 255}
+                if g.vario >  0.3 { vario_col = {120, 255, 140, 255} }
+                if g.vario < -2.5 { vario_col = {255, 140, 120, 255} }
+                hud_text_col(fmt.tprintf("vario %+5.1f m/s", g.vario), vario_col)
+                hud_text(fmt.tprintf("height %4.0f m", max(g.agl, 0)))
+                if g.lift_here > 0.8 { hud_text_col("lift", {120, 255, 140, 255}) }
+            }
+            if g.stall > 0.25 {
+                hud_text_col("STALL - push forward", {255, 90, 70, 255}, 20)
+            }
+            hud_text_col("mouse steer  ctrl look  W fast  S flare  A/D lean  V view  SPACE let go",
+                {170, 180, 200, 200}, 14)
         }
     }
 }

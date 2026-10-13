@@ -37,6 +37,8 @@ Bench_Config :: struct {
 bench_shot_dir: string
 // Only measure the first (default) config.
 bench_quick: bool
+// `bench glider`: fly a scripted hang-glider test instead of the views.
+bench_glider: bool
 
 bench_run :: proc(gs: ^Game_State) {
     views := []Bench_View{
@@ -74,6 +76,10 @@ bench_run :: proc(gs: ^Game_State) {
     }
     fmt.printf("bench: world streamed in %.1f s\n", time.duration_seconds(time.since(t0)))
     bench_world_stats(gs)
+    if bench_glider {
+        bench_glider_run(gs)
+        return
+    }
 
     gs.camera.fly_mode = true
     spawn := gs.camera.pos
@@ -228,4 +234,90 @@ bench_world_stats :: proc(gs: ^Game_State) {
     far := 0
     for t in gs.far_tiles { if t.x != FAR_NO_TILE { far += 1 } }
     fmt.printf("bench: far tiles %d of %d\n", far, len(gs.far_tiles))
+}
+
+// Scripted flight: prints the flight model's numbers for a few manoeuvres,
+// then times and screenshots first-person, look-up and chase views.
+bench_glider_run :: proc(gs: ^Game_State) {
+    g := &gs.glider
+    cam := &gs.camera
+    spawn := cam.pos
+    surf := f32(surface_height_at(int(spawn.x), int(spawn.z)))
+    cam.pos = {spawn.x, surf + 180, spawn.z}
+    cam.velocity = {}
+    cam.on_ground = false
+    cam.yaw, cam.pitch = 30, -5
+    g.equipped = true
+    glider_toggle_deploy(gs)
+
+    dt := f32(1.0 / 60.0)
+    Phase :: struct { name: string, secs: f32, aim_pitch: f32, turn: f32, bar, flare: bool }
+    phases := []Phase{
+        {"trim (aim -6)",      8, -6,  0,   false, false},
+        {"aim level",          5,  0,  0,   false, false},
+        {"turn left 180",      5, -6,  180, false, false},
+        {"dive (aim -60)",     4, -60, 0,   false, false},
+        {"pull up (aim +30)",  3,  30, 0,   false, false},
+        {"speed bar",          6, -6,  0,   true,  false},
+        {"flare",              2, -6,  0,   false, true},
+        {"recover",            5, -10, 0,   false, false},
+    }
+    for ph in phases {
+        start_yaw := g.aim_yaw
+        frames := int(ph.secs / dt)
+        for i in 0 ..< frames {
+            g.aim_pitch = ph.aim_pitch
+            g.aim_yaw = start_yaw + ph.turn * min(f32(i) / 60.0, 1) // turn the aim over 1 s
+            glider_update(gs, 0, 0, dt, ph.bar, ph.flare, false, false, false)
+            glider_view_update(gs, dt)
+            if !g.deployed { fmt.println("  (landed)"); break }
+            if i % 60 == 59 || i == frames - 1 {
+                fmt.printf("  %-18s t=%4.1f  V %5.1f  vy %+6.2f  aoa %5.1f  bank %5.1f  hdg %6.1f  stall %.2f  lift %+.1f  alt %.0f\n",
+                    ph.name, f32(i + 1) * dt, g.airspeed, cam.velocity.y, g.aoa * 57.3, g.bank * 57.3,
+                    g.heading, g.stall, g.lift_here, cam.pos.y)
+            }
+        }
+        if !g.deployed { break }
+    }
+
+    // Visuals: back near spawn, gliding in a gentle left bank.
+    cam.pos = {spawn.x, surf + 25, spawn.z}
+    if !g.deployed { glider_toggle_deploy(gs) }
+    g.deploy_t = 1
+    g.aim_pitch = -8
+    g.bank, g.aoa = 0.4, 0.12
+    g.path_angle = -0.1
+    gs.player_chunk = {
+        floor_div(int(cam.pos.x), CHUNK_VOXELS),
+        floor_div(int(cam.pos.y), CHUNK_VOXELS),
+        floor_div(int(cam.pos.z), CHUNK_VOXELS),
+    }
+    shots := []struct{ name: string, look_pitch, look_yaw: f32, third: bool }{
+        {"glider_fp",    0,   0,  false},
+        {"glider_up",    70,  20, false},
+        {"glider_down",  -55, 0,  false},
+        {"glider_chase", -10, 0,  true},
+    }
+    for sh in shots {
+        g.look_pitch, g.look_yaw = sh.look_pitch, sh.look_yaw
+        g.third_person = sh.third
+        g.chase_dist = sh.third ? 6.5 : 0
+        cam.yaw   = g.aim_yaw + g.look_yaw
+        cam.pitch = clamp(g.aim_pitch + g.look_pitch, -89, 89)
+        cam.roll  = g.bank * 0.45
+        cam.view_offset = {}
+        if sh.third {
+            back := -camera_forward(cam^)
+            cam.view_offset = back * g.chase_dist + [3]f32{0, 1.2, 0}
+        }
+        ms := bench_measure(gs)
+        fmt.printf("  %-14s %6.2f ms\n", sh.name, ms)
+        if bench_shot_dir != "" { bench_screenshot(gs, fmt.tprintf("%s/%s.bmp", bench_shot_dir, sh.name)) }
+    }
+    g.deployed = false
+    cam.roll, cam.view_offset = 0, {}
+    g.look_pitch, g.look_yaw = 0, 0
+    cam.pitch = g.aim_pitch
+    ms := bench_measure(gs)
+    fmt.printf("  %-14s %6.2f ms\n", "no glider", ms)
 }

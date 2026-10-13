@@ -29,6 +29,12 @@ Camera :: struct {
     on_ground:         bool,
     swim_up:           bool,   // jump held: swim upward in water
     step_visual_offset: f32,  // negative when stepping up, lerps back to 0
+
+    // View-only effects (glider.odin): never affect physics or aiming.
+    roll:        f32,    // radians, positive = rolled left
+    fov_scale:   f32,    // 1 = default 90 degree view, >1 wider
+    shake:       [2]f32, // yaw/pitch jitter, degrees
+    view_offset: [3]f32, // render position offset (chase camera, landing dip)
 }
 
 camera_forward :: proc(cam: Camera) -> [3]f32 {
@@ -46,6 +52,19 @@ camera_basis :: proc(cam: Camera) -> (fwd, right, up: [3]f32) {
     right = la.normalize(la.cross(fwd, [3]f32{0, 1, 0}))
     up    = la.normalize(la.cross(right, fwd))
     return
+}
+
+// Basis the renderer uses: camera_basis plus shake, roll and FOV. right/up
+// are scaled by the FOV (the shaders build rays as fwd + nx*right + ny*up).
+camera_view_basis :: proc(cam: Camera) -> (fwd, right, up: [3]f32) {
+    c := cam
+    c.yaw  += cam.shake.x
+    c.pitch = clamp(c.pitch + cam.shake.y, -89.9, 89.9)
+    fwd, right, up = camera_basis(c)
+    cr, sr := math.cos(cam.roll), math.sin(cam.roll)
+    right, up = right * cr + up * sr, up * cr - right * sr
+    s := cam.fov_scale > 0 ? cam.fov_scale : 1
+    return fwd, right * s, up * s
 }
 
 // Flat forward (XZ only, for walk movement).

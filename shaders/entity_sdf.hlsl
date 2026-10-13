@@ -23,11 +23,21 @@
 
 #define ENTITY_KIND_BLOB    0
 #define ENTITY_KIND_CRYSTAL 1
+#define ENTITY_KIND_GLIDER  2 // player's hang glider: pos = pilot eye, seed = unfold 0..1,
+                              // params = body pitch, bank (radians), part flags
+// Glider part flags: the glider is uploaded as two records (wing, and the
+// control frame + pilot) so each gets a tight box and rays that miss a part
+// never sphere-trace it.
+#define GLIDER_WING  1
+#define GLIDER_FRAME 2 // A-frame and the pilot's arms
+#define GLIDER_BODY  4 // pilot's body and head (hidden in first person)
 
 struct EntityHit {
     int    index;    // entity list index, -1 = miss
     float  t;        // world-space distance (1e30 on miss)
     float3 hit_pos;
+    float3 normal;   // set for analytic hits (glider); SDF hits use sdf_entity_normal
+    int    part;     // glider part, -1 for SDF entities
 };
 
 // ---- Primitives --------------------------------------------------------------
@@ -105,6 +115,166 @@ float sdf_crystal(float3 p, float phase, float seed) {
     q.xy = rot2(q.xy, 0.7854);
     q.yz = rot2(q.yz, 0.7854);
     return sd_box(q, float3(0.16, 0.40 + 0.1 * seed, 0.16));
+}
+
+// ---- Hang glider ----------------------------------------------------------------
+// The glider is triangles, capsules and a sphere, so it is ray traced
+// analytically instead of sphere traced: rays that graze the thin sail or
+// pass close to the tubes would otherwise take dozens of steps.
+// Body frame: origin at the pilot's eye, +z nose, +y up, +x the LEFT wing.
+
+#define GLIDER_PART_SAIL  0
+#define GLIDER_PART_TUBE  1
+#define GLIDER_PART_PILOT 2
+
+struct GliderHit {
+    float  t;
+    float3 n;    // body-space normal
+    int    part;
+};
+
+// World point/direction -> glider body frame (yaw, then pitch, then bank).
+float3 glider_to_body(int i, float3 v, bool is_point) {
+    float4 e0 = sdf_entities[i * ENTITY_STRIDE + 0];
+    float4 e4 = sdf_entities[i * ENTITY_STRIDE + 4];
+    if (is_point) v -= e0.xyz;
+    v.xz = rot2(v.xz, -e0.w);
+    v.yz = rot2(v.yz, e4.y);
+    v.xy = rot2(v.xy, e4.z);
+    return v;
+}
+
+float3 glider_dir_to_world(int i, float3 v) {
+    float4 e0 = sdf_entities[i * ENTITY_STRIDE + 0];
+    float4 e4 = sdf_entities[i * ENTITY_STRIDE + 4];
+    v.xy = rot2(v.xy, -e4.z);
+    v.yz = rot2(v.yz, -e4.y);
+    v.xz = rot2(v.xz, e0.w);
+    return v;
+}
+
+void glider_tri(float3 ro, float3 rd, float3 a, float3 b, float3 c, inout GliderHit h) {
+    float3 e1 = b - a, e2 = c - a;
+    float3 pv = cross(rd, e2);
+    float det = dot(e1, pv);
+    if (abs(det) < 1e-7) return;
+    float inv = 1.0 / det;
+    float3 tv = ro - a;
+    float u = dot(tv, pv) * inv;
+    if (u < 0.0 || u > 1.0) return;
+    float3 qv = cross(tv, e1);
+    float v = dot(rd, qv) * inv;
+    if (v < 0.0 || u + v > 1.0) return;
+    float t = dot(e2, qv) * inv;
+    if (t > 0.0 && t < h.t) {
+        float3 n = normalize(cross(e1, e2));
+        h.t = t; h.n = dot(n, rd) > 0.0 ? -n : n; h.part = GLIDER_PART_SAIL;
+    }
+}
+
+void glider_capsule(float3 ro, float3 rd, float3 pa, float3 pb, float r, int part, inout GliderHit h) {
+    float3 ba = pb - pa, oa = ro - pa;
+    float baba = dot(ba, ba), bard = dot(ba, rd), baoa = dot(ba, oa);
+    float rdoa = dot(rd, oa), oaoa = dot(oa, oa);
+    float a = max(baba - bard * bard, 1e-8);
+    float b = baba * rdoa - baoa * bard;
+    float c = baba * oaoa - baoa * baoa - r * r * baba;
+    float disc = b * b - a * c;
+    if (disc < 0.0) return;
+    float t = (-b - sqrt(disc)) / a;
+    float y = baoa + t * bard;
+    if (y <= 0.0 || y >= baba) {
+        // End caps.
+        float3 oc = y <= 0.0 ? oa : ro - pb;
+        float cb = dot(rd, oc);
+        float cc = dot(oc, oc) - r * r;
+        float hc = cb * cb - cc;
+        if (hc <= 0.0) return;
+        t = -cb - sqrt(hc);
+    }
+    if (t > 0.0 && t < h.t) {
+        float3 p = ro + rd * t - pa;
+        h.t = t;
+        h.n = (p - ba * clamp(dot(p, ba) / baba, 0.0, 1.0)) / r;
+        h.part = part;
+    }
+}
+
+void glider_sphere(float3 ro, float3 rd, float3 c, float r, int part, inout GliderHit h) {
+    float3 oc = ro - c;
+    float b = dot(oc, rd);
+    float disc = b * b - (dot(oc, oc) - r * r);
+    if (disc <= 0.0) return;
+    float t = -b - sqrt(disc);
+    if (t > 0.0 && t < h.t) {
+        h.t = t; h.n = (oc + rd * t) / r; h.part = part;
+    }
+}
+
+// Nearest glider hit in body space (rd unit length), closer than h.t.
+void glider_intersect(float3 ro, float3 rd, float unfold_t, int flags, inout GliderHit h) {
+    float u = lerp(0.12, 1.0, smoothstep(0.0, 1.0, unfold_t));
+    float3 nose = float3(0.0, 1.25, 1.9);
+    float3 tail = float3(0.0, 1.42, -1.6);
+    if (flags & GLIDER_WING) {
+        [unroll]
+        for (int s = 0; s < 2; s++) {
+            float side = s == 0 ? 1.0 : -1.0;
+            float3 tip = float3(3.7 * u * side, 1.08, -1.0);
+            // Billow: the trailing edge lifts between tip and keel.
+            float3 mid = lerp(tip, tail, 0.5) + float3(0.0, 0.12, 0.08);
+            glider_tri(ro, rd, nose, tip, mid, h);
+            glider_tri(ro, rd, nose, mid, tail, h);
+            glider_capsule(ro, rd, nose, tip, 0.055, GLIDER_PART_TUBE, h); // leading edge
+        }
+        glider_capsule(ro, rd, nose, float3(0.0, 1.32, -1.95), 0.05, GLIDER_PART_TUBE, h);                           // keel
+        glider_capsule(ro, rd, float3(1.9 * u, 1.17, -0.2), float3(-1.9 * u, 1.17, -0.2), 0.04, GLIDER_PART_TUBE, h); // crossbar
+        glider_capsule(ro, rd, float3(0.0, 1.3, 0.1), float3(0.0, 1.95, 0.1), 0.035, GLIDER_PART_TUBE, h);           // king post
+    }
+    if (flags & GLIDER_FRAME) {
+        // A-frame: two downtubes and the base bar in front of the pilot,
+        // and the pilot's arms reaching to it.
+        float3 apex = float3(0.0, 1.25, 0.15);
+        float3 barL = float3( 0.75, -0.45, 0.75);
+        float3 barR = float3(-0.75, -0.45, 0.75);
+        glider_capsule(ro, rd, apex, barL, 0.03, GLIDER_PART_TUBE, h);
+        glider_capsule(ro, rd, apex, barR, 0.03, GLIDER_PART_TUBE, h);
+        glider_capsule(ro, rd, barL, barR, 0.035, GLIDER_PART_TUBE, h);
+        glider_capsule(ro, rd, float3( 0.2, -0.16, -0.05), float3( 0.48, -0.42, 0.72), 0.055, GLIDER_PART_PILOT, h);
+        glider_capsule(ro, rd, float3(-0.2, -0.16, -0.05), float3(-0.48, -0.42, 0.72), 0.055, GLIDER_PART_PILOT, h);
+    }
+    if (flags & GLIDER_BODY) {
+        glider_capsule(ro, rd, float3(0.0, -0.08, -0.05), float3(0.0, -0.3, -1.45), 0.21, GLIDER_PART_PILOT, h); // body, prone
+        glider_sphere(ro, rd, float3(0.0, 0.02, 0.24), 0.15, GLIDER_PART_PILOT, h);                             // head
+        glider_capsule(ro, rd, float3(0.0, 1.25, -0.2), float3(0.0, 0.0, -0.45), 0.02, GLIDER_PART_TUBE, h);    // hang strap
+    }
+}
+
+// World-space trace of glider record i within (0, t_max): t or 1e30, with
+// the world normal and part.
+float glider_trace(int i, float3 ro, float3 rd, float t_max, out float3 n_world, out int part) {
+    GliderHit h;
+    h.t = t_max; h.n = float3(0, 1, 0); h.part = -1;
+    float3 bro = glider_to_body(i, ro, true);
+    float3 brd = glider_to_body(i, rd, false);
+    float unfold_t = sdf_entities[i * ENTITY_STRIDE + 3].w;
+    int flags = int(sdf_entities[i * ENTITY_STRIDE + 4].w + 0.5);
+    glider_intersect(bro, brd, unfold_t, flags, h);
+    n_world = glider_dir_to_world(i, h.n);
+    part = h.part;
+    return h.part >= 0 ? h.t : 1e30;
+}
+
+// Glider colour at world point wp: striped sail, metal tubes, pilot.
+float3 glider_albedo(int i, float3 wp, int part) {
+    if (part == GLIDER_PART_PILOT) return float3(0.10, 0.13, 0.22); // pilot suit
+    if (part == GLIDER_PART_TUBE)  return float3(0.62, 0.64, 0.68); // aluminium
+    float3 bp = glider_to_body(i, wp, true);
+    // Sail: chevrons sweeping back from the nose.
+    float v = frac((bp.z + abs(bp.x) * 0.55) * 0.42);
+    if (v < 0.22) return float3(0.92, 0.92, 0.88);
+    if (v < 0.34) return float3(0.08, 0.16, 0.42);
+    return sdf_entities[i * ENTITY_STRIDE + 3].rgb;
 }
 
 // Per-type dispatch in entity-LOCAL space (caller handles pos/yaw/scale).
@@ -186,19 +356,31 @@ EntityHit trace_entities(float3 ro, float3 rd, float t_max) {
     hit.index   = -1;
     hit.t       = 1e30;
     hit.hit_pos = float3(0, 0, 0);
+    hit.normal  = float3(0, 1, 0);
+    hit.part    = -1;
 
+    float3 urd = rd;
     rd = esafe_dir(rd);
     float3 inv_rd = 1.0 / rd;
     for (int i = 0; i < u_entity_count; i++) {
-        float3 bmin = sdf_entities[i * ENTITY_STRIDE + 1].xyz;
+        float4 e1 = sdf_entities[i * ENTITY_STRIDE + 1];
         float3 bmax = sdf_entities[i * ENTITY_STRIDE + 2].xyz;
         float t0, t1;
-        if (!ray_aabb(ro, inv_rd, bmin, bmax, t0, t1)) continue;
+        if (!ray_aabb(ro, inv_rd, e1.xyz, bmax, t0, t1)) continue;
         if (t0 > min(hit.t, t_max)) continue;
+        if (int(e1.w + 0.5) == ENTITY_KIND_GLIDER) {
+            float3 n; int part;
+            float t = glider_trace(i, ro, urd, min(hit.t, t_max), n, part);
+            if (t < hit.t) {
+                hit.index = i; hit.t = t; hit.normal = n; hit.part = part;
+            }
+            continue;
+        }
         float t = sdf_trace(ro, rd, t0, min(t1, min(hit.t, t_max)), i);
         if (t < hit.t) {
             hit.index = i;
             hit.t     = t;
+            hit.part  = -1;
         }
     }
     if (hit.index >= 0) hit.hit_pos = ro + rd * hit.t;
@@ -209,14 +391,20 @@ EntityHit trace_entities(float3 ro, float3 rd, float t_max) {
 // (fewer steps, coarse epsilon) and early-out on the first occluder.
 float entity_shadow_transmittance(float3 ro, float3 rd, float max_t) {
     if (u_entity_count == 0) return 1.0;
+    float3 urd = rd;
     rd = esafe_dir(rd);
     float3 inv_rd = 1.0 / rd;
     for (int i = 0; i < u_entity_count; i++) {
-        float3 bmin = sdf_entities[i * ENTITY_STRIDE + 1].xyz;
+        float4 e1 = sdf_entities[i * ENTITY_STRIDE + 1];
         float3 bmax = sdf_entities[i * ENTITY_STRIDE + 2].xyz;
         float t0, t1;
-        if (!ray_aabb(ro, inv_rd, bmin, bmax, t0, t1)) continue;
+        if (!ray_aabb(ro, inv_rd, e1.xyz, bmax, t0, t1)) continue;
         if (t0 > max_t) continue;
+        if (int(e1.w + 0.5) == ENTITY_KIND_GLIDER) {
+            float3 n; int part;
+            if (glider_trace(i, ro, urd, max_t, n, part) < 1e29) return 0.0;
+            continue;
+        }
         float t = max(t0, 0.0);
         float t_end = min(t1, max_t);
         for (int s = 0; s < 24; s++) {

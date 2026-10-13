@@ -528,8 +528,8 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
     if cmd == nil { return nil }
 
-    fwd, right, up := camera_basis(gs.camera)
-    render_pos := gs.camera.pos
+    fwd, right, up := camera_view_basis(gs.camera)
+    render_pos := gs.camera.pos + gs.camera.view_offset
     render_pos.y += gs.camera.step_visual_offset
     // Near region drawn as voxels: only as far out as columns are actually
     // loaded, so while streaming catches up (fast travel) the far terrain

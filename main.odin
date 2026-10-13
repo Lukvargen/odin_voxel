@@ -16,6 +16,7 @@ Game_State :: struct {
 
     // Camera
     camera: Camera,
+    glider: Glider, // hang glider (glider.odin)
 
     // World
     columns:         map[[2]int]^Column, // resident columns (world.odin)
@@ -132,6 +133,7 @@ main :: proc() {
         for a in os.args[2:] {
             switch {
             case a == "quick": bench_quick = true
+            case a == "glider": bench_glider = true
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])
@@ -144,6 +146,7 @@ main :: proc() {
     gs.camera.yaw     = 0
     gs.camera.pitch   = -20
     gs.camera.fly_mode = false // start in walk mode
+    gs.camera.fov_scale = 1
 
     // SDL init
     if !SDL.Init({.VIDEO, .EVENTS}) {
@@ -255,8 +258,20 @@ main :: proc() {
                 case SDL.K_8: gs.selected_block = .Snow
                 case SDL.K_9: gs.selected_block = .Terracotta
                 case SDL.K_0: gs.selected_block = .Torch
+                case SDL.K_G:
+                    if gs.glider.deployed { glider_toggle_deploy(&gs) }
+                    gs.glider.equipped = !gs.glider.equipped
+                    if gs.glider.equipped { gs.camera.fly_mode = false }
+                case SDL.K_V:
+                    gs.glider.third_person = !gs.glider.third_person
                 case SDL.K_SPACE:
-                    if !event.key.repeat {
+                    // Glider equipped: Space in mid-air opens / releases the
+                    // wing (and double-tap fly mode is off while it's on).
+                    if gs.glider.equipped && !event.key.repeat && glider_can_toggle(&gs) {
+                        glider_toggle_deploy(&gs)
+                    } else if gs.glider.equipped {
+                        if !event.key.repeat { gs.jump_pressed = true }
+                    } else if !event.key.repeat {
                         press_time := SDL.GetTicks()
                         if gs.space_last_press_ms > 0 && (press_time - gs.space_last_press_ms) <= DOUBLE_TAP_MS {
                             gs.camera.fly_mode = !gs.camera.fly_mode
@@ -333,10 +348,17 @@ main :: proc() {
         }
 
         if gs.mouse_locked {
-            camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, dt,
-                move_fwd, move_back, move_left, move_right, gs.jump_pressed,
-                run_fast, run_ultra)
+            if gs.glider.deployed {
+                // W pulls the bar in (fast), S flares (brake), A/D lean, Ctrl looks around.
+                glider_update(&gs, -mouse_dx, mouse_dy, dt,
+                    move_fwd, move_back, move_left, move_right, ctrl_held)
+            } else {
+                camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, dt,
+                    move_fwd, move_back, move_left, move_right, gs.jump_pressed,
+                    run_fast, run_ultra)
+            }
         }
+        glider_view_update(&gs, dt)
 
         // Underground-ness (0 surface .. 1 deep below): drives cave darkness
         // and cave fog in the shaders. Smoothed ~0.5 s so moving through a
