@@ -132,6 +132,7 @@ Block_Type :: enum u8 {
     Spruce_Log    = 18,
     Spruce_Leaves = 19,
     Cactus        = 20,
+    Weathered_Stone = 21, // natural surface rock: moss low down, ledge snow up high (shader)
     // Must stay below 32: the far LOD stores block ids in 5 bits.
 }
 

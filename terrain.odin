@@ -317,10 +317,10 @@ surface_layers :: proc(s: Terrain_Sample, slope: int) -> Surface_Layers {
         if frozen { return {top = .Gravel, filler = .Gravel, filler_depth = 3} }
         return {top = .Sand, filler = .Sand, filler_depth = 4}
     case .Peaks:
-        if slope >= 5 { return {top = .Stone, filler = .Stone, filler_depth = 1} }
+        if slope >= 5 { return {top = .Weathered_Stone, filler = .Stone, filler_depth = 1} }
         return {top = .Snow, filler = .Stone, filler_depth = 1}
     case .Mountains:
-        if cliff || s.height > 145 { return {top = .Stone, filler = .Stone, filler_depth = 1} }
+        if cliff || s.height > 145 { return {top = .Weathered_Stone, filler = .Stone, filler_depth = 1} }
         if s.detail > 0.35 { return {top = .Gravel, filler = .Stone, filler_depth = 1} }
         return {top = .Grass, filler = .Dirt, filler_depth = 2}
     case .Badlands:
@@ -328,11 +328,11 @@ surface_layers :: proc(s: Terrain_Sample, slope: int) -> Surface_Layers {
     case .Desert:
         return {top = cliff ? .Sandstone : .Sand, filler = .Sandstone, filler_depth = 10}
     case .Snowy:
-        if cliff { return {top = .Stone, filler = .Stone, filler_depth = 1, frozen = true} }
+        if cliff { return {top = .Weathered_Stone, filler = .Stone, filler_depth = 1, frozen = true} }
         return {top = .Snow, filler = .Dirt, filler_depth = 3, frozen = true}
     }
     // Plains, forest, taiga.
-    if cliff { return {top = .Stone, filler = .Stone, filler_depth = 1} }
+    if cliff { return {top = .Weathered_Stone, filler = .Stone, filler_depth = 1} }
     return {top = .Grass, filler = .Dirt, filler_depth = 4}
 }
 

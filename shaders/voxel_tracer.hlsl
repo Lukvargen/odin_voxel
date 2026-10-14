@@ -92,7 +92,7 @@ float4 apply_fog(float4 color, float dist, float3 ray_dir) {
 // Ambient light from the open sky at full sky light: cool blue by day, warm
 // and dim with the sun at the horizon.
 float3 sky_ambient() {
-    return lerp(float3(0.22, 0.16, 0.13), float3(0.42, 0.50, 0.64),
+    return lerp(float3(0.22, 0.16, 0.13), float3(0.38, 0.48, 0.66),
                 smoothstep(0.0, 0.4, sun_elevation()));
 }
 
@@ -106,6 +106,14 @@ float face_shade(float3 n) {
     if (n.y > 0.5)  return 1.0;
     if (n.y < -0.5) return 0.5;
     return abs(n.x) > 0.5 ? 0.8 : 0.65;
+}
+
+// Sun bounced off sunlit ground (mostly grass, rock, sand): reaches faces
+// turned sideways or down. Scaled by the face's sky light by the caller.
+float3 bounce_light(float3 n) {
+    float facing = n.y > 0.5 ? 0.0 : (n.y < -0.5 ? 1.0 : 0.6);
+    return sun_tint() * float3(0.85, 0.80, 0.62)
+         * (u_sun_intensity * saturate(light_dir_normalized.y) * 0.09 * facing);
 }
 
 // Tone mapping lives in composite.hlsl — the LAST pass — so the volumetric
@@ -178,129 +186,296 @@ float compute_ao(float3 p, float3 nrm, float3 hit_pos) {
 // Every face gets a TEXELS×TEXELS texel grid keyed on EXACT integer texel
 // coords (vkey*TEXELS + sub-voxel texel) — hash-based "texture without
 // textures", pixel-crisp (quantized, not smooth) and stable at any distance.
-// Material variety lives at three frequencies: per-texel grain (high),
-// small per-voxel luminance (mid), and an fbm meadow tint (low) so grass
-// varies over tens of voxels instead of checkerboarding per voxel.
+// Patterns are built in FACE texel space (fuv: the two texel axes of the face
+// plane, continuous across neighbouring voxels), so clumps, cracks and
+// ripples run across block borders instead of restarting in every voxel.
+// Material variety lives at four frequencies: per-texel grain, texel-scale
+// value noise (clumps, cracks), small per-voxel luminance, and an fbm area
+// tint over tens of voxels.
+// `detail` (1 near, 0 far) fades the per-texel grain toward its mean with
+// distance: a texel is ~1 pixel at ~60 voxels, past that the grain only
+// shimmers, and the far terrain LOD is flat colour anyway.
 #define TEXELS 8
 
-float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm) {
+// Value noise over face texel coords (scale in texels per noise cell).
+float tex_noise(float2 fuv, float scale, float seed) {
+    return vnoise2(fuv / scale + seed);
+}
+
+// Meadow tint: deep green <-> warm olive over ~75 voxels. Shared with the
+// far terrain LOD.
+float3 grass_tint(float2 xz) {
+    float m = fbm2(xz * 0.013);
+    return lerp(float3(0.15, 0.33, 0.09), float3(0.30, 0.37, 0.12), m);
+}
+
+#define DIRT_COLOR float3(0.36, 0.25, 0.15)
+
+float3 dirt_texture(float h, float n, float pebble, float detail) {
+    float3 c = DIRT_COLOR * (0.80 + 0.30 * n + (h - 0.5) * 0.30 * detail);
+    if (pebble < 0.05 * detail) c = lerp(c, float3(0.52, 0.47, 0.40), 0.75);
+    return c;
+}
+
+// ---- Mountain rock ----
+// Stone is coloured in WORLD space so a mountain reads as one rock mass
+// rather than a pile of identical blocks: tilted sedimentary strata a few
+// voxels thick (warped over hundreds of voxels) run straight through the
+// stepped slopes, ledges hold snow that thickens with altitude, and low
+// ledges grow moss. Shared by the near texture and the far terrain LOD.
+#define STRATA_THICK 3.5
+#define SNOW_DUST_LO 118.0 // ledge snow starts here...
+#define SNOW_DUST_HI 168.0 // ...and covers everything here (terrain SNOW_LINE)
+
+// Layer value 0..1 at p (voxel units); `edge` = position within the layer.
+float stone_layer(float3 p, out float edge) {
+    float warp = fbm2(p.xz * 0.011) * 16.0;
+    float sv = (p.y + p.x * 0.21 - p.z * 0.13 + warp) / STRATA_THICK;
+    edge = frac(sv);
+    return hash31i(int3(int(floor(sv)), 913, 17));
+}
+
+// Rock colour of one stratum: mostly grey, some warm ochre bands, some dark
+// slate bands.
+float3 stratum_color(float lh) {
+    float3 c = float3(0.50, 0.50, 0.51) * (0.78 + 0.36 * lh);
+    if (lh > 0.80) c *= float3(1.08, 0.98, 0.86) * 0.94;
+    if (lh < 0.22) c *= float3(0.80, 0.85, 0.94);
+    return c;
+}
+
+// 0..1 share of a ledge top under snow at altitude y.
+float snow_dust_cover(float3 p) {
+    return smoothstep(SNOW_DUST_LO, SNOW_DUST_HI, p.y + (vnoise2(p.xz * 0.08) - 0.5) * 36.0);
+}
+
+#define SNOW_COLOR float3(0.84, 0.87, 0.93)
+
+// Snow surface: soft drifts, wind ridges with bluish troughs, rare glints.
+float3 snow_texture(float2 fuv, float h, float hd, float detail) {
+    float drift = tex_noise(fuv, 7.0, 1.7) * 0.6 + tex_noise(fuv, 40.0, 6.3) * 0.4;
+    float rip = sin((fuv.x * 0.45 - fuv.y * 0.3 + tex_noise(fuv, 16.0, 4.0) * 6.0) * 1.2);
+    float3 c = lerp(float3(0.74, 0.80, 0.92), float3(0.88, 0.90, 0.94), saturate(drift * 1.1 - 0.05 + rip * 0.08 * detail));
+    c *= 1.0 + (hd - 0.5) * 0.04;
+    if (h > 0.985 && detail > 0.5) c = float3(1.0, 1.0, 1.0);
+    return c;
+}
+
+// allow_dust: moss and ledge snow, only on weathered (terrain surface) rock:
+// stone exposed by digging or placed by the player stays bare.
+float3 stone_texture(int3 vkey, int3 tkey, int3 txl, float2 fuv, float3 nrm,
+                     float h, float hd, float3 h3, float detail, bool allow_dust) {
+    bool   top = abs(nrm.y) > 0.5;
+    float3 p   = (float3(tkey) + 0.5) / float(TEXELS);
+    float  edge;
+    float  lh  = stone_layer(p, edge);
+    float  blot = tex_noise(fuv, 3.0, 13.0);
+    float3 c = stratum_color(lh) * (0.84 + 0.22 * blot + (hd - 0.5) * 0.16);
+    c += h3 * 0.02;
+    if (!top) {
+        // Bedding planes: a thin dark seam at the bottom of each stratum.
+        if (edge < 0.04) c *= lerp(1.0, 0.78, detail);
+        // Weathering streaks: water-stained runs down cliff faces,
+        // stretched vertically so they flow over several blocks.
+        float st = vnoise2(float2(fuv.x / 1.6, p.y / 9.0) + 40.0);
+        c *= 1.0 - 0.18 * smoothstep(0.62, 0.82, st);
+    }
+    float crack = abs(tex_noise(fuv, 7.0, 31.0) * 2.0 - 1.0);
+    if (crack < 0.045) c *= lerp(1.0, 0.65, detail);
+
+    if (allow_dust) {
+        float cover = snow_dust_cover(p);
+        if (top) {
+            // Snow lying on the ledge, patchy at first; moss on low ledges.
+            if (tex_noise(fuv, 2.5, 77.0) < cover * 1.25 - 0.12)
+                return snow_texture(fuv, h, hd, detail);
+            float moss = (1.0 - smoothstep(60.0, 125.0, p.y)) * smoothstep(0.55, 0.80, tex_noise(fuv, 4.0, 61.0));
+            c = lerp(c, float3(0.20, 0.28, 0.11) * (0.85 + 0.3 * hd), moss);
+        } else if (nrm.y == 0.0 && cover > 0.25 && txl.y >= TEXELS - 1 - int(cover * 2.0)) {
+            // Lip of the ledge snow hanging over the top edge of the face.
+            if (sample_voxel(float3(vkey) + float3(0.5, 1.5, 0.5)) == 0u &&
+                hash31i(int3(tkey.x, 77, tkey.z)) < cover + 0.2)
+                return snow_texture(fuv, h, hd, detail) * 0.97;
+        }
+    }
+    return c;
+}
+
+float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm, float dist) {
     // Sub-voxel texel coords: inset along the normal so the face plane floors
     // into THIS voxel, then quantize (frac convention per AO/grass band).
     float3 fr   = frac(hit_pos - nrm * 0.01);
     int3   txl  = clamp(int3(fr * TEXELS), 0, TEXELS - 1);
     int3   tkey = vkey * TEXELS + txl;
+    bool   top  = abs(nrm.y) > 0.5;
+    // Face-plane texel coords (texel centres), continuous across voxels.
+    float2 fuv  = top ? float2(tkey.xz) : (abs(nrm.x) > 0.5 ? float2(tkey.zy) : float2(tkey.xy));
+    fuv += 0.5;
 
+    float  detail = 1.0 - smoothstep(24.0, 110.0, dist);
     float  h  = hash31i(tkey);          // per-texel value
-    float3 h3 = hash33i(tkey) - 0.5;    // per-texel hue offset
+    float  hd = lerp(0.5, h, detail);   // ...faded with distance
+    float3 h3 = (hash33i(tkey) - 0.5) * detail; // per-texel hue offset
     float  vj = hash31i(vkey) - 0.5;    // small per-voxel luminance variety
 
     if (block_id == BLOCK_GRASS || block_id == BLOCK_SNOW) {
-        // Meadow tint: deep green <-> warm yellow-green over ~75 voxels.
-        // Snow uses the same top-and-ragged-band layout over dirt.
-        float  m     = fbm2(float2(vkey.xz) * 0.013);
-        float3 grass = block_id == BLOCK_SNOW
-            ? float3(0.86, 0.89, 0.95) * (1.0 + 0.04 * m)
-            : lerp(float3(0.13, 0.40, 0.10), float3(0.28, 0.42, 0.14), m);
-        float3 dirt  = float3(0.40, 0.27, 0.13);
-
-        bool on_grass;
+        bool snow = block_id == BLOCK_SNOW;
+        bool on_top;
         if (nrm.y > 0.5) {
-            on_grass = true;
+            on_top = true;
         } else if (nrm.y < -0.5) {
-            on_grass = false;
+            on_top = false;
         } else {
-            // Side: ragged HARD-EDGED grass band (no fade) — depth varies per
+            // Side: ragged HARD-EDGED band (no fade) — depth varies per
             // texel column, only where the voxel above is open air.
+            // Snow drifts over the edge in a smooth wavy band instead.
             bool exposed = (sample_voxel(float3(vkey) + float3(0.5, 1.5, 0.5)) == 0u);
             int band = 0;
             if (exposed) {
-                float ch = hash31i(int3(tkey.x, 4242, tkey.z)); // per texel column
-                band = 2 + int(ch * 3.0);                       // 2..4 texels deep
+                if (snow) {
+                    float bn = vnoise2(float2(fuv.x / 3.0, float(vkey.y) * 3.7));
+                    band = 2 + int(bn * 4.0);
+                } else {
+                    float ch = hash31i(int3(tkey.x, 4242, tkey.z)); // per texel column
+                    band = 2 + int(ch * 3.0);
+                }
             }
-            on_grass = (txl.y >= TEXELS - band);
+            on_top = (txl.y >= TEXELS - band);
         }
 
-        float grain = block_id == BLOCK_SNOW ? 0.10 : 0.28;
-        float3 c = on_grass
-            ? grass * (1.0 - grain * 0.57 + grain * h) + h3 * float3(0.02, 0.05, 0.02) * grain * 3.6
-            : dirt  * (0.80 + 0.34 * h) + h3 * float3(0.05, 0.03, 0.02);
-        return saturate(c * (1.0 + vj * 0.08));
+        if (!on_top) {
+            // Snow on a mountain covers rock: show the rock (its strata line
+            // up with the bare stone around). Elsewhere frozen soil.
+            if (snow) {
+                uint below = sample_voxel(float3(vkey) + float3(0.5, -0.5, 0.5));
+                if (below == BLOCK_STONE || below == BLOCK_WEATHERED_STONE || below == BLOCK_SNOW)
+                    return saturate(stone_texture(vkey, tkey, txl, fuv, nrm, h, hd, h3, detail, false)
+                                    * float3(0.97, 0.99, 1.04));
+            }
+            float3 c = dirt_texture(h, tex_noise(fuv, 2.5, 3.1), hash31i((tkey >> 1) + 57), detail);
+            // Frozen ground under snow: greyer and paler than meadow soil.
+            if (snow) c = lerp(c, dot(c, float3(0.3, 0.5, 0.2)).xxx * float3(1.05, 1.0, 0.95), 0.6) * 1.15;
+            return saturate(c * (1.0 + vj * 0.08));
+        }
+        if (snow) return snow_texture(fuv, h, hd, detail);
+        // Clumps of blades a few texels wide, lighter tips, darker roots.
+        float3 g = grass_tint(float2(vkey.xz));
+        float  clump = tex_noise(fuv, 2.2, 5.3);
+        float3 c = g * (0.80 + 0.36 * clump + (hd - 0.5) * 0.30);
+        c += h3 * float3(0.02, 0.04, 0.01);
+        if (!top) {
+            // Overhang of the band: a little darker than the top.
+            c *= 0.92;
+        } else if (detail > 0.0) {
+            // Wildflowers: voxels in some patches carry 1-texel blooms.
+            float patchy = tex_noise(float2(vkey.xz), 9.0, 11.0);
+            float fh = hash31i(tkey + int3(0, 991, 0));
+            if (fh < 0.02 * smoothstep(0.55, 0.85, patchy) * detail) {
+                uint kind = uint(hash31i(vkey + int3(5, 5, 5)) * 4.0);
+                c = kind == 0u ? float3(0.95, 0.80, 0.18)
+                  : kind == 1u ? float3(0.92, 0.92, 0.88)
+                  : kind == 2u ? float3(0.62, 0.40, 0.85)
+                  :              float3(0.85, 0.22, 0.18);
+            }
+        }
+        return saturate(c * (1.0 + vj * 0.06));
     }
 
     if (block_id == BLOCK_LOG || block_id == BLOCK_SPRUCE_LOG) {
         bool spruce = block_id == BLOCK_SPRUCE_LOG;
         float3 c;
-        if (abs(nrm.y) > 0.5) {
-            // Cut end: lighter heartwood.
-            c = (spruce ? float3(0.46, 0.34, 0.20) : float3(0.52, 0.40, 0.22)) * (0.85 + 0.25 * h);
+        if (top) {
+            // Cut end: growth rings around the voxel centre, bark rim.
+            float2 d = float2(txl.xz) - 3.5;
+            float r = length(d);
+            float ring = frac(r * 0.55 + hash31i(vkey) * 0.3);
+            c = (spruce ? float3(0.50, 0.38, 0.23) : float3(0.58, 0.44, 0.26))
+              * (0.86 + 0.14 * smoothstep(0.2, 0.6, ring) + (hd - 0.5) * 0.10);
+            if (r > 3.6) c = spruce ? float3(0.20, 0.13, 0.07) : float3(0.30, 0.20, 0.10);
         } else {
-            // Bark: vertical striping — column brightness keyed on horizontal
-            // texel coords only, so stripes run continuously up the trunk.
+            // Bark: vertical plates keyed on horizontal texel coords, so they
+            // run up the trunk; deep furrows between plates.
             float col = hash31i(int3(tkey.x, 1717, tkey.z));
-            c = (spruce ? float3(0.24, 0.15, 0.08) : float3(0.36, 0.23, 0.10))
-              * (0.62 + 0.55 * col) * (0.90 + 0.20 * h);
+            float seg = hash31i(int3(tkey.x, tkey.y >> 2, tkey.z) + 33);
+            c = (spruce ? float3(0.22, 0.14, 0.08) : float3(0.33, 0.22, 0.11))
+              * (0.70 + 0.45 * col) * (0.90 + 0.20 * lerp(0.5, seg, detail));
+            if (col < 0.18) c *= lerp(1.0, 0.55, detail);
         }
         return saturate(c * (1.0 + vj * 0.08));
     }
 
     if (block_is_leaves(block_id)) {
-        // Two-tone dapple + stronger per-voxel variety for canopy depth.
-        float3 c = block_id == BLOCK_SPRUCE_LEAVES
-            ? ((h < 0.45) ? float3(0.05, 0.17, 0.08) : float3(0.09, 0.25, 0.12))
-            : ((h < 0.45) ? float3(0.10, 0.32, 0.07) : float3(0.17, 0.44, 0.11));
-        c *= 0.90 + 0.20 * hash31i(tkey + 31);
+        // Leaf clusters with dark gaps between them for canopy depth.
+        bool spruce = block_id == BLOCK_SPRUCE_LEAVES;
+        float cl = tex_noise(fuv, 1.8, spruce ? 21.0 : 23.0);
+        float3 dark  = spruce ? float3(0.04, 0.13, 0.07) : float3(0.08, 0.24, 0.06);
+        float3 light = spruce ? float3(0.09, 0.24, 0.12) : float3(0.17, 0.38, 0.09);
+        float3 c = lerp(dark, light, saturate(cl * 1.3 - 0.15 + (hd - 0.5) * 0.5));
+        if (h < 0.06) c *= lerp(1.0, 0.6, detail);
         return saturate(c * (1.0 + vj * 0.20));
     }
 
     if (block_id == BLOCK_DIRT) {
-        float3 c = float3(0.40, 0.27, 0.13) * (0.80 + 0.34 * h) + h3 * float3(0.05, 0.03, 0.02);
+        float3 c = dirt_texture(h, tex_noise(fuv, 2.5, 3.1), hash31i((tkey >> 1) + 57), detail);
         return saturate(c * (1.0 + vj * 0.08));
     }
 
     if (block_id == BLOCK_SAND || block_id == BLOCK_RED_SAND) {
-        float3 base = block_id == BLOCK_SAND ? float3(0.72, 0.63, 0.43) : float3(0.66, 0.33, 0.16);
-        float3 c = base * (0.88 + 0.18 * h) + h3 * 0.03;
-        return saturate(c * (1.0 + vj * 0.05));
+        float3 base = block_id == BLOCK_SAND ? float3(0.70, 0.60, 0.41) : float3(0.62, 0.31, 0.15);
+        float3 c = base * (0.92 + (hd - 0.5) * 0.16) + h3 * 0.025;
+        if (top) {
+            // Wind ripples: wavy crests every ~4 texels, warped by noise.
+            float warp = tex_noise(fuv, 14.0, 2.0) * 7.0;
+            float rip = sin((fuv.x * 0.85 + fuv.y * 0.35 + warp) * 1.55);
+            c *= 1.0 + 0.06 * rip * detail;
+        }
+        return saturate(c * (1.0 + vj * 0.04));
     }
 
     if (block_id == BLOCK_SANDSTONE) {
-        // Horizontal strata: brightness per texel row.
+        // Horizontal strata: brightness per texel row, smooth along the row.
         float layer = hash31i(int3(0, tkey.y, 77));
-        float3 c = float3(0.78, 0.67, 0.45) * (abs(nrm.y) > 0.5 ? 0.95 : 0.86 + 0.16 * layer) * (0.94 + 0.10 * h);
+        float n = tex_noise(fuv, 4.0, 8.0);
+        float3 c = float3(0.74, 0.63, 0.43)
+                 * (top ? 0.95 : 0.86 + 0.16 * layer) * (0.92 + 0.10 * n + (hd - 0.5) * 0.08);
         return saturate(c * (1.0 + vj * 0.05));
     }
 
     if (block_id == BLOCK_TERRACOTTA) {
         // Badlands strata: one colour per 2-voxel band of world height.
         static const float3 bands[6] = {
-            float3(0.62, 0.33, 0.18), float3(0.76, 0.54, 0.34), float3(0.55, 0.23, 0.15),
-            float3(0.84, 0.73, 0.58), float3(0.68, 0.43, 0.20), float3(0.47, 0.29, 0.22),
+            float3(0.60, 0.32, 0.18), float3(0.74, 0.53, 0.34), float3(0.53, 0.23, 0.15),
+            float3(0.80, 0.70, 0.56), float3(0.66, 0.42, 0.20), float3(0.45, 0.28, 0.22),
         };
         uint bi = min(uint(hash31i(int3(7, vkey.y >> 1, 3)) * 6.0), 5u);
-        float3 c = bands[bi] * (0.92 + 0.12 * h);
+        float n = tex_noise(fuv, 3.0, 4.0);
+        float3 c = bands[bi] * (0.90 + 0.10 * n + (hd - 0.5) * 0.10);
         return saturate(c * (1.0 + vj * 0.05));
     }
 
     if (block_id == BLOCK_GRAVEL) {
         // Pebbles: 2x2-texel stones of mixed tone, dark gaps.
-        float  pb = hash31i(tkey >> 1);
+        float  pb = lerp(0.5, hash31i(tkey >> 1), detail);
         float3 c = lerp(float3(0.40, 0.38, 0.36), float3(0.60, 0.57, 0.52), pb);
-        if (h < 0.18) c *= 0.65;
+        if (h < 0.18 * detail) c *= 0.65;
         return saturate(c * (1.0 + vj * 0.06));
     }
 
     if (block_id == BLOCK_ICE) {
-        float3 c = float3(0.46, 0.62, 0.80) * (0.94 + 0.08 * h);
-        if (hash31i(tkey + 5) < 0.05) c = float3(0.75, 0.85, 0.95); // frost cracks
+        float3 c = float3(0.46, 0.62, 0.80) * (0.94 + 0.08 * hd);
+        // Long frost cracks: thin ridges of value noise.
+        float r = abs(tex_noise(fuv, 6.0, 9.0) * 2.0 - 1.0);
+        if (r < 0.06 * detail) c = float3(0.75, 0.85, 0.95);
         return saturate(c);
     }
 
     if (block_id == BLOCK_CACTUS) {
-        // Vertical ribs on the sides, lighter crown on top.
-        float3 c = float3(0.22, 0.47, 0.15) * (0.88 + 0.18 * h);
-        if (abs(nrm.y) < 0.5) {
+        // Vertical ribs on the sides, lighter crown on top, pale spines.
+        float3 c = float3(0.22, 0.45, 0.15) * (0.88 + 0.18 * hd);
+        if (!top) {
             int along = abs(nrm.x) > 0.5 ? txl.z : txl.x;
             if (along % 3 == 0) c *= 0.72;
+            else if (h > 0.93 && detail > 0.3) c = float3(0.85, 0.82, 0.62);
         } else {
             c *= 1.12;
         }
@@ -319,10 +494,9 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm)
         return saturate(c * (1.0 + vj * 0.08));
     }
 
-    // Stone: gray grain with scattered darker pits. Ores add 2x2-texel
-    // specks of their mineral.
-    float3 c = float3(0.55, 0.55, 0.56) * (0.82 + 0.30 * h) + h3 * 0.04;
-    if (h < 0.07) c *= 0.78;
+    // Stone: world-space strata, streaks, ledge snow (stone_texture). Ores
+    // add 2x2-texel specks of their mineral.
+    float3 c = stone_texture(vkey, tkey, txl, fuv, nrm, h, hd, h3, detail, block_id == BLOCK_WEATHERED_STONE);
     if (block_id == BLOCK_COAL_ORE || block_id == BLOCK_IRON_ORE || block_id == BLOCK_GOLD_ORE) {
         if (hash31i((tkey >> 1) + 101) < 0.3) {
             float3 m = block_id == BLOCK_COAL_ORE ? float3(0.07, 0.07, 0.08)
@@ -331,7 +505,7 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm)
             c = m * (0.85 + 0.3 * h);
         }
     }
-    return saturate(c * (1.0 + vj * 0.10));
+    return saturate(c * (1.0 + vj * 0.08));
 }
 
 // ---- Main -------------------------------------------------------------------
@@ -552,31 +726,41 @@ float3 water_mix(float3 col, float d, float t_surface, float3 dir, float F, floa
 // alias at that distance), averaged from the near textures so the handover
 // at the near-region edge stays quiet.
 float3 far_block_color(uint id, int2 cell, float3 n, float y) {
-    float3 dirt = float3(0.40, 0.27, 0.13) * 0.97;
+    float3 dirt = DIRT_COLOR * 0.95;
     if (id == BLOCK_GRASS) {
-        float  m     = fbm2(float2(cell * FAR_CELL) * 0.013);
-        float3 grass = lerp(float3(0.13, 0.40, 0.10), float3(0.28, 0.42, 0.14), m) * 0.98;
+        float3 grass = grass_tint(float2(cell * FAR_CELL)) * 0.97;
         return n.y > 0.5 ? grass : lerp(dirt, grass, 0.35);
     }
     // Calibrated against the voxel trees by rendering the same forest
-    // both ways (bench config "far from 16 chunks").
-    if (id == BLOCK_LEAVES)        return float3(0.085, 0.198, 0.054);
-    if (id == BLOCK_SPRUCE_LEAVES) return float3(0.045, 0.135, 0.065);
-    if (id == BLOCK_LOG)           return float3(0.33, 0.21, 0.09);
-    if (id == BLOCK_SPRUCE_LOG)    return float3(0.22, 0.14, 0.08);
+    // both ways (bench config "far from 16 chunks"): a crown's self-shadow
+    // makes it ~0.6x its leaf texture.
+    if (id == BLOCK_LEAVES)        return float3(0.087, 0.178, 0.050);
+    if (id == BLOCK_SPRUCE_LEAVES) return float3(0.043, 0.122, 0.063);
+    if (id == BLOCK_LOG)           return float3(0.30, 0.20, 0.10);
+    if (id == BLOCK_SPRUCE_LOG)    return float3(0.20, 0.13, 0.07);
     if (id == BLOCK_DIRT)          return dirt;
-    if (id == BLOCK_SAND)          return float3(0.71, 0.62, 0.43);
-    if (id == BLOCK_RED_SAND)      return float3(0.64, 0.32, 0.16);
-    if (id == BLOCK_SANDSTONE)     return float3(0.76, 0.65, 0.44);
-    if (id == BLOCK_SNOW)          return n.y > 0.5 ? float3(0.86, 0.89, 0.95) : float3(0.62, 0.62, 0.64);
+    if (id == BLOCK_SAND)          return float3(0.645, 0.552, 0.377);
+    if (id == BLOCK_RED_SAND)      return float3(0.570, 0.285, 0.138);
+    if (id == BLOCK_SANDSTONE)     return float3(0.675, 0.575, 0.392);
+    if (id == BLOCK_SNOW)          return n.y > 0.5 ? float3(0.82, 0.86, 0.93) : float3(0.62, 0.63, 0.66);
     if (id == BLOCK_ICE)           return float3(0.47, 0.62, 0.80);
     if (id == BLOCK_GRAVEL)        return float3(0.50, 0.48, 0.44);
-    if (id == BLOCK_CACTUS)        return float3(0.22, 0.47, 0.15);
+    if (id == BLOCK_CACTUS)        return float3(0.22, 0.45, 0.15);
     if (id == BLOCK_TERRACOTTA) {
-        static const float3 bands[3] = { float3(0.64, 0.36, 0.20), float3(0.74, 0.52, 0.34), float3(0.56, 0.26, 0.17) };
+        static const float3 bands[3] = { float3(0.62, 0.35, 0.20), float3(0.72, 0.51, 0.33), float3(0.54, 0.25, 0.17) };
         return n.y > 0.5 ? bands[0] : bands[uint(floor(y / 6.0)) % 3u];
     }
-    return float3(0.55, 0.55, 0.56) * 0.97;
+    // Stone: the same strata and ledge snow as the near texture.
+    float3 p = float3(float(cell.x * FAR_CELL) + 2.0, y, float(cell.y * FAR_CELL) + 2.0);
+    float edge;
+    float3 rock = stratum_color(stone_layer(p, edge)) * 0.95;
+    if (n.y > 0.5 && id == BLOCK_WEATHERED_STONE) {
+        float cover = saturate(snow_dust_cover(p) * 1.25 - 0.12);
+        float moss = (1.0 - smoothstep(60.0, 125.0, y)) * 0.2;
+        rock = lerp(rock, float3(0.20, 0.28, 0.11), moss);
+        return lerp(rock, SNOW_COLOR * 0.98, cover);
+    }
+    return rock * 0.96;
 }
 
 // Fully sky-lit, sun without shadows. t_off: distance already travelled
@@ -686,7 +870,8 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
 
         if (hit.block_id != 0u) {
             float4 hit_color = float4(
-                voxel_surface_color(hit.block_id, hit.vkey, hit.hit_pos, hit.normal), 1.0);
+                voxel_surface_color(hit.block_id, hit.vkey, hit.hit_pos, hit.normal, hit.t + t_acc), 1.0);
+            float3 albedo = hit_color.rgb;
 
             float3 hit_point   = hit.hit_pos;
             float3 surf_normal = hit.normal;
@@ -733,6 +918,10 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
                 }
                 lighting += sun_tint() * (n_dot_l * shadow_factor * u_sun_intensity);
             }
+            // Sunlight bounced off the ground fills faces that look sideways
+            // or down, so shadowed walls and overhangs keep some warmth and
+            // shape instead of flat sky blue.
+            lighting += bounce_light(surf_normal) * light_curve(sky_level);
 
             // Leaf backlit glow: sun behind the leaves tints them warm
             // yellow-green, scaled by how open to the sky they are.
@@ -745,10 +934,12 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
             hit_color.xyz *= lighting * ao;
             // Emissive blocks radiate on their own — NOT multiplied by
             // lighting/AO/shadow. Bright enough to trip the bloom threshold.
+            // The texture shapes the glow: ember texels burn bright, the
+            // charred wood between them only smoulders.
             float3 emis = block_emission(hit.block_id);
             if (emis.x > 0.0) {
                 float fl = 0.92 + 0.08 * sin(u_time * 9.0 + hash31i(hit.vkey) * 6.2831853);
-                hit_color.rgb += emis * fl;
+                hit_color.rgb += emis * albedo * albedo * fl;
             }
             hit_color = apply_fog(hit_color, hit.t + t_acc, dir);
             if (in_water) hit_color.rgb = water_mix(hit_color.rgb, hit.t, t_acc, dir, water_F, water_refl);

@@ -14,7 +14,8 @@ RWTexture2D<float4> img_output : register(u0, space1); // full-res scene color (
 
 #define BLOOM_INTENSITY   0.35
 #define GRADE_SATURATION  1.05
-#define GRADE_CONTRAST    1.04
+#define GRADE_CONTRAST    1.06
+#define VIGNETTE          0.30
 
 #include "camera_uniforms.hlsl"
 
@@ -84,5 +85,13 @@ void main(uint3 id : SV_DispatchThreadID) {
     float lum = dot(c2, float3(0.2126, 0.7152, 0.0722));
     c2 = lerp(lum.xxx, c2, GRADE_SATURATION);
     c2 = saturate((c2 - 0.5) * GRADE_CONTRAST + 0.5);
+    // Split toning: shadows lean cool, highlights warm (sunlit vs sky-lit).
+    c2 *= lerp(float3(0.96, 0.99, 1.05), float3(1.03, 1.0, 0.95), smoothstep(0.1, 0.8, lum));
+    // Vignette: corners ~15% darker, pulls the eye to the centre.
+    float2 uv = (float2(p) + 0.5) / float2(w, h) - 0.5;
+    c2 *= 1.0 - VIGNETTE * dot(uv, uv);
+    // Dither to break 8-bit banding in the sky gradient and vignette.
+    float dn = frac(52.9829189 * frac(dot(float2(p), float2(0.06711056, 0.00583715))));
+    c2 = saturate(c2 + (dn - 0.5) / 255.0);
     img_output[p] = float4(c2, c.a);
 }

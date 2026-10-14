@@ -92,6 +92,10 @@ bench_run :: proc(gs: ^Game_State) {
         bench_stream_run(gs)
         return
     }
+    if bench_look {
+        bench_look_run(gs)
+        return
+    }
 
     gs.camera.fly_mode = true
     spawn := gs.camera.pos
@@ -529,5 +533,107 @@ bench_glider_run :: proc(gs: ^Game_State) {
         entities_update(gs, 0)
         gpu_render(gs)
         bench_screenshot(gs, fmt.tprintf("%s/clouds_side.bmp", bench_shot_dir))
+    }
+}
+
+// `bench look [dir]`: screenshots of one spot per biome (nearest to spawn),
+// from eye height and from above, for judging textures and lighting.
+// Entities off so shots from different builds compare.
+bench_look: bool
+
+bench_look_run :: proc(gs: ^Game_State) {
+    // dig: also a shot down into a freshly dug pit (bare rock, no moss/snow).
+    Look :: struct { biome: Biome, yaw: f32, dig: bool }
+    looks := []Look{
+        {.Plains, 30, false}, {.Forest, 60, false}, {.Taiga, 200, false}, {.Snowy, 120, false},
+        {.Desert, 300, false}, {.Badlands, 45, false}, {.Mountains, 150, true}, {.Peaks, 250, true}, {.Beach, 90, false},
+    }
+    gs.entities_enabled = false
+    entities_update(gs, 0)
+    cam := &gs.camera
+    cam.fly_mode = true
+    for lk in looks {
+        x, z, found := bench_find_biome(lk.biome)
+        if !found { fmt.printf("look: no %v found\n", lk.biome); continue }
+        bench_teleport(gs, {f32(x) + 0.5, f32(surface_height_at(x, z)) + 3, f32(z) + 0.5})
+        fmt.printf("look: %v at %d,%d\n", lk.biome, x, z)
+        bench_clear_view(gs)
+        cam.yaw, cam.pitch = lk.yaw, -6
+        bench_measure(gs)
+        bench_screenshot(gs, fmt.tprintf("%s/%v.bmp", bench_shot_dir, lk.biome))
+        cam.pos.y += 45
+        bench_clear_view(gs)
+        cam.pitch = -28
+        bench_measure(gs)
+        bench_screenshot(gs, fmt.tprintf("%s/%v_high.bmp", bench_shot_dir, lk.biome))
+        if lk.dig {
+            sx, sz := x + 6, z
+            sy := surface_height_at(sx, sz)
+            dirty: map[int]bool
+            changed: [dynamic][3]int
+            edit_sphere(gs, {sx, sy - 2, sz}, .Air, &dirty, &changed, 5)
+            light_on_edit(gs, changed[:])
+            for slot in dirty { gpu_sync_slot(gs, slot) }
+            far_update_edited(gs, changed[:])
+            delete(dirty); delete(changed)
+            cam.pos = {f32(x) + 0.5, f32(sy) + 6, f32(z) + 0.5}
+            bench_clear_view(gs)
+            cam.pitch = -50
+            cam.yaw = 90 // toward the pit (+x)
+            bench_measure(gs)
+            bench_screenshot(gs, fmt.tprintf("%s/%v_dug.bmp", bench_shot_dir, lk.biome))
+        }
+    }
+}
+
+// Nearest surface point of biome b, searched outward in rings.
+bench_find_biome :: proc(b: Biome) -> (x, z: int, ok: bool) {
+    for r := 0; r < 12000; r += 64 {
+        steps := max(1, r / 24)
+        for i in 0 ..< steps {
+            a := f64(i) / f64(steps) * math.TAU
+            px := int(math.cos(a) * f64(r)); pz := int(math.sin(a) * f64(r))
+            // Want the middle of the biome, not its border.
+            if terrain_at(px, pz).biome == b && terrain_at(px + 24, pz).biome == b &&
+               terrain_at(px - 24, pz).biome == b && terrain_at(px, pz + 24).biome == b {
+                return px, pz, true
+            }
+        }
+    }
+    return 0, 0, false
+}
+
+// Move the camera and stream the world around it.
+bench_teleport :: proc(gs: ^Game_State, pos: [3]f32) {
+    gs.camera.pos = pos
+    gs.player_chunk = {
+        floor_div(int(pos.x), CHUNK_VOXELS),
+        floor_div(int(pos.y), CHUNK_VOXELS),
+        floor_div(int(pos.z), CHUNK_VOXELS),
+    }
+    worker_pool_set_player(&gs.pool, gs.player_chunk[0], gs.player_chunk[2])
+    enqueue_chunks(gs)
+    t0 := time.now()
+    for !streaming_idle(gs) && time.duration_seconds(time.since(t0)) < 120 {
+        integrate_ready_chunks(gs)
+        far_enqueue(gs)
+        integrate_far_tiles(gs)
+        stitch_pending_columns(gs)
+        flush_gpu_uploads(gs)
+        free_all(context.temp_allocator)
+        time.sleep(time.Millisecond)
+    }
+}
+
+// Raise the camera out of trees, water or rock: nothing within 2 voxels.
+bench_clear_view :: proc(gs: ^Game_State) {
+    p := &gs.camera.pos
+    for _ in 0 ..< 200 {
+        clear := true
+        for dx in -2 ..= 2 { for dy in -2 ..= 2 { for dz in -2 ..= 2 {
+            if get_voxel(gs, int(p.x) + dx, int(p.y) + dy, int(p.z) + dz) != 0 { clear = false }
+        }}}
+        if clear { return }
+        p.y += 1
     }
 }

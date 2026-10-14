@@ -71,6 +71,7 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_SPRUCE_LOG    18u
 #define BLOCK_SPRUCE_LEAVES 19u
 #define BLOCK_CACTUS        20u
+#define BLOCK_WEATHERED_STONE 21u // terrain surface rock (moss / ledge snow)
 
 bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES; }
 
@@ -80,7 +81,7 @@ bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_
 // Bright enough to pass BLOOM_THRESHOLD so emissive blocks glow. Future
 // emissive blocks (lava, glowstone) slot in here.
 float3 block_emission(uint id) {
-    if (id == BLOCK_TORCH) return float3(1.0, 0.55, 0.22) * 6.0;
+    if (id == BLOCK_TORCH) return float3(1.0, 0.62, 0.40) * 7.0; // times albedo^2 in shading
     return float3(0.0, 0.0, 0.0);
 }
 
@@ -109,9 +110,11 @@ float3 hash33i(int3 v) {
 
 // Sun tint by elevation (pass-agnostic; takes normalized light dir).
 float3 sun_tint_d(float3 Ln) {
+    // Orange at the horizon, golden through the afternoon, near white only
+    // with the sun high overhead.
     float elev = clamp(Ln.y, 0.0, 1.0);
-    return lerp(float3(1.0, 0.45, 0.10), float3(1.0, 0.98, 0.92),
-                smoothstep(0.0, 0.35, elev));
+    float3 c = lerp(float3(1.0, 0.45, 0.10), float3(1.0, 0.88, 0.70), smoothstep(0.0, 0.30, elev));
+    return lerp(c, float3(1.0, 0.97, 0.92), smoothstep(0.45, 0.95, elev));
 }
 
 // voxel_chunk packs 4 voxels (1 byte each) per uint.
@@ -346,13 +349,20 @@ float fbm2(float2 p) {
 float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt, bool clouds) {
     float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
     float elev = clamp(Ln.y, 0.0, 1.0);
-    float3 horizon = lerp(float3(0.90, 0.55, 0.25), float3(0.75, 0.85, 1.0), smoothstep(0.0, 0.3, elev));
-    float3 zenith  = lerp(float3(0.20, 0.10, 0.05), float3(0.10, 0.35, 0.80), smoothstep(0.0, 0.4, elev));
-    float3 sky = lerp(horizon, zenith, pow(t, 0.6));
+    float3 horizon = lerp(float3(0.90, 0.55, 0.25), float3(0.74, 0.83, 0.93), smoothstep(0.0, 0.3, elev));
+    float3 zenith  = lerp(float3(0.20, 0.10, 0.05), float3(0.08, 0.28, 0.70), smoothstep(0.0, 0.4, elev));
+    float3 sky = lerp(horizon, zenith, pow(t, 0.55));
     float sun_dot  = dot(normalize(dir), Ln);
     float sun_disc = smoothstep(0.9985, 0.9995, sun_dot) * disc_amt;
     float sun_glow = smoothstep(0.960,  0.9985, sun_dot) * 0.4 * glow_amt;
     sky = lerp(sky, sun_tint_d(Ln), sun_disc + sun_glow * 0.6);
+    // The disc itself is far brighter than the sky: it blooms, and still
+    // shows as a bright patch through thin cloud.
+    sky += sun_tint_d(Ln) * sun_disc * 6.0;
+    // Wide forward-scatter halo: the sky around the sun and the haze toward
+    // it brighten and warm, the opposite sky stays deep blue.
+    float halo = pow(saturate(sun_dot * 0.5 + 0.5), 6.0);
+    sky += sun_tint_d(Ln) * float3(0.30, 0.22, 0.12) * halo * glow_amt * (1.0 - t * 0.5);
 
     // Cloud layer, drawn over the disc (sun behind cloud = dimmed). Project
     // the ray onto a flat sky plane; fade out at the horizon (projection

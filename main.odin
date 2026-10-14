@@ -135,7 +135,7 @@ main :: proc() {
     gs.render_scale   = RENDER_SCALE // 1 = full-res, 2/4 = pixel-art (options screen)
     gs.render_w       = TEX_W / gs.render_scale
     gs.render_h       = TEX_H / gs.render_scale
-    gs.light_dir      = {0.6, 0.8, 0.4}
+    gs.light_dir      = {0.55, 0.52, 0.65} // mid-afternoon: long shadows, golden light
     gs.exposure       = 1.0
     gs.fog_density    = 0.0006 // far terrain reaches ~1900 voxels; haze starts showing past ~600
     gs.sun_intensity  = 1.9
@@ -153,6 +153,7 @@ main :: proc() {
             case a == "glider": bench_glider = true
             case a == "entcost": bench_entcost = true
             case a == "stream": bench_stream = true
+            case a == "look": bench_look = true
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])
