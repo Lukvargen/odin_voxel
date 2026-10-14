@@ -415,6 +415,7 @@ glider_step :: proc(gs: ^Game_State, dt: f32, air: [3]f32,
             cam.pos = pos
             cam.velocity *= 0.3
             g.shake = 2.5
+            play(.Crash, 0.9)
             glider_stow(gs, false)
             return false
         }

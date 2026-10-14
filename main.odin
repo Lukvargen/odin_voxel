@@ -124,6 +124,10 @@ Game_State :: struct {
 main :: proc() {
     gs: Game_State
     bench := len(os.args) > 1 && os.args[1] == "bench"
+    if len(os.args) > 1 && os.args[1] == "sounds" {
+        audio_export(len(os.args) > 2 ? os.args[2] : "sounds")
+        return
+    }
 
     gs.reflect_amount = 1
     // Defaults are the cheap settings; each step up roughly adds a frame's
@@ -206,6 +210,8 @@ main :: proc() {
 
     ui_init(&gs)
     defer ui_shutdown(&gs)
+    audio_init() // after the bench return: bench runs stay silent
+    defer audio_shutdown()
     gs_ui_left_pressed_state = &gs.ui
 
     // Lock mouse at start
@@ -243,6 +249,8 @@ main :: proc() {
                 switch key {
                 case SDL.K_ESCAPE:
                     quit = true
+                case SDL.K_M:
+                    audio_toggle_mute()
                 case SDL.K_TAB:
                     gs.mouse_locked = !gs.mouse_locked
                     _ = SDL.SetWindowRelativeMouseMode(gs.window, gs.mouse_locked)
@@ -438,11 +446,13 @@ main :: proc() {
                     do_edit = gs.left_pressed
                 }
                 if do_edit {
+                    old := Block_Type(u8(get_voxel(&gs, target[0], target[1], target[2])))
                     dirty: map[int]bool
                     defer delete(dirty)
                     changed: [dynamic][3]int
                     defer delete(changed)
                     edit_sphere(&gs, target, block, &dirty, &changed, radius)
+                    if len(changed) > 0 { audio_edit(target, block, old, radius) }
                     light_on_edit(&gs, changed[:])
                     for slot in dirty { gpu_sync_slot(&gs, slot) }
                     far_update_edited(&gs, changed[:])
@@ -452,6 +462,7 @@ main :: proc() {
 
         flush_gpu_uploads(&gs)
         entities_update(&gs, dt)
+        audio_update(&gs, dt)
         gpu_render(&gs)
         ui_build_and_render(&gs, dt)
         autosave_tick(&gs)

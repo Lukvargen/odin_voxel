@@ -310,6 +310,7 @@ opt_button :: proc(id: string, label: string, active: bool) -> bool {
         cornerRadius    = {4, 4, 4, 4},
     }) {
         clicked = clay.Hovered() && gs_ui_left_pressed()
+        if clicked { play(.Click, 0.4) }
         clay.TextDynamic(label, clay.TextConfig({
             textColor = BTN_TEXT_COLOR,
             fontId    = FONT_ID_BODY,
@@ -465,6 +466,35 @@ options_panel_layout :: proc(gs: ^Game_State) {
             if clay.UI(clay.ID("BncSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
             if opt_button("BncDn", "-", true) { gs.reflect_amount = max(gs.reflect_amount - 1, 1) }
             if opt_button("BncUp", "+", true) { gs.reflect_amount = min(gs.reflect_amount + 1, 5) }
+        }
+
+        // Sound volumes (audio.odin); M mutes from anywhere.
+        if clay.UI(clay.ID("RowEffects"))({
+            layout = { childGap = 8, childAlignment = {y = .Center},
+                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
+        }) {
+            opt_row(fmt.tprintf("Effects: %d%%", int(audio.effects * 100 + 0.5)))
+            if clay.UI(clay.ID("FxSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
+            if opt_button("FxDn", "-", true) { audio.effects = max(audio.effects - 0.1, 0) }
+            if opt_button("FxUp", "+", true) { audio.effects = min(audio.effects + 0.1, 1) }
+        }
+        if clay.UI(clay.ID("RowAmbience"))({
+            layout = { childGap = 8, childAlignment = {y = .Center},
+                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
+        }) {
+            opt_row(fmt.tprintf("Ambience: %d%%", int(audio.ambience * 100 + 0.5)))
+            if clay.UI(clay.ID("AmbSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
+            if opt_button("AmbDn", "-", true) { audio.ambience = max(audio.ambience - 0.1, 0) }
+            if opt_button("AmbUp", "+", true) { audio.ambience = min(audio.ambience + 0.1, 1) }
+        }
+        if clay.UI(clay.ID("RowMute"))({
+            layout = { childGap = 8, childAlignment = {y = .Center},
+                       sizing = { clay.SizingGrow(), clay.SizingFit() } },
+        }) {
+            opt_row(fmt.tprintf("Sound (M): %s", audio.muted ? "muted" : "on"))
+            if clay.UI(clay.ID("MuteSpacer"))({ layout = { sizing = { clay.SizingGrow(), clay.SizingFit() } } }) {}
+            if opt_button("SndOn",  "on",   !audio.muted) { audio.muted = false }
+            if opt_button("SndOff", "mute", audio.muted)  { audio.muted = true  }
         }
 
         clay.TextDynamic("press O to close", clay.TextConfig({

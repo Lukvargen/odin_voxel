@@ -138,6 +138,7 @@ fox_update :: proc(gs: ^Game_State, e: ^Entity, dt, t: f32) {
     near := to_cam.x*to_cam.x + to_cam.z*to_cam.z < FOX_FLEE_DIST * FOX_FLEE_DIST
     if near {
         // Run directly away. dir = {-sin(yaw), 0, cos(yaw)} = -to_cam.
+        if e.state != .Flee { play_at(.Fox, e.pos + {0, 0.5, 0}, 0.5, vary(0.1), 10) }
         e.state = .Flee
         e.wander_yaw = math.atan2(to_cam.x, -to_cam.z)
         e.next_think = t + rand.float32_range(1.5, 2.5)
