@@ -20,6 +20,7 @@ Game_State :: struct {
     player_anim: Player_Anim, // third-person body animation (creatures.odin)
     combat: Combat, // the sword, health, combos (combat.odin)
     slimes: Slimes, // slimes, goo, damage numbers (slime.odin)
+    enemies: Enemies, // skeletons, goblins, orcs; landmark guards (enemies.odin)
     sky_thermals:      [MAX_SKY_THERMALS]Sky_Thermal, // strong thermals near the player, for cumulus (glider.odin)
     sky_thermal_count: int,
     sky_thermal_cell:  [2]int,
@@ -170,6 +171,9 @@ main :: proc() {
             case a == "look": bench_look = true
             case a == "ui": bench_ui = true
             case a == "landmarks": bench_landmarks = true
+            case a == "slimes": bench_slimes = true
+            case a == "enemies": bench_enemies = true
+            case a == "fight": bench_fight = true
             case a == "build": bench_build = true
             case a == "combat": bench_combat = true
             case strings.has_prefix(a, "hour="):
@@ -336,6 +340,9 @@ main :: proc() {
                     slime_debug_spawn(&gs)
                 case SDL.K_F7:
                     slimes_clear(&gs)
+                    enemies_clear(&gs)
+                case SDL.K_F8:
+                    enemy_debug_spawn(&gs)
                 case SDL.K_1 ..= SDL.K_9:
                     if gs.combat.sword { combat_toggle_sword(&gs) } // back to building
                     hotbar_select(&gs, int(key - SDL.K_1))
@@ -446,6 +453,7 @@ main :: proc() {
         }
         combat_post_update(&gs, world_dt)
         slimes_update(&gs, world_dt)
+        enemies_update(&gs, world_dt)
         glider_view_update(&gs, dt)
         combat_view_update(&gs, dt, world_dt)
 

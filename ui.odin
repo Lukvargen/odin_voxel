@@ -727,6 +727,27 @@ combat_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
 
     health_bar(gs, w, h)
 
+    // A thin health bar over an enemy for a while after it's hit.
+    for &en, i in gs.enemies.list {
+        if !en.alive || en.bar <= 0 || en.state == .Dead { continue }
+        sp := ENEMY_SPECS[en.kind]
+        x, y, ok := glider_project(cam, en.pos + {0, sp.height + 0.35, 0} - eye, w, h)
+        if !ok { continue }
+        a := clamp(en.bar * 2, 0, 1)
+        BW :: f32(54)
+        frac := clamp(en.hp / sp.hp, 0, 1)
+        if clay.UI(clay.ID("EnBar", u32(i)))({
+            layout = {sizing = {clay.SizingFixed(BW), clay.SizingFixed(6)}, padding = {1, 1, 1, 1}},
+            floating = {attachTo = .Root, offset = {x - BW / 2, y}, zIndex = 6, attachment = {.LeftTop, .LeftTop}, pointerCaptureMode = .Passthrough},
+            backgroundColor = fade({17, 17, 27, 200}, a),
+        }) {
+            if clay.UI()({
+                layout = {sizing = {clay.SizingFixed((BW - 2) * frac), clay.SizingGrow({})}},
+                backgroundColor = fade({214, 72, 56, 255}, a),
+            }) {}
+        }
+    }
+
     for n, i in s.numbers {
         if n.life <= 0 { continue }
         x, y, ok := glider_project(cam, n.pos - eye, w, h)
@@ -1171,6 +1192,9 @@ debug_layout :: proc(gs: ^Game_State) {
         alive := 0
         for sl in gs.slimes.list { if sl.alive { alive += 1 } }
         line("slimes", fmt.tprintf("%d   F6 spawn, F7 clear", alive))
+        en_alive := 0
+        for e in gs.enemies.list { if e.alive { en_alive += 1 } }
+        line("enemies", fmt.tprintf("%d   F8 spawn", en_alive))
     }
 }
 
@@ -1525,7 +1549,7 @@ menu_controls :: proc(gs: ^Game_State) {
     tools    := Group{"Area and shape", {"Area: hold L / R", "drag a box, let go", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "area height; shape size", "Shift+wheel", "shape height", "Alt+wheel", "turn the shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V", "cycle back"}}
     fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll"}}
     gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
-    other    := Group{"Other", {"F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F7", "slimes (debug)"}}
+    other    := Group{"Other", {"F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)"}}
     cols := controls_columns(gs) == 3 ? [][]Group{{moving, building}, {tools, gliding}, {fighting, other}} : [][]Group{{moving, building, fighting}, {tools, gliding, other}}
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 22}}) {
         for col in cols {

@@ -495,7 +495,6 @@ slimes_shockwave :: proc(s: ^Slimes, pos: [3]f32) {
     }
 }
 
-@(private="file")
 splat :: proc(s: ^Slimes, c, color, knock: [3]f32, count: int, force: f32) {
     dir := la.normalize0(knock)
     for _ in 0 ..< count {
@@ -506,13 +505,11 @@ splat :: proc(s: ^Slimes, c, color, knock: [3]f32, count: int, force: f32) {
     }
 }
 
-@(private="file")
 add_goo :: proc(s: ^Slimes, g: Goo) {
     s.goo[s.next_goo] = g
     s.next_goo = (s.next_goo + 1) % MAX_GOO
 }
 
-@(private="file")
 add_number :: proc(s: ^Slimes, pos: [3]f32, damage: f32, boosted: bool) {
     j := [3]f32{rand.float32_range(-0.3, 0.3), 0, rand.float32_range(-0.3, 0.3)}
     s.numbers[s.next_number] = {pos = pos + j, life = 0.9, value = int(math.round(damage)), boosted = boosted, big = damage >= 25}

@@ -78,3 +78,95 @@ bench_find_landmark :: proc(kind: Landmark_Kind) -> (Landmark, bool) {
     return {}, false
 }
 
+// `bench slimes [hour=h] [dir]`: one slime of each size and a spread of
+// colours lined up on open plains, seen from a few metres, by day and night.
+bench_slimes: bool
+
+bench_slimes_run :: proc(gs: ^Game_State) {
+    x, z, found := bench_find_biome(.Plains)
+    if !found { x, z = 0, 0 }
+    bench_teleport(gs, {f32(x) + 0.5, f32(surface_height_at(x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5})
+    x, z = bench_open_ground(gs, x, z)
+    cam := &gs.camera
+    cam.fly_mode = true
+    gs.slimes = {}
+    gs.slimes.spawn_timer = 1e9
+    Put :: struct { size: Slime_Size, dx, dz: f32, color: int }
+    puts := []Put{
+        {.Big, -2.6, 7, 0}, {.Medium, 0.4, 6.0, 2}, {.Small, 2.2, 5.2, 3},
+        {.Medium, 3.8, 8.5, 4}, {.Small, -0.8, 4.4, 1}, {.Big, 5.5, 12, 4},
+    }
+    for p in puts {
+        px, pz := f32(x) + 0.5 + p.dx, f32(z) + 0.5 + p.dz
+        g := bench_ground(gs, int(math.floor(px)), int(math.floor(pz))) + 1
+        if sl := slime_spawn(&gs.slimes, p.size, {px, f32(g), pz}, {}, SLIME_COLORS[p.color]); sl != nil {
+            sl.age, sl.yaw = 10, math.PI
+        }
+    }
+    // Settle them onto the ground (no hops: the timers stay far off).
+    for &sl in gs.slimes.list { sl.timer = 1e9 }
+    for _ in 0 ..< 60 { slimes_update(gs, 1.0 / 60.0) }
+    cam.pos = {f32(x) + 0.5, f32(bench_ground(gs, x, z)) + 2.6, f32(z) + 0.5}
+    cam.yaw, cam.pitch = 15, -12
+    bench_measure(gs)
+    bench_screenshot(gs, fmt.tprintf("%s/slimes.bmp", bench_shot_dir))
+    cam.pos += {1.2, -0.6, 3.2}
+    cam.yaw, cam.pitch = 5, -14
+    bench_measure(gs)
+    bench_screenshot(gs, fmt.tprintf("%s/slimes_close.bmp", bench_shot_dir))
+}
+
+// `bench enemies [hour=h] [dir]`: each enemy kind standing, winding up and
+// striking, and a fallen skeleton, lined up on open plains.
+bench_enemies: bool
+
+bench_enemies_run :: proc(gs: ^Game_State) {
+    x, z, found := bench_find_biome(.Plains)
+    if !found { x, z = 0, 0 }
+    bench_teleport(gs, {f32(x) + 0.5, f32(surface_height_at(x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5})
+    x, z = bench_open_ground(gs, x, z)
+    cam := &gs.camera
+    cam.fly_mode = true
+    gs.slimes = {}
+    gs.slimes.spawn_timer = 1e9
+    base := [3]f32{f32(x) + 0.5, f32(bench_ground(gs, x, z)) + 1, f32(z) + 0.5}
+    Row :: struct { name: string, state: Enemy_State, t: f32 }
+    rows := []Row{{"idle", .Idle, 0}, {"windup", .Windup, 0.85}, {"strike", .Strike, 0.5}, {"dead", .Dead, 0.6}}
+    for row in rows {
+      for swing in Swing {
+        if (row.state == .Idle || row.state == .Dead) && swing == .Slash { continue }
+        for &e in gs.enemies.list { e.alive = false }
+        for kind, i in Enemy_Kind {
+            px, pz := base.x + f32(i - 1) * 2.4, base.z + 5
+            g := bench_ground(gs, int(math.floor(px)), int(math.floor(pz))) + 1
+            e := enemy_spawn(gs, kind, {px, f32(g), pz})
+            if e == nil { continue }
+            e.yaw, e.on_ground, e.state, e.swing = math.PI + 0.35 * f32(i - 1), true, row.state, swing
+            sp := ENEMY_SPECS[kind]
+            #partial switch row.state {
+            case .Windup: e.timer = sp.windup * (1 - row.t)
+            case .Strike: e.timer = sp.strike * (1 - row.t)
+            case .Dead:   e.death = row.t
+            }
+        }
+        cam.pos = base + {0, 1.5, 0}
+        cam.yaw, cam.pitch = 0, -8
+        bench_measure(gs)
+        bench_screenshot(gs, fmt.tprintf("%s/enemies_%s_%v.bmp", bench_shot_dir, row.name, swing))
+      }
+    }
+    // Close-ups: one at a time, a little to the side, half wound up.
+    for kind in Enemy_Kind {
+        for &e in gs.enemies.list { e.alive = false }
+        sp := ENEMY_SPECS[kind]
+        px, pz := base.x, base.z + 2.3
+        g := bench_ground(gs, int(math.floor(px)), int(math.floor(pz))) + 1
+        if e := enemy_spawn(gs, kind, {px, f32(g), pz}); e != nil {
+            e.yaw, e.on_ground, e.state, e.timer = math.PI - 0.35, true, .Windup, sp.windup * 0.6
+        }
+        cam.pos = base + {0, sp.height * 0.8, 0}
+        cam.yaw, cam.pitch = 0, -4
+        bench_measure(gs)
+        bench_screenshot(gs, fmt.tprintf("%s/close_%v.bmp", bench_shot_dir, kind))
+    }
+}

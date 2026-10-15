@@ -334,6 +334,19 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
                 return
             }
         }
+        for &en in gs.enemies.list {
+            if !en.alive || en.state == .Dead || en.hit_id == c.attack_id { continue }
+            r := enemy_hit_radius(&en)
+            d := enemy_center(&en) - (feet + {0, 0.3, 0})
+            if la.length(d.xz) < r + PLAYER_HALF_W + 0.4 && d.y > -r - 1.6 && d.y < r + 0.8 {
+                hit_enemy(gs, &en, .Plunge)
+                cam.velocity.y = PLUNGE_BOUNCE
+                cam.on_ground = false
+                c.attack, c.chain = .None, .None
+                c.rise_used, c.air_dodge_used = false, false
+                return
+            }
+        }
         if grounded(gs) || c.attack_time > 4 {
             start_attack(gs, .Plunge_Land)
             slimes_shockwave(s, feet)
@@ -342,6 +355,12 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
                 if !sl.alive { continue }
                 if la.length(slime_center(&sl) - feet) < PLUNGE_RADIUS + slime_radius(sl.size) {
                     hit_slime(gs, &sl, .Plunge_Land)
+                }
+            }
+            for &en in gs.enemies.list {
+                if !en.alive || en.state == .Dead { continue }
+                if la.length(enemy_center(&en) - feet) < PLUNGE_RADIUS + enemy_hit_radius(&en) {
+                    hit_enemy(gs, &en, .Plunge_Land)
                 }
             }
             slow_down(c, SLOWMO_HEAVY)
@@ -356,7 +375,11 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
             fwd := camera_flat_forward(cam^)
             for &sl in s.list {
                 if !sl.alive || sl.hit_id == c.attack_id { continue }
-                if sword_reaches(&sl, eye, fwd, cam.pitch * DEG, a) { hit_slime(gs, &sl, c.attack) }
+                if sword_reaches(slime_center(&sl), slime_radius(sl.size), eye, fwd, cam.pitch * DEG, a) { hit_slime(gs, &sl, c.attack) }
+            }
+            for &en in gs.enemies.list {
+                if !en.alive || en.state == .Dead || en.hit_id == c.attack_id { continue }
+                if sword_reaches(enemy_center(&en), enemy_hit_radius(&en), eye, fwd, cam.pitch * DEG, a) { hit_enemy(gs, &en, c.attack) }
             }
         }
     }
@@ -431,6 +454,13 @@ lunge :: proc(gs: ^Game_State) {
         dist := la.length(d) - slime_radius(sl.size)
         if dist < best && la.dot(la.normalize0(d), fwd) > 0.75 { best, dir = dist, la.normalize0(d) }
     }
+    for &en in gs.enemies.list {
+        if !en.alive || en.state == .Dead { continue }
+        d := enemy_center(&en) - cam.pos
+        d.y = 0
+        dist := la.length(d) - ENEMY_SPECS[en.kind].radius
+        if dist < best && la.dot(la.normalize0(d), fwd) > 0.75 { best, dir = dist, la.normalize0(d) }
+    }
     want := min((best - LUNGE_STOP) * 6, LUNGE_SPEED)
     if dir != 0 && want > 0 {
         along := cam.velocity.x * dir.x + cam.velocity.z * dir.z
@@ -442,9 +472,7 @@ lunge :: proc(gs: ^Game_State) {
 
 // Close enough, within the arc ahead, and not far above or below the view.
 @(private="file")
-sword_reaches :: proc(sl: ^Slime, eye, fwd: [3]f32, pitch: f32, a: Attack_Info) -> bool {
-    c := slime_center(sl)
-    r := slime_radius(sl.size)
+sword_reaches :: proc(c: [3]f32, r: f32, eye, fwd: [3]f32, pitch: f32, a: Attack_Info) -> bool {
     d := c - eye
     dist := la.length(d)
     if dist - r > a.reach { return false }
@@ -455,26 +483,35 @@ sword_reaches :: proc(sl: ^Slime, eye, fwd: [3]f32, pitch: f32, a: Attack_Info) 
     return abs(math.atan2(d.y, flat) - pitch) < 65 * DEG + widen
 }
 
+// How hard a swing of `kind` lands on something centred at `at`: damage
+// with the combo and speed bonuses, and the knock away from the player.
 @(private="file")
-hit_slime :: proc(gs: ^Game_State, sl: ^Slime, kind: Attack_Kind) {
+hit_amount :: proc(gs: ^Game_State, kind: Attack_Kind, at: [3]f32) -> (damage: f32, knock: [3]f32, boosted: bool) {
     c := &gs.combat
     cam := &gs.camera
     a := ATTACKS[kind]
-    sl.hit_id = c.attack_id
-
     speed := la.length(cam.velocity.xz)
     speed_bonus := clamp((speed - SPEED_DAMAGE_FROM) / SPEED_DAMAGE_FROM, 0, 1) * SPEED_DAMAGE_MAX
     combo_bonus := min(f32(c.combo) * COMBO_DAMAGE_STEP, COMBO_DAMAGE_MAX)
-    damage := a.damage * (1 + combo_bonus + speed_bonus)
+    damage = a.damage * (1 + combo_bonus + speed_bonus)
 
-    away := slime_center(sl) - cam.pos
+    away := at - cam.pos
     away.y = 0
     away = la.normalize0(away)
     if away == 0 { away = camera_flat_forward(cam^) }
-    knock := away * a.knock[0] + {0, a.knock[1], 0}
+    knock = away * a.knock[0] + {0, a.knock[1], 0}
     knock.xz += cam.velocity.xz * 0.35 // moving fast carries into the hit
+    return damage, knock, speed_bonus > 0.2
+}
 
-    killed := slime_damage(&gs.slimes, sl, damage, knock, speed_bonus > 0.2)
+// What a landed hit does to the swing and the view: combo, hit stop,
+// slow-down, shake, and the lift of an air or rising slash. freeze is the
+// target's own hit-stop timer.
+@(private="file")
+hit_feedback :: proc(gs: ^Game_State, kind: Attack_Kind, killed: bool, freeze: ^f32) {
+    c := &gs.combat
+    cam := &gs.camera
+    a := ATTACKS[kind]
     c.combo += 1
     c.best_combo = max(c.best_combo, c.combo)
     c.combo_timer = COMBO_TIMEOUT
@@ -483,7 +520,7 @@ hit_slime :: proc(gs: ^Game_State, sl: ^Slime, kind: Attack_Kind) {
     if killed {
         slow_down(c, SLOWMO_KILL)
     } else {
-        sl.freeze = a.hitstop + 0.02 // shudders on the blade, then flies
+        freeze^ = a.hitstop + 0.02 // shudders on the blade, then flies
         if a.hitstop >= 0.08 { slow_down(c, SLOWMO_HEAVY) }
     }
     gs.glider.shake = min(gs.glider.shake + a.shake + (killed ? 0.3 : 0), 1.5)
@@ -500,6 +537,22 @@ hit_slime :: proc(gs: ^Game_State, sl: ^Slime, kind: Attack_Kind) {
             c.rise_used = true
         }
     }
+}
+
+@(private="file")
+hit_slime :: proc(gs: ^Game_State, sl: ^Slime, kind: Attack_Kind) {
+    sl.hit_id = gs.combat.attack_id
+    damage, knock, boosted := hit_amount(gs, kind, slime_center(sl))
+    killed := slime_damage(&gs.slimes, sl, damage, knock, boosted)
+    hit_feedback(gs, kind, killed, &sl.freeze)
+}
+
+@(private="file")
+hit_enemy :: proc(gs: ^Game_State, en: ^Enemy, kind: Attack_Kind) {
+    en.hit_id = gs.combat.attack_id
+    damage, knock, boosted := hit_amount(gs, kind, enemy_center(en))
+    killed := enemy_damage(gs, en, damage, knock, boosted)
+    hit_feedback(gs, kind, killed, &en.freeze)
 }
 
 // The player is hit. False if it didn't land (dodging, just hurt).
@@ -533,6 +586,7 @@ combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32) -> bool {
                 sl.state, sl.timer = .Idle, 3
             }
         }
+        enemies_scatter(gs, cam.pos)
         ui_toast(gs, "Knocked out! Back on your feet...", 2.5)
     }
     return true

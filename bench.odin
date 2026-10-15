@@ -104,12 +104,24 @@ bench_run :: proc(gs: ^Game_State) {
         bench_ui_run(gs)
         return
     }
-    if bench_landmarks {
-        bench_landmarks_run(gs)
-        return
-    }
     if bench_build {
         bench_build_run(gs)
+        return
+    }
+    if bench_fight {
+        bench_fight_run(gs)
+        return
+    }
+    if bench_enemies {
+        bench_enemies_run(gs)
+        return
+    }
+    if bench_slimes {
+        bench_slimes_run(gs)
+        return
+    }
+    if bench_landmarks {
+        bench_landmarks_run(gs)
         return
     }
 

@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import la "core:math/linalg"
 import "core:strings"
 import SDL "vendor:sdl3"
 
@@ -23,28 +24,9 @@ bench_combat_run :: proc(gs: ^Game_State) {
     x, z, found := bench_find_biome(.Plains)
     if !found { x, z = int(gs.camera.pos.x), int(gs.camera.pos.z) }
     bench_teleport(gs, {f32(x) + 0.5, f32(surface_height_at(x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5})
-    // Open ground: nothing standing on it for a few voxels around and ahead.
-    ground :: proc(gs: ^Game_State, x, z: int) -> int {
-        for y := 200; y > 0; y -= 1 { if solid_at(gs, x, y, z) { return y } }
-        return 0
-    }
-    open :: proc(gs: ^Game_State, x, z: int) -> bool {
-        g := ground(gs, x, z)
-        if g <= SEA_LEVEL { return false }
-        for dz in -3 ..= 14 { for dx in -5 ..= 5 {
-            gg := ground(gs, x + dx, z + dz)
-            if abs(gg - g) > 1 { return false }
-        }}
-        return true
-    }
-    search: for r in 0 ..< 60 {
-        for dx in -r ..= r { for dz in -r ..= r {
-            if max(abs(dx), abs(dz)) != r { continue }
-            if open(gs, x + dx * 4, z + dz * 4) { x, z = x + dx * 4, z + dz * 4; break search }
-        }}
-    }
+    x, z = bench_open_ground(gs, x, z)
     cam := &gs.camera
-    cam.pos = {f32(x) + 0.5, f32(ground(gs, x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5}
+    cam.pos = {f32(x) + 0.5, f32(bench_ground(gs, x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5}
     cam.fly_mode, cam.velocity = false, {}
     cam.yaw, cam.pitch = 0, -8
     gs.mouse_locked = true
@@ -124,4 +106,117 @@ bench_combat_run :: proc(gs: ^Game_State) {
     }
     c := gs.combat
     fmt.printf("bench combat: best combo %d, %d slimes popped, hp %.0f; wrote %d shots to %s\n", c.best_combo, c.kills, c.hp, shot, dir)
+}
+
+// Top solid voxel of the loaded world at (x, z).
+bench_ground :: proc(gs: ^Game_State, x, z: int) -> int {
+    for y := 200; y > 0; y -= 1 { if solid_at(gs, x, y, z) { return y } }
+    return 0
+}
+
+// The nearest open, level ground to (x, z): nothing standing on it for a
+// few voxels around and ahead (+z).
+bench_open_ground :: proc(gs: ^Game_State, x, z: int) -> (int, int) {
+    open :: proc(gs: ^Game_State, x, z: int) -> bool {
+        g := bench_ground(gs, x, z)
+        if g <= SEA_LEVEL { return false }
+        for dz in -3 ..= 14 { for dx in -5 ..= 5 {
+            gg := bench_ground(gs, x + dx, z + dz)
+            if abs(gg - g) > 1 { return false }
+        }}
+        return true
+    }
+    for r in 0 ..< 60 {
+        for dx in -r ..= r { for dz in -r ..= r {
+            if max(abs(dx), abs(dz)) != r { continue }
+            if open(gs, x + dx * 4, z + dz * 4) { return x + dx * 4, z + dz * 4 }
+        }}
+    }
+    return x, z
+}
+
+// `bench fight`: no pictures. For each enemy kind: one spawned 7 voxels in
+// front of a player standing still with the sword out; logs its state
+// changes and the player's health for 5 s; then the player swings at it
+// (facing it) until it dies, logging how long that took.
+bench_fight: bool
+
+bench_fight_run :: proc(gs: ^Game_State) {
+    x, z, found := bench_find_biome(.Plains)
+    if !found { x, z = 0, 0 }
+    bench_teleport(gs, {f32(x) + 0.5, f32(surface_height_at(x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5})
+    x, z = bench_open_ground(gs, x, z)
+    cam := &gs.camera
+    dt := f32(1.0 / 60.0)
+    gs.slimes = {}
+    gs.slimes.spawn_timer = 1e9
+    for kind in Enemy_Kind {
+        for &e in gs.enemies.list { e.alive = false }
+        gs.enemies.spawn_timer, gs.enemies.site_timer = 1e9, 1e9
+        cam.pos = {f32(x) + 0.5, f32(bench_ground(gs, x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5}
+        cam.fly_mode, cam.velocity, cam.yaw, cam.pitch = false, {}, 0, -5
+        combat_init(&gs.combat)
+        combat_toggle_sword(gs)
+        g := bench_ground(gs, x, z + 7) + 1
+        e := enemy_spawn(gs, kind, {f32(x) + 0.5, f32(g), f32(z) + 7.5})
+        if e == nil { continue }
+        e.yaw = math.PI
+        last := Enemy_State(255)
+        fmt.printf("fight: %v (hp %.0f)\n", kind, e.hp)
+        killed_at := f32(-1)
+        for f in 0 ..< 60 * 14 {
+            t := f32(f) * dt
+            in_: Combat_Input
+            fighting := t >= 5
+            if fighting && e.alive && e.state != .Dead {
+                to := e.pos - cam.pos
+                cam.yaw = math.to_degrees(math.atan2(to.x, to.z))
+                in_.attack = f % 18 == 0
+            }
+            world_dt := combat_world_dt(gs, dt)
+            combat_pre_update(gs, in_, world_dt)
+            camera_update(cam, gs, 0, 0, world_dt, false, false, false, false, false, false, false, false)
+            combat_post_update(gs, world_dt)
+            enemies_update(gs, world_dt)
+            combat_view_update(gs, dt, world_dt)
+            if e.state != last {
+                fmt.printf("  %5.2fs %v  dist %.1f  player hp %.0f  enemy hp %.0f\n", t, e.state, la.length((e.pos - cam.pos).xz), gs.combat.hp, e.hp)
+                last = e.state
+            }
+            if e.state == .Dead && killed_at < 0 { killed_at = t; fmt.printf("  killed after %.2fs of fighting\n", t - 5) }
+            if !e.alive { break }
+        }
+    }
+
+    // Guards: walk up to each kind of landmark and count what turns up.
+    for kind in Landmark_Kind.Tower ..= Landmark_Kind.Camp {
+        lm, ok := bench_find_landmark(kind)
+        if !ok { continue }
+        for &e in gs.enemies.list { e.alive = false }
+        clear(&gs.enemies.sites)
+        gs.enemies.spawn_timer, gs.enemies.site_timer = 1e9, 0
+        bench_teleport(gs, {f32(lm.x) + 30, f32(surface_height_at(lm.x + 30, lm.z)) + 1 + PLAYER_EYE_HEIGHT, f32(lm.z) + 0.5})
+        cam.fly_mode = true // hold still (the AI ignores a flying player)
+        for _ in 0 ..< 30 {
+            gs.enemies.site_timer = 0
+            cam.fly_mode = false
+            enemies_update(gs, dt)
+            cam.fly_mode = true
+        }
+        counts: [Enemy_Kind]int
+        for e in gs.enemies.list { if e.alive && e.guard { counts[e.kind] += 1 } }
+        fmt.printf("site %v at %d,%d: guards %v\n", kind, lm.x, lm.z, counts)
+    }
+
+    // Night: roaming spawns around the player.
+    for &e in gs.enemies.list { e.alive = false }
+    gs.day.hour = 23
+    day_update(gs, 0)
+    cam.fly_mode = false
+    gs.enemies.spawn_timer, gs.enemies.site_timer = 0, 1e9
+    for _ in 0 ..< 60 * 20 { enemies_update(gs, dt) }
+    counts: [Enemy_Kind]int
+    rising := 0
+    for e in gs.enemies.list { if e.alive { counts[e.kind] += 1; if e.nocturnal { rising += 1 } } }
+    fmt.printf("night roamers after 20 s: %v (%d risen from the ground)\n", counts, rising)
 }
