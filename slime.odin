@@ -5,7 +5,7 @@ import "core:math"
 import "core:math/rand"
 import la "core:math/linalg"
 
-// Slimes, Cube World style: bouncy rounded cubes in candy colours that live
+// Slimes, Cube World style: bouncy rounded cubes that live
 // around the player (a handful within SLIME_RANGE, topped up as they die or
 // get left behind).
 //
@@ -55,12 +55,24 @@ SLIME_KINDS := [Slime_Size]Slime_Kind{
     .Big    = {width = 2.0, hp = 95, weight = 2.4, damage = 18, hop_speed = 5,   hop_up = 8.5, hop_every = {0.7, 1.0},  leap_range = 7.5, windup = 0.65},
 }
 
+// The old Cube World hues, a touch softer.
 SLIME_COLORS := [?][3]f32{
-    {0.36, 0.86, 0.34}, // lime
-    {0.28, 0.72, 0.95}, // sky
-    {0.98, 0.48, 0.74}, // bubblegum
-    {1.0, 0.78, 0.26},  // honey
-    {0.66, 0.46, 0.98}, // grape
+    {0.40, 0.78, 0.36}, // lime
+    {0.32, 0.64, 0.86}, // sky
+    {0.88, 0.48, 0.68}, // rose
+    {0.92, 0.72, 0.30}, // honey
+    {0.60, 0.46, 0.88}, // grape
+}
+
+// A colour for a slime spawning on biome b: mostly its land's own hue.
+slime_color_for :: proc(b: Biome) -> [3]f32 {
+    if rand.float32() < 0.35 { return SLIME_COLORS[rand.int_max(len(SLIME_COLORS))] }
+    #partial switch b {
+    case .Desert, .Badlands:         return SLIME_COLORS[3]
+    case .Mountains, .Peaks, .Snowy: return SLIME_COLORS[1]
+    case .Taiga:                     return SLIME_COLORS[4]
+    }
+    return SLIME_COLORS[0]
 }
 
 Slime_State :: enum u8 { Idle, Chase, Windup, Leap, Stunned }
@@ -241,7 +253,7 @@ slime_try_spawn :: proc(gs: ^Game_State, feet: [3]f32) {
         if !solid_at(gs, ix, ground, iz) || solid_at(gs, ix, ground + 1, iz) { continue } // not loaded, or built over
         roll := rand.float32()
         size := roll < 0.45 ? Slime_Size.Big : (roll < 0.85 ? .Medium : .Small)
-        slime_spawn(&gs.slimes, size, {x, f32(ground) + 1.5, z}, {}, SLIME_COLORS[rand.int_max(len(SLIME_COLORS))])
+        slime_spawn(&gs.slimes, size, {x, f32(ground) + 1.5, z}, {}, slime_color_for(terrain_at(ix, iz).biome))
         return
     }
 }
@@ -458,7 +470,7 @@ slime_debug_spawn :: proc(gs: ^Game_State) {
     at := feet + camera_flat_forward(gs.camera) * 4 + {0, 1.5, 0}
     size := debug_next_size
     debug_next_size = size == .Small ? .Big : Slime_Size(int(size) - 1)
-    if sl := slime_spawn(&gs.slimes, size, at, {}, SLIME_COLORS[rand.int_max(len(SLIME_COLORS))]); sl != nil {
+    if sl := slime_spawn(&gs.slimes, size, at, {}, slime_color_for(terrain_at(int(at.x), int(at.z)).biome)); sl != nil {
         sl.yaw = -math.to_radians(gs.camera.yaw) + math.PI // facing you
         ui_toast(gs, fmt.tprintf("Spawned a %v slime", size))
     } else {

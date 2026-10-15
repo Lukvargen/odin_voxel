@@ -5,7 +5,7 @@ import la "core:math/linalg"
 
 PLAYER_EYE_HEIGHT :: f32(1.7)
 PLAYER_HALF_W     :: f32(0.3)
-PLAYER_HEAD_ABOVE :: f32(0.3) // distance from eye to top of head
+PLAYER_HEAD_ABOVE :: f32(0.15) // distance from eye to top of head: 1.85 tall, fits a 2-block gap
 
 GRAVITY        :: f32(36.0)
 JUMP_SPEED     :: f32(9.0)
@@ -282,7 +282,14 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
     pre_y := new_pos.y
     new_pos, _ = move_axis(gs, new_pos, {0, delta.y, 0})
     if new_pos.y == pre_y {
-        if cam.velocity.y < 0 { cam.on_ground = true }
+        if cam.velocity.y < 0 {
+            cam.on_ground = true
+            // Settle the feet onto the block top: the blocked move leaves
+            // them up to a frame's fall above it, which steals headroom.
+            settled := new_pos
+            settled.y = math.floor(new_pos.y - PLAYER_EYE_HEIGHT + 0.01) + PLAYER_EYE_HEIGHT + 0.001
+            if settled.y <= new_pos.y && !aabb_solid(gs, settled) { new_pos = settled }
+        }
         cam.velocity.y = 0
     }
 

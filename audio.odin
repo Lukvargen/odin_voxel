@@ -298,9 +298,9 @@ surroundings_update :: proc(gs: ^Game_State, dt: f32) {
     // Insects in the grass and the heat; quieter up high.
     crickets, cicadas: f32
     #partial switch audio.biome {
-    case .Plains: crickets, cicadas = 1, 0.15
-    case .Forest: crickets = 0.5
-    case .River:  crickets = 0.6
+    case .Plains: crickets, cicadas = 0.7, 0.15
+    case .Forest: crickets = 0.4
+    case .River:  crickets = 0.45
     case .Beach:  crickets = 0.2
     case .Taiga:  crickets = 0.2
     case .Desert, .Badlands: cicadas = 1
@@ -465,11 +465,11 @@ loops_update :: proc() {
     gains := [Loop_Kind]f32{
         .Wind       = 0.35 * audio.wind,
         .Rush       = 0.6 * audio.rush,
-        .Leaves     = 0.35 * audio.leaves * (1 - audio.cave),
+        .Leaves     = 0.25 * audio.leaves * (1 - audio.cave),
         .Water      = 0.45 * audio.water,
         .Underwater = 0.5 * audio.under,
         .Cave       = 0.4 * audio.cave,
-        .Insects    = 0.18 * max(audio.crickets, audio.cicadas),
+        .Insects    = 0.09 * max(audio.crickets, audio.cicadas),
     }
     for kind in Loop_Kind {
         l := &audio.loops[kind]
@@ -571,18 +571,21 @@ rush_sample :: proc(l: ^Loop) -> (out: [2]f32) {
     return
 }
 
-// Leaves: a bed of high, soft noise and many tiny rustling grains, busier in gusts.
+// Leaves: a bed of soft noise and rustling grains, busier in gusts. Each grain
+// swells in over a few milliseconds (an instant attack on high noise is a
+// click, and hundreds a second of them crackle), and they stay sparse.
 @(private="file")
 leaves_sample :: proc(l: ^Loop) -> (out: [2]f32) {
     gust := gust_at(l.t - 0.8) // the trees answer the wind a moment later
-    rate := (60 + 1200 * gust * gust) / SAMPLE_RATE
+    rate := (30 + 220 * gust * gust) / SAMPLE_RATE
     for ch in 0 ..< 2 {
-        if rand.float32() < rate { l.env[0][ch] = rand.float32_range(0.3, 1) }
-        l.env[0][ch] *= 0.996
+        if rand.float32() < rate { l.env[0][ch] = max(l.env[0][ch], rand.float32_range(0.2, 0.6)) }
+        l.env[0][ch] *= 0.9985
+        l.env[1][ch] += (l.env[0][ch] - l.env[1][ch]) * 0.01 // ~2 ms attack
         n := white()
         l.lp[0][ch] += (n - l.lp[0][ch]) * 0.35
-        l.lp[1][ch] += ((n - l.lp[0][ch]) - l.lp[1][ch]) * 0.5 // high-passed, then the very top softened
-        out[ch] = l.lp[1][ch] * (0.1 + l.env[0][ch]) * (0.3 + 0.7 * gust) * 1.6
+        l.lp[1][ch] += ((n - l.lp[0][ch]) - l.lp[1][ch]) * 0.25 // high-passed, the top softened
+        out[ch] = l.lp[1][ch] * (0.15 + l.env[1][ch]) * (0.3 + 0.7 * gust) * 1.1
     }
     return
 }
