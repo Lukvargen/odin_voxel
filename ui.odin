@@ -65,6 +65,8 @@ UI_State :: struct {
     biome_t:      f32,   // ...for this much longer
     biome_seen:   bool,
 
+    screen_w, screen_h: f32, // this frame's layout size
+
     // FPS smoothing (rolling 60-frame avg).
     frame_times: [60]f32,
     frame_idx:   int,
@@ -261,6 +263,7 @@ ui_draw :: proc(gs: ^Game_State, dt: f32) {
         w, h = i32(tw), i32(th)
     }
     fw, fh := f32(w), f32(h)
+    ui.screen_w, ui.screen_h = fw, fh
     clay.SetLayoutDimensions({fw, fh})
     clay.SetPointerState(transmute(clay.Vector2)ui.mouse_pos, ui.mouse_left_down)
     clay.UpdateScrollContainers(false, {}, dt)
@@ -300,6 +303,7 @@ Ui_Deco :: enum u8 {
     Button, Button_Hover, Button_On, Button_On_Hover,
     Slot, Slot_Hover, Slot_On,
     Tooltip,
+    Shape_Icon, Shape_Icon_On, // a building shape's outline (build HUD)
 }
 
 Ui_Custom :: struct {
@@ -307,12 +311,13 @@ Ui_Custom :: struct {
     block:  Block_Type,
     radius: f32,
     alpha:  f32, // fades the whole thing
+    shape:  Build_Shape,
 }
 
 @(private="file")
-deco :: proc(d: Ui_Deco, block := Block_Type.Air, radius: f32 = 8, alpha: f32 = 1) -> clay.CustomElementConfig {
+deco :: proc(d: Ui_Deco, block := Block_Type.Air, radius: f32 = 8, alpha: f32 = 1, shape := Build_Shape.Sphere) -> clay.CustomElementConfig {
     p := new(Ui_Custom, context.temp_allocator)
-    p^ = {deco = d, block = block, radius = radius, alpha = alpha}
+    p^ = {deco = d, block = block, radius = radius, alpha = alpha, shape = shape}
     return {customData = p}
 }
 
@@ -406,6 +411,61 @@ ui_draw_custom :: proc(rd: ^Clay_SDL3RendererData, rect: SDL.FRect, data: rawptr
         flat(r, rect, d.radius, COLOR_BUTTON_HOVER, {}, 0)
     case .Slot_On:
         flat(r, rect, d.radius, COLOR_SLOT, COLOR_ACCENT, 2)
+    case .Shape_Icon:
+        draw_shape_icon(r, rect, d.shape, COLOR_TEXT_DIM)
+    case .Shape_Icon_On:
+        flat(r, rect, d.radius, COLOR_BUTTON, COLOR_ACCENT, 1)
+        draw_shape_icon(r, rect, d.shape, COLOR_ACCENT)
+    }
+}
+
+// A building shape as a little line drawing, seen from the side and a bit
+// above.
+@(private="file")
+draw_shape_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, shape: Build_Shape, col: clay.Color) {
+    m := rect.w * 0.17
+    box := SDL.FRect{rect.x + m, rect.y + m, rect.w - 2 * m, rect.h - 2 * m}
+    at :: proc(box: SDL.FRect, x, y: f32) -> SDL.FPoint { return {box.x + x * box.w, box.y + y * box.h} }
+    pts: [64]SDL.FPoint
+    line :: proc(r: ^SDL.Renderer, box: SDL.FRect, xy: ..[2]f32) {
+        pts: [16]SDL.FPoint
+        for p, i in xy { pts[i] = at(box, p.x, p.y) }
+        SDL.RenderLines(r, &pts[0], i32(len(xy)))
+    }
+    // An ellipse arc around (cx, cy) from angle t0 to t1 (y down).
+    arc :: proc(r: ^SDL.Renderer, box: SDL.FRect, pts: ^[64]SDL.FPoint, cx, cy, rx, ry: f32, t0: f32 = 0, t1: f32 = 2 * math.PI) {
+        N :: 28
+        for i in 0 ..= N {
+            t := t0 + (t1 - t0) * f32(i) / N
+            pts[i] = at(box, cx + rx * math.cos(t), cy + ry * math.sin(t))
+        }
+        SDL.RenderLines(r, &pts[0], N + 1)
+    }
+    SDL.SetRenderDrawColorFloat(r, col.r / 255, col.g / 255, col.b / 255, col.a / 255)
+    switch shape {
+    case .Sphere:
+        arc(r, box, &pts, 0.5, 0.5, 0.5, 0.5)
+        arc(r, box, &pts, 0.5, 0.5, 0.5, 0.16, 0, math.PI)
+    case .Box:
+        line(r, box, {0, 0.3}, {0.7, 0.3}, {0.7, 1}, {0, 1}, {0, 0.3}, {0.3, 0}, {1, 0}, {0.7, 0.3})
+        line(r, box, {1, 0}, {1, 0.7}, {0.7, 1})
+    case .Cylinder:
+        arc(r, box, &pts, 0.5, 0.14, 0.5, 0.14)
+        arc(r, box, &pts, 0.5, 0.86, 0.5, 0.14, 0, math.PI)
+        line(r, box, {0, 0.14}, {0, 0.86})
+        line(r, box, {1, 0.14}, {1, 0.86})
+    case .Cone:
+        arc(r, box, &pts, 0.5, 0.86, 0.5, 0.14, 0, math.PI)
+        line(r, box, {0, 0.86}, {0.5, 0}, {1, 0.86})
+    case .Pyramid:
+        line(r, box, {0, 0.78}, {0.62, 1}, {1, 0.72}, {0.5, 0}, {0, 0.78})
+        line(r, box, {0.5, 0}, {0.62, 1})
+    case .Torus:
+        arc(r, box, &pts, 0.5, 0.55, 0.5, 0.32)
+        arc(r, box, &pts, 0.5, 0.55, 0.2, 0.09)
+    case .Dome:
+        arc(r, box, &pts, 0.5, 0.86, 0.5, 0.78, math.PI, 2 * math.PI)
+        arc(r, box, &pts, 0.5, 0.86, 0.5, 0.14)
     }
 }
 
@@ -548,7 +608,10 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     }
     if ui.debug_open { debug_layout(gs) }
 
-    if !gliding && ui.screen != .Inventory && !gs.combat.sword { hotbar_layout(gs) }
+    if !gliding && ui.screen != .Inventory && !gs.combat.sword {
+        hotbar_layout(gs)
+        if playing { build_hud_layout(gs, w) }
+    }
     if playing { combat_hud_layout(gs, w, h) }
 
     // Toast.
@@ -611,8 +674,7 @@ compass_layout :: proc(gs: ^Game_State) {
     }
 }
 
-// Nine slots along the bottom, the selected block's name over them, the brush
-// beside them.
+// Nine slots along the bottom, the selected block's name over them.
 @(private="file")
 hotbar_layout :: proc(gs: ^Game_State) {
     ui := &gs.ui
@@ -631,17 +693,6 @@ hotbar_layout :: proc(gs: ^Game_State) {
             custom = deco(.Glass_Soft, radius = 10),
         }) {
             hotbar_slots(gs, false)
-            // Brush: a ring that grows with the edit radius (one block: nothing).
-            if gs.brush_radius > 0 do if clay.UI(clay.ID("Brush"))({
-                layout = {layoutDirection = .TopToBottom, sizing = {clay.SizingFixed(52), clay.SizingFixed(46)},
-                          childAlignment = {x = .Center, y = .Center}, childGap = 3},
-            }) {
-                d := 5 + f32(gs.brush_radius) * 2.2
-                if clay.UI()({layout = {sizing = {clay.SizingFixed(d), clay.SizingFixed(d)}},
-                    backgroundColor = {COLOR_ACCENT.r, COLOR_ACCENT.g, COLOR_ACCENT.b, 50}, cornerRadius = clay.CornerRadiusAll(d / 2),
-                    border = {COLOR_ACCENT, clay.BorderOutside(1)}}) {}
-                text(fmt.tprintf("brush %d", gs.brush_radius), COLOR_TEXT_DIM, 11)
-            }
         }
     }
 }
@@ -846,20 +897,18 @@ draw_block_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, b: Block_Type) {
     SDL.RenderGeometry(r, nil, &verts[0], c.int(nv), &idx[0], c.int(ni))
 }
 
-// The voxel you're pointing at, outlined: what a click will break or build on.
+// What a click would edit, outlined: the voxel you point at (and the brush),
+// the area being dragged out, or the shape (build_tools.odin). Fills are
+// light, clears red, and anything too big to apply amber.
 @(private="file")
 draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
     if !gs.mouse_locked || gs.glider.deployed { return }
-    hit, _, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH)
-    if !ok { return }
+    pv := build_preview(gs)
+    if len(pv.segs) == 0 { return }
+    CLEAR_COL :: [3]u8{255, 110, 95}
     eye := gs.camera.pos + gs.camera.view_offset
     eye.y += gs.camera.step_visual_offset
     fwd, right, up := camera_view_basis(gs.camera)
-    lo := [3]f32{f32(hit.x), f32(hit.y), f32(hit.z)} - 0.002
-    hi := lo + 1.004
-    corner :: proc(lo, hi: [3]f32, k: int) -> [3]f32 {
-        return {k & 1 != 0 ? hi.x : lo.x, k & 2 != 0 ? hi.y : lo.y, k & 4 != 0 ? hi.z : lo.z}
-    }
     // Point -> pixels; the edge is clipped against a near plane first.
     project :: proc(p: [3]f32, fwd, right, up: [3]f32, w, h: f32) -> [2]f32 {
         d := la.dot(p, fwd)
@@ -867,29 +916,181 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
         ny := la.dot(p, up) / d / la.length2(up)
         return {(nx + 1) * 0.5 * w, (1 - ny) * 0.5 * h}
     }
-    dist := la.length((lo + 0.5) - eye)
+    lo, hi := pv.segs[0][0], pv.segs[0][0]
+    for sg in pv.segs { lo, hi = la.min(lo, sg[0], sg[1]), la.max(hi, sg[0], sg[1]) }
+    dist := la.length(la.clamp(eye, lo, hi) - eye)
     alpha := u8(clamp(200 - dist * 2, 70, 200))
+    col := [3]u8{255, 250, 240}
+    if gs.build.tool != .Block {
+        col = pv.fill ? [3]u8{255, 250, 240} : CLEAR_COL
+        if pv.too_big { col = {255, 180, 60} }
+        alpha = max(alpha, 150)
+    }
     r := gs.ui.renderer_data.renderer
     SDL.SetRenderDrawBlendMode(r, {.BLEND})
     NEAR :: 0.05
-    for pass in 0 ..< 2 {
-        // A dark line under a light one.
-        if pass == 0 { SDL.SetRenderDrawColor(r, 0, 0, 0, alpha / 2) } else { SDL.SetRenderDrawColor(r, 255, 250, 240, alpha) }
-        for a in 0 ..< 8 {
-            for bit in ([3]int{1, 2, 4}) {
-                if a & bit != 0 { continue }
-                p, q := corner(lo, hi, a) - eye, corner(lo, hi, a | bit) - eye
-                dp, dq := la.dot(p, fwd), la.dot(q, fwd)
-                if dp < NEAR && dq < NEAR { continue }
-                if dp < NEAR { p = la.lerp(p, q, (NEAR - dp) / (dq - dp)) }
-                if dq < NEAR { q = la.lerp(q, p, (NEAR - dq) / (dp - dq)) }
-                s, e := project(p, fwd, right, up, w, h), project(q, fwd, right, up, w, h)
-                o: f32 = pass == 0 ? 1 : 0
-                SDL.RenderLine(r, s.x + o, s.y + o, e.x + o, e.y + o)
-                if pass == 1 { SDL.RenderLine(r, s.x + 0.5, s.y + 0.5, e.x + 0.5, e.y + 0.5) }
+    // The faint carve outline first, then the main one: a dark line under a
+    // light one.
+    for pass in 0 ..< 3 {
+        segs := pass == 0 ? pv.carve : pv.segs
+        switch pass {
+        case 0: SDL.SetRenderDrawColor(r, CLEAR_COL.r, CLEAR_COL.g, CLEAR_COL.b, u8(f32(alpha) * 0.6))
+        case 1: SDL.SetRenderDrawColor(r, 0, 0, 0, alpha / 2)
+        case 2: SDL.SetRenderDrawColor(r, col.r, col.g, col.b, alpha)
+        }
+        for sg in segs {
+            p, q := sg[0] - eye, sg[1] - eye
+            dp, dq := la.dot(p, fwd), la.dot(q, fwd)
+            if dp < NEAR && dq < NEAR { continue }
+            if dp < NEAR { p = la.lerp(p, q, (NEAR - dp) / (dq - dp)) }
+            if dq < NEAR { q = la.lerp(q, p, (NEAR - dq) / (dp - dq)) }
+            s, e := project(p, fwd, right, up, w, h), project(q, fwd, right, up, w, h)
+            o: f32 = pass == 1 ? 1 : 0
+            SDL.RenderLine(r, s.x + o, s.y + o, e.x + o, e.y + o)
+            if pass == 2 { SDL.RenderLine(r, s.x + 0.5, s.y + 0.5, e.x + 0.5, e.y + 0.5) }
+        }
+    }
+}
+
+// ─── Building tools (build_tools.odin) ─────────────────────────────────────
+
+// The tool panel, bottom left: the three tools (T), the shape (Q), and each
+// setting with the key that changes it. The row the wheel changes right now,
+// by the modifiers held, is lit; with a combo that does nothing, none is.
+// While an area is dragged, its size by the crosshair.
+@(private="file")
+build_hud_layout :: proc(gs: ^Game_State, w: f32) {
+    b := &gs.build
+    live := wheel_target(b.tool, held_mods())
+    if b.dragging { area_size_label(b) }
+    walls := b.wall == 0 ? "solid" : fmt.tprintf("%d thick", b.wall)
+    lift: f32 = w < 1240 ? -86 : -14 // over the hotbar when they'd overlap
+    if clay.UI(clay.ID("BuildTool"))({
+        layout = {layoutDirection = .TopToBottom, padding = clay.PaddingAll(9), childGap = 5, sizing = {clay.SizingFixed(232), clay.SizingFit()}},
+        floating = anchored(.LeftBottom, {14, lift}),
+        custom = deco(.Glass_Soft, radius = 10),
+    }) {
+        if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 3, childAlignment = {y = .Center}}}) {
+            for t in Build_Tool { tool_tab(build_tool_name(t), t == b.tool) }
+            spacer()
+            keycap("T")
+        }
+        switch b.tool {
+        case .Block:
+            param_row("Brush", gs.brush_radius == 0 ? "1 block" : fmt.tprintf("radius %d", gs.brush_radius), "Ctrl", live == .Brush)
+        case .Area:
+            param_row("Height", fmt.tprintf("%d", b.layers + 1), "Wheel", live == .Layers)
+            param_row("Walls", walls, "Ctrl", live == .Walls)
+            param_row("Fill", build_mask_name(b.mask), "V", false)
+            hint("Hold L to clear, R to fill; drag, let go")
+        case .Shape:
+            if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 2, childAlignment = {y = .Center}}}) {
+                for sh in Build_Shape {
+                    if clay.UI()({layout = {sizing = {clay.SizingFixed(25), clay.SizingFixed(25)}},
+                        custom = deco(sh == b.shape ? .Shape_Icon_On : .Shape_Icon, radius = 5, shape = sh)}) {}
+                }
+                spacer()
+                keycap("Q")
+            }
+            param_row("Shape", build_shape_name(b.shape), "", false)
+            param_row("Size", fmt.tprintf("%d", 2 * b.size + 1), "Wheel", live == .Size)
+            param_row("Height", fmt.tprintf("%d", 2 * b.height + 1), "Shift", live == .Height)
+            param_row("Walls", walls, "Ctrl", live == .Walls)
+            param_row("Turn", fmt.tprintf("%d°", b.yaw), "Alt", live == .Turn)
+            param_row("Fill", build_mask_name(b.mask), "V", false)
+            hint("L carve (hold to drill), R place")
+        }
+        if len(b.undo) > 0 || len(b.redo) > 0 {
+            if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, padding = {4, 0, 2, 0}, childGap = 5, childAlignment = {y = .Center}}}) {
+                keycap("Ctrl Z")
+                text(fmt.tprintf("undo %d", len(b.undo)), len(b.undo) > 0 ? COLOR_TEXT_DIM : COLOR_TEXT_FAINT, 11)
+                spacer()
+                keycap("Ctrl Y")
+                text(fmt.tprintf("redo %d", len(b.redo)), len(b.redo) > 0 ? COLOR_TEXT_DIM : COLOR_TEXT_FAINT, 11)
             }
         }
     }
+}
+
+// The dragged area's size and block count (amber when too big), by the
+// crosshair.
+@(private="file")
+area_size_label :: proc(b: ^Build) {
+    r := area_region(b)
+    d := r.hi - r.lo + 1
+    vol := region_volume(r)
+    big := vol > MAX_EDIT_VOXELS
+    if clay.UI(clay.ID("AreaSize"))({
+        layout = {layoutDirection = .TopToBottom, padding = {9, 9, 5, 6}, childGap = 1, childAlignment = {x = .Center}},
+        floating = anchored(.CenterCenter, {0, 40}),
+        custom = deco(.Glass_Soft, radius = 6),
+    }) {
+        text(fmt.tprintf("%d × %d × %d", d.x, d.y, d.z), big ? COLOR_ACCENT_2 : COLOR_TEXT, 14, FONT_ID_TITLE)
+        text(big ? fmt.tprintf("too big: %s of %s", thousands(vol), thousands(MAX_EDIT_VOXELS)) : fmt.tprintf("%s blocks", thousands(vol)),
+            big ? COLOR_ACCENT_2 : COLOR_TEXT_DIM, 11)
+    }
+}
+
+// 1234567 -> "1,234,567".
+thousands :: proc(n: int) -> string {
+    s := fmt.tprintf("%d", abs(n))
+    out := make([dynamic]u8, 0, len(s) + len(s) / 3 + 1, context.temp_allocator)
+    if n < 0 { append(&out, '-') }
+    for i in 0 ..< len(s) {
+        if i > 0 && (len(s) - i) % 3 == 0 { append(&out, ',') }
+        append(&out, s[i])
+    }
+    return string(out[:])
+}
+
+// A key as a small cap: "Ctrl", "Wheel", "T". Lit while it's what the wheel uses.
+@(private="file")
+keycap :: proc(label: string, hot := false) {
+    if label == "" { return }
+    if clay.UI()({
+        layout = {padding = {5, 5, 2, 3}, sizing = {clay.SizingFit({min = 18}), clay.SizingFit()}, childAlignment = {x = .Center}},
+        backgroundColor = hot ? {COLOR_ACCENT.r, COLOR_ACCENT.g, COLOR_ACCENT.b, 56} : {255, 255, 255, 10},
+        cornerRadius = clay.CornerRadiusAll(4),
+        border = {hot ? COLOR_ACCENT : {COLOR_TEXT_DIM.r, COLOR_TEXT_DIM.g, COLOR_TEXT_DIM.b, 80}, clay.BorderOutside(1)},
+    }) {
+        text(label, hot ? COLOR_ACCENT : COLOR_TEXT_DIM, 10, FONT_ID_TITLE)
+    }
+}
+
+// One setting: name, value, and the key that changes it; lit while it's live.
+@(private="file")
+param_row :: proc(name, value, key: string, live: bool) {
+    if clay.UI()({
+        layout = {sizing = {clay.SizingGrow(), clay.SizingFixed(23)}, padding = {6, 3, 0, 0}, childGap = 7, childAlignment = {y = .Center}},
+        backgroundColor = live ? {COLOR_ACCENT.r, COLOR_ACCENT.g, COLOR_ACCENT.b, 30} : {},
+        cornerRadius = clay.CornerRadiusAll(5),
+    }) {
+        if clay.UI()({layout = {sizing = {clay.SizingFixed(2), clay.SizingFixed(12)}},
+            backgroundColor = live ? COLOR_ACCENT : {}, cornerRadius = clay.CornerRadiusAll(1)}) {}
+        if clay.UI()({layout = {sizing = {clay.SizingFixed(46), clay.SizingFit()}}}) {
+            text(name, live ? COLOR_TEXT : COLOR_TEXT_DIM, 12)
+        }
+        text(value, live ? COLOR_ACCENT : COLOR_TEXT, 13, FONT_ID_TITLE)
+        spacer()
+        keycap(key, live)
+    }
+}
+
+@(private="file")
+tool_tab :: proc(label: string, on: bool) {
+    if clay.UI()({
+        layout = {padding = {9, 9, 4, 5}},
+        backgroundColor = on ? COLOR_BUTTON : {},
+        cornerRadius = clay.CornerRadiusAll(5),
+        border = on ? {COLOR_ACCENT, clay.BorderOutside(1)} : {},
+    }) {
+        text(label, on ? COLOR_ACCENT : COLOR_TEXT_DIM, 12, FONT_ID_TITLE)
+    }
+}
+
+@(private="file")
+hint :: proc(s: string) {
+    if clay.UI()({layout = {padding = {6, 0, 1, 0}}}) { text(s, COLOR_TEXT_FAINT, 11) }
 }
 
 // Key, then what it does.
@@ -921,7 +1122,9 @@ help_card :: proc(gs: ^Game_State, a: f32) {
         key_row("Middle click", "pick block", a)
         key_row("1-9, wheel", "hotbar", a)
         key_row("E", "all blocks", a)
+        key_row("T", "block / area / shape", a)
         key_row("B", "brush size", a)
+        key_row("Ctrl Z / Y", "undo / redo", a)
         key_row("G", "hang glider", a)
         key_row("R", "sword", a)
         key_row("F5", "camera", a)
@@ -1160,7 +1363,7 @@ menu_layout :: proc(gs: ^Game_State) {
     ui := &gs.ui
     shade("MenuShade")
     if clay.UI(clay.ID("Menu"))({
-        layout = {layoutDirection = .TopToBottom, padding = clay.PaddingAll(22), childGap = 12, sizing = {clay.SizingFixed(500), clay.SizingFit()}},
+        layout = {layoutDirection = .TopToBottom, padding = clay.PaddingAll(22), childGap = 12, sizing = {clay.SizingFixed(menu_width(gs)), clay.SizingFit()}},
         floating = {attachTo = .Root, zIndex = 20, attachment = {.CenterCenter, .CenterCenter}, pointerCaptureMode = .Capture},
         custom = deco(.Glass, radius = 12),
     }) {
@@ -1178,7 +1381,7 @@ menu_layout :: proc(gs: ^Game_State) {
         switch ui.menu_tab {
         case .Graphics: menu_graphics(gs)
         case .Sound:    menu_sound(gs)
-        case .Controls: menu_controls()
+        case .Controls: menu_controls(gs)
         }
 
         divider()
@@ -1274,21 +1477,42 @@ menu_sound :: proc(gs: ^Game_State) {
     text("M mutes at any time.", COLOR_TEXT_FAINT, 12)
 }
 
+// The menu is wider on the controls tab: its key lists sit in columns.
 @(private="file")
-menu_controls :: proc() {
-    group :: proc(title: string, keys: []string) {
+menu_width :: proc(gs: ^Game_State) -> f32 {
+    if gs.ui.menu_tab != .Controls { return 500 }
+    return controls_columns(gs) == 3 ? 980 : 760
+}
+
+@(private="file")
+controls_columns :: proc(gs: ^Game_State) -> int { return gs.ui.screen_w >= 1040 ? 3 : 2 }
+
+@(private="file")
+menu_controls :: proc(gs: ^Game_State) {
+    Group :: struct { title: string, keys: []string }
+    group :: proc(g: Group) {
         if clay.UI()({layout = {layoutDirection = .TopToBottom, sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 3}}) {
-            heading(title)
-            for i := 0; i + 1 < len(keys); i += 2 {
-                key_row(keys[i], keys[i + 1], 1, 150)
+            heading(g.title)
+            for i := 0; i + 1 < len(g.keys); i += 2 {
+                key_row(g.keys[i], g.keys[i + 1], 1, 108)
             }
         }
     }
-    group("Moving", {"WASD", "move", "Ctrl  or  W W", "sprint", "Shift", "sneak (won't fall off edges)", "Space", "jump; hold to swim up", "Space twice", "fly: Space up, Shift down, Alt fast"})
-    group("Building", {"Left / right click", "break / place (hold to repeat)", "Middle click", "pick the block you look at", "1-9, mouse wheel", "hotbar", "E", "all blocks", "B", "brush size"})
-    group("Fighting", {"R", "draw / put away the sword", "Left click (hold)", "combo; in the air, juggle", "Look down + click", "plunge, from up high", "Right click", "rising slash", "Shift", "dodge roll"})
-    group("Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "Mouse, W/S, A/D", "steer, speed, lean", "Ctrl", "look around"})
-    group("Other", {"F5", "camera view", "F6 / F7", "spawn / clear slimes (debug)", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view"})
+    moving   := Group{"Moving", {"WASD", "move", "Ctrl  or  W W", "sprint", "Shift", "sneak (won't fall off)", "Space", "jump; hold to swim up", "Space twice", "fly: Shift down, Alt fast"}}
+    building := Group{"Building", {"L / R click", "break / place; hold repeats", "Middle click", "pick the block you look at", "1-9, wheel", "hotbar", "E", "all blocks", "B, Ctrl+wheel", "brush size", "T", "tool: block / area / shape", "Ctrl Z / Ctrl Y", "undo / redo"}}
+    tools    := Group{"Area and shape", {"Area: hold L / R", "drag a box, let go", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "area height; shape size", "Shift+wheel", "shape height", "Alt+wheel", "turn the shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V", "cycle back"}}
+    fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll"}}
+    gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
+    other    := Group{"Other", {"F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F7", "slimes (debug)"}}
+    cols := controls_columns(gs) == 3 ? [][]Group{{moving, building}, {tools, gliding}, {fighting, other}} : [][]Group{{moving, building, fighting}, {tools, gliding, other}}
+    if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 22}}) {
+        for col in cols {
+            if clay.UI()({layout = {layoutDirection = .TopToBottom, sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 12}}) {
+                for g in col { group(g) }
+            }
+        }
+    }
+    text("Ctrl and Alt combos only do their own thing. Shift is sneak, so keys without a Shift version ignore it.", COLOR_TEXT_FAINT, 12)
 }
 
 // ─── Block picker (E) ──────────────────────────────────────────────────────

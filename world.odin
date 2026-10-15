@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import la "core:math/linalg"
 import "core:math/noise"
 import "core:slice"
 import "core:time"
@@ -990,19 +991,38 @@ fill_dug_water :: proc(gs: ^Game_State, dug: [][3]int) {
     FEEDS :: [5][3]int{{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}, {0, 1, 0}}
     feeds := FEEDS
     water := u32(Block_Type.Water)
-    for filled := true; filled; {
-        filled = false
-        for p in dug {
-            if get_voxel(gs, p.x, p.y, p.z) != 0 { continue }
-            for d in feeds {
-                q := p + d
-                if get_voxel(gs, q.x, q.y, q.z) != water { continue }
-                col := gs.columns[{p.x >> 3, p.z >> 3}] // CHUNK_VOXELS == 8
-                chunk_set_voxel(&col.chunks[chunk_y_index(p.y >> 3)],
-                                (p.x & 7) + (p.y & 7) * CHUNK_VOXELS + (p.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS, u8(water))
-                filled = true
-                break
-            }
+    // Flood from the dug voxels water already touches; most edits have none.
+    queue := make([dynamic][3]int, context.temp_allocator)
+    for p in dug {
+        if get_voxel(gs, p.x, p.y, p.z) != 0 { continue }
+        for d in feeds {
+            q := p + d
+            if get_voxel(gs, q.x, q.y, q.z) == water { append(&queue, p); break }
+        }
+    }
+    if len(queue) == 0 { return }
+    // Which voxels were dug: a bit per voxel of their bounding box.
+    lo, hi := dug[0], dug[0]
+    for p in dug { lo, hi = la.min(lo, p), la.max(hi, p) }
+    size := hi - lo + 1
+    bits := make([]u64, (size.x * size.y * size.z + 63) / 64, context.temp_allocator)
+    bit :: #force_inline proc(q, lo, size: [3]int) -> int {
+        o := q - lo
+        if o.x < 0 || o.y < 0 || o.z < 0 || o.x >= size.x || o.y >= size.y || o.z >= size.z { return -1 }
+        return o.x + (o.y + o.z * size.y) * size.x
+    }
+    for p in dug { k := bit(p, lo, size); bits[k >> 6] |= 1 << uint(k & 63) }
+    // Water spreads sideways and down, so from p into p - feed.
+    for i := 0; i < len(queue); i += 1 {
+        p := queue[i]
+        if get_voxel(gs, p.x, p.y, p.z) != 0 { continue }
+        col := gs.columns[{p.x >> 3, p.z >> 3}] // CHUNK_VOXELS == 8
+        chunk_set_voxel(&col.chunks[chunk_y_index(p.y >> 3)],
+                        (p.x & 7) + (p.y & 7) * CHUNK_VOXELS + (p.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS, u8(water))
+        for d in feeds {
+            q := p - d
+            k := bit(q, lo, size)
+            if k >= 0 && bits[k >> 6] & (1 << uint(k & 63)) != 0 && get_voxel(gs, q.x, q.y, q.z) == 0 { append(&queue, q) }
         }
     }
 }

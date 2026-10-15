@@ -85,6 +85,7 @@ Game_State :: struct {
     ent_transfer: ^SDL.GPUTransferBuffer, // persistent staging for the per-frame entity data
     ent_upload_size: int,             // bytes staged this frame, copied at the start of gpu_render
 
+    build:         Build, // building tools: block / area / shape, undo (build_tools.odin)
     brush_radius:  int,  // edit sphere radius, 0 = single voxel (B cycles)
     left_pressed:  bool, // single-frame press edges: a click edits at once,
     right_pressed: bool, // holding repeats every EDIT_REPEAT seconds
@@ -167,6 +168,7 @@ main :: proc() {
             case a == "stream": bench_stream = true
             case a == "look": bench_look = true
             case a == "ui": bench_ui = true
+            case a == "build": bench_build = true
             case a == "combat": bench_combat = true
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
@@ -182,6 +184,8 @@ main :: proc() {
     gs.camera.fly_mode = false // start in walk mode
     gs.camera.fov_scale = 1
     combat_init(&gs.combat)
+    build_init(&gs.build)
+    defer build_destroy(&gs.build)
 
     // SDL init
     if !SDL.Init({.VIDEO, .EVENTS}) {
@@ -258,19 +262,54 @@ main :: proc() {
             case .KEY_DOWN:
                 key := event.key.key
                 if event.key.repeat { break }
+                mods := key_mods(event.key.mod)
+                // Ctrl and Alt combos do only what they're bound to, never the
+                // plain key's action (Ctrl+3 isn't 3). Shift is sneak, so keys
+                // with no Shift binding ignore it (build_tools.odin).
+                plain := mods & {.Ctrl, .Alt} == {}
                 // Keys that work on menu screens too.
                 switch key {
                 case SDL.K_ESCAPE:
                     ui_back(&gs) // pause menu, or one screen back
                 case SDL.K_E:
-                    if gs.ui.screen == .None || gs.ui.screen == .Inventory {
+                    if plain && (gs.ui.screen == .None || gs.ui.screen == .Inventory) {
                         ui_open(&gs, gs.ui.screen == .None ? .Inventory : .None)
                     }
                 case SDL.K_M:
+                    if !plain { break }
                     audio_toggle_mute()
                     ui_toast(&gs, audio.muted ? "Sound muted" : "Sound on")
                 }
                 if !playing { break }
+                // Movement keys: the modifiers are movement too (Ctrl sprints,
+                // Alt flies fast, Shift sneaks or dodges), so these never care.
+                switch key {
+                case SDL.K_LSHIFT:
+                    dodge_pressed = gs.combat.sword
+                case SDL.K_W:
+                    press_time := SDL.GetTicks()
+                    if press_time - gs.w_last_press_ms <= DOUBLE_TAP_MS { gs.sprint_latched = true }
+                    gs.w_last_press_ms = press_time
+                case SDL.K_SPACE:
+                    // Glider equipped: Space in mid-air opens / releases the
+                    // wing (and double-tap fly mode is off while it's on).
+                    if gs.glider.equipped && glider_can_toggle(&gs) {
+                        glider_toggle_deploy(&gs)
+                    } else if gs.glider.equipped {
+                        gs.jump_pressed = true
+                    } else {
+                        press_time := SDL.GetTicks()
+                        if gs.space_last_press_ms > 0 && (press_time - gs.space_last_press_ms) <= DOUBLE_TAP_MS {
+                            gs.camera.fly_mode = !gs.camera.fly_mode
+                            gs.camera.velocity = {}
+                            gs.space_last_press_ms = 0
+                        } else {
+                            gs.space_last_press_ms = press_time
+                            gs.jump_pressed = true
+                        }
+                    }
+                }
+                if build_key(&gs, key, mods) || !plain { break }
                 switch key {
                 case SDL.K_F1:
                     gs.ui.hud_hidden = !gs.ui.hud_hidden
@@ -295,43 +334,11 @@ main :: proc() {
                     hotbar_select(&gs, int(key - SDL.K_1))
                 case SDL.K_R:
                     combat_toggle_sword(&gs)
-                case SDL.K_LSHIFT:
-                    dodge_pressed = gs.combat.sword
-                case SDL.K_B:
-                    // Brush sizes for big edits; 0 is one block.
-                    BRUSHES :: [6]int{0, 1, 2, 3, 5, 8}
-                    brushes := BRUSHES
-                    next := 0
-                    for r, i in brushes { if r == gs.brush_radius { next = (i + 1) % len(brushes) } }
-                    gs.brush_radius = brushes[next]
-                    ui_toast(&gs, gs.brush_radius == 0 ? "Brush: one block" : fmt.tprintf("Brush: radius %d", gs.brush_radius))
                 case SDL.K_G:
                     if gs.glider.deployed { glider_toggle_deploy(&gs) }
                     gs.glider.equipped = !gs.glider.equipped
                     if gs.glider.equipped { gs.camera.fly_mode = false }
                     ui_toast(&gs, gs.glider.equipped ? "Hang glider: jump, then Space in the air" : "Hang glider put away")
-                case SDL.K_W:
-                    press_time := SDL.GetTicks()
-                    if press_time - gs.w_last_press_ms <= DOUBLE_TAP_MS { gs.sprint_latched = true }
-                    gs.w_last_press_ms = press_time
-                case SDL.K_SPACE:
-                    // Glider equipped: Space in mid-air opens / releases the
-                    // wing (and double-tap fly mode is off while it's on).
-                    if gs.glider.equipped && glider_can_toggle(&gs) {
-                        glider_toggle_deploy(&gs)
-                    } else if gs.glider.equipped {
-                        gs.jump_pressed = true
-                    } else {
-                        press_time := SDL.GetTicks()
-                        if gs.space_last_press_ms > 0 && (press_time - gs.space_last_press_ms) <= DOUBLE_TAP_MS {
-                            gs.camera.fly_mode = !gs.camera.fly_mode
-                            gs.camera.velocity = {}
-                            gs.space_last_press_ms = 0
-                        } else {
-                            gs.space_last_press_ms = press_time
-                            gs.jump_pressed = true
-                        }
-                    }
                 }
 
             case .MOUSE_MOTION:
@@ -399,10 +406,11 @@ main :: proc() {
             gs.light_dir = fwd
         }
 
-        // The wheel walks the hotbar (down = next).
+        // The wheel walks the hotbar (down = next) or sizes the current
+        // tool (up = bigger), by the modifiers held (build_tools.odin).
         if wheel_dy != 0 && gs.mouse_locked && !gs.glider.deployed {
             if gs.combat.sword { combat_toggle_sword(&gs) }
-            hotbar_select(&gs, (gs.hotbar_slot + (wheel_dy < 0 ? 1 : HOTBAR_SLOTS - 1)) % HOTBAR_SLOTS)
+            build_wheel(&gs, wheel_dy > 0 ? 1 : -1, held_mods())
         }
 
         // A solid hit freezes the world for a few frames (hit stop); the
@@ -461,39 +469,8 @@ main :: proc() {
         integrate_far_tiles(&gs)
         stitch_pending_columns(&gs)
 
-        // Edits, Minecraft style: left breaks, right places. A click edits at
-        // once; holding the button repeats every EDIT_REPEAT seconds. The
-        // brush radius (B) applies to both; torches are always one block.
-        gs.edit_timer -= dt
-        breaking := gs.left_pressed  || (gs.left_held  && gs.edit_timer <= 0)
-        placing  := gs.right_pressed || (gs.right_held && gs.edit_timer <= 0)
-        if gs.mouse_locked && !gs.glider.deployed && !gs.combat.sword && (breaking || placing) {
-            gs.edit_timer = EDIT_REPEAT
-            fwd := camera_forward(gs.camera)
-            hit, nrm, hit_ok := raycast_voxel(&gs, gs.camera.pos, fwd, REACH)
-            if hit_ok {
-                target := hit
-                block  := Block_Type.Air
-                if !breaking {
-                    target = {hit[0] + nrm[0], hit[1] + nrm[1], hit[2] + nrm[2]}
-                    block  = gs.selected_block
-                }
-                radius := block == .Torch ? 0 : gs.brush_radius
-                // Don't build a single block into yourself.
-                if block == .Air || radius > 0 || !aabb_hits_voxel(gs.camera.pos, target) {
-                    old := Block_Type(u8(get_voxel(&gs, target[0], target[1], target[2])))
-                    dirty: map[int]bool
-                    defer delete(dirty)
-                    changed: [dynamic][3]int
-                    defer delete(changed)
-                    edit_sphere(&gs, target, block, &dirty, &changed, radius)
-                    if len(changed) > 0 { audio_edit(target, block, old, radius) }
-                    light_on_edit(&gs, changed[:])
-                    for slot in dirty { gpu_sync_slot(&gs, slot) }
-                    far_update_edited(&gs, changed[:])
-                }
-            }
-        }
+        // Edits with the current tool (build_tools.odin).
+        build_update(&gs, dt)
 
         flush_gpu_uploads(&gs)
         entities_update(&gs, world_dt)
