@@ -112,12 +112,13 @@ float3 hash33i(int3 v) {
 //   cbuffer CameraUniforms { ... u_light_dir_raw ... }  (only sun_tint_d uses it indirectly via arg)
 
 // Colour of the light along Ln (the sun by day, the moon at night: see
-// u_sun_true). Sun: orange at the horizon, golden through the afternoon, near
-// white only high overhead. Moon: cool silver-blue.
+// u_sun_true). Sun: orange at the horizon, golden through the afternoon,
+// still a warm cream high overhead (white noon light washes the world out).
+// Moon: cool silver-blue.
 float3 sun_tint_d(float3 Ln) {
     float elev = clamp(Ln.y, 0.0, 1.0);
     float3 c = lerp(float3(1.0, 0.42, 0.10), float3(1.0, 0.85, 0.66), smoothstep(0.0, 0.30, elev));
-    c = lerp(c, float3(1.0, 0.96, 0.90), smoothstep(0.45, 0.95, elev));
+    c = lerp(c, float3(1.0, 0.92, 0.80), smoothstep(0.45, 0.95, elev));
     return lerp(c, float3(0.55, 0.68, 1.0), u_sun_true.w);
 }
 

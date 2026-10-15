@@ -41,7 +41,7 @@ Camera_Uniform :: struct #packed {
     cave_factor:    f32,   // 0 surface .. 1 deep underground (CPU-smoothed)
     sun_intensity:  f32,   // sun direct-light multiplier
     far_enabled:    i32,
-    ent_debug:      i32,   // 1/2 = bench: skip entity view rays / shadows; 4 = no cumulus (bench or options)
+    ent_debug:      i32,   // 1/2 = bench: skip entity view rays / shadows; 4 = no cumulus (bench or options); 8/16 = bench: sky-only water reflections / no cloud shadows
     _pad5:          f32,
     near_circle:    [4]f32, // near (voxel) region: XZ center, radius in voxels, unused
     sun_true:       [4]f32, // xyz = real sun direction (light_dir is the moon at night), w = night 0..1

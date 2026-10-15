@@ -116,7 +116,7 @@ float4 apply_fog(float4 color, float dist, float3 ray_dir) {
 // lavender with the sun low (a cool fill against the warm low sun, so
 // shadows read blue at golden hour), deep blue at night.
 float3 sky_ambient() {
-    float3 day = lerp(float3(0.27, 0.26, 0.34), float3(0.36, 0.46, 0.66),
+    float3 day = lerp(float3(0.32, 0.31, 0.40), float3(0.49, 0.60, 0.84),
                       smoothstep(0.0, 0.4, saturate(u_sun_true.y)));
     return lerp(day, float3(0.036, 0.052, 0.100), u_sun_true.w);
 }
@@ -596,6 +596,8 @@ static const float2 aa_offsets[4] = {
 #define CLOUD_STEPS  20
 #define CLOUD_TOP    (CUMULUS_BASE + 160.0) // above any tower (1.75 x the largest radius)
 #define CLOUD_SIGMA  0.07   // extinction per metre at density 1
+#define CLOUD_SHADOW_SCALE 1.0 // ground shadow vs. the cloud's own extinction: light scattered
+                                 // through and around the cloud keeps its shadow from going black
 
 // Density of cloud ci (u_thermals[ci]: xz centre, radius, strength) at p,
 // 0..1: a wide flat-bottomed base plus four towers (u_cloud_puffs), all as
@@ -690,6 +692,33 @@ CloudResult march_clouds(float3 ro, float3 rd, float t_max, uint2 pix) {
     return r;
 }
 
+// Sunlight left after the cumulus between p and the sun (1 = clear): the
+// sun ray's optical depth through each cloud box it crosses, from a few
+// shape-only density samples. The shape falls off smoothly toward the
+// cloud edge, so the shadow edge is soft without extra taps. Most rays
+// miss every box and only pay the box tests.
+#define CLOUD_SHADOW_STEPS 4
+float cloud_shadow(float3 p, float3 l) {
+    if (u_thermal_count.x == 0 || (u_ent_debug & 20) != 0 || l.y < 0.02) return 1.0;
+    float3 inv = 1.0 / ent_safe_dir(l);
+    float od = 0.0;
+    for (int i = 0; i < u_thermal_count.x; i++) {
+        float4 th = u_thermals[i];
+        float R = th.z * 1.4;
+        float t0, t1;
+        if (!ent_box(p, inv, float3(th.x - R, CUMULUS_BASE, th.y - R),
+                     float3(th.x + R, CUMULUS_BASE + th.z * 1.75, th.y + R), t0, t1)) continue;
+        t0 = max(t0, 0.0);
+        if (t0 >= t1) continue;
+        float dt = (t1 - t0) / CLOUD_SHADOW_STEPS;
+        [unroll]
+        for (int s = 0; s < CLOUD_SHADOW_STEPS; s++) {
+            od += cloud_density(p + l * (t0 + (float(s) + 0.5) * dt), i, false) * dt;
+        }
+    }
+    return exp(-od * CLOUD_SIGMA * CLOUD_SHADOW_SCALE);
+}
+
 // Shading for an entity voxel hit: direct sun (with entity occlusion) plus
 // the voxel light at the entity's surface. Entities are terminal hits (no
 // reflection bounce) so the caller breaks after compositing the result.
@@ -710,6 +739,7 @@ float4 shade_entity(EntityHit ehit, float3 dir) {
     if (ndl > 0.0) {
         sun = ndl * trace_shadow_transmittance(so, l)
                   * entity_shadow_transmittance(so, l, RAY_MAX_LENGTH)
+                  * cloud_shadow(so, l)
                   * u_sun_intensity;
     }
 
@@ -747,11 +777,75 @@ float3 water_deep_color() {
     return float3(0.02, 0.085, 0.11) * (sky_ambient() + sun_tint() * (u_sun_intensity * 0.5 * sun_elevation()));
 }
 
-// Gentle animated ripples for the surface normal (reflection only).
-float3 water_normal(float3 p) {
-    float a = sin(p.x * 0.9 + u_time * 1.3) + sin(p.z * 1.7 - p.x * 0.4 - u_time * 1.7);
-    float b = sin(p.z * 0.8 + p.x * 0.3 + u_time * 1.1) + sin(p.x * 1.5 - u_time * 1.4);
-    return normalize(float3(a * 0.035, 1.0, b * 0.035));
+// Wind waves for the surface normal: eight waves of different lengths and
+// headings (spread around the wind, at angles that never line their crests
+// up into a grid), each moving at its deep-water speed, so long swells roll
+// slowly under fast short chop. A slow warp bends the crests, and drifting
+// gust patches roughen some stretches while others lie nearly glassy.
+// Normal from the analytic slope.
+// Anti-aliasing: a wave smaller than a pixel's footprint on the water can't
+// be shown, only flicker, so each wave fades out as the footprint along its
+// heading reaches it (water_footprint) and its slope goes into `var`
+// instead: the glint spreads by that much (water_reflection), as the many
+// tiny waves inside one far pixel would spread it. var: slope variance
+// (along the view, across it).
+#define WAVE_SLOPE 0.11 // overall steepness
+#define WAVE_COUNT 8
+static const float4 g_waves[WAVE_COUNT] = { // heading (rad), wavelength (voxels), amplitude, phase
+    float4( 0.10, 9.0, 0.30, 0.0),
+    float4( 0.75, 5.3, 0.22, 1.7),
+    float4(-0.55, 3.7, 0.16, 4.1),
+    float4( 1.60, 2.3, 0.10, 2.3),
+    float4(-1.20, 1.6, 0.07, 5.2),
+    float4( 2.40, 1.1, 0.05, 0.9),
+    float4(-2.05, 0.75, 0.035, 3.3), // chop: breaks the sun glint into glitter
+    float4( 0.42, 0.5, 0.025, 1.1),
+};
+
+static float g_pix_angle; // radians per pixel, set in main
+
+// Size (voxels) of a pixel on the water at p seen along dir, measured along
+// wave heading d. Along the view it stretches by 1/sin(grazing angle), so
+// far off even long swells running toward the camera are smaller than a
+// pixel, while waves running across the view stay sharp.
+float2 water_view_xz(float3 dir) {
+    float l = length(dir.xz);
+    return l > 1e-4 ? dir.xz / l : float2(1, 0);
+}
+
+float water_footprint(float3 p, float3 dir, float2 d) {
+    float c = dot(d, water_view_xz(dir));
+    float s = max(abs(dir.y), 0.03);
+    return length(p - u_cam_pos) * g_pix_angle * sqrt(c * c / (s * s) + (1.0 - c * c));
+}
+
+// Share of a wave of wavelength lambda that can show: all of it from 1.5
+// footprints per wave, none at 0.5. Waves just above a pixel still alias a
+// little, but filtering them earlier leaves far water a flat mirror.
+float wave_fade(float lambda, float fp) {
+    return saturate(lambda / fp - 0.5);
+}
+
+float3 water_normal(float3 p, float3 dir, out float2 var) {
+    float2 vh = water_view_xz(dir);
+    float2 x = p.xz;
+    x += (float2(vnoise2(x * 0.045 + u_time * 0.03), vnoise2(x * 0.045 + 31.7 - u_time * 0.025)) - 0.5) * 6.0;
+    float2 g = float2(0, 0);
+    float2 lost = float2(0, 0);
+    [unroll]
+    for (int i = 0; i < WAVE_COUNT; i++) {
+        float4 w = g_waves[i];
+        float2 d = float2(cos(w.x), sin(w.x));
+        float  k = 6.2831853 / w.y;
+        float  fade = wave_fade(w.y, water_footprint(p, dir, d));
+        g += d * (w.z * k * fade * cos(dot(d, x) * k - sqrt(9.8 * k) * 0.6 * u_time + w.w));
+        float  c = dot(d, vh);
+        lost += float2(c * c, 1.0 - c * c) * (w.z * w.z * k * k * (1.0 - fade * fade));
+    }
+    float gust = lerp(0.35, 1.3, smoothstep(0.3, 0.7, vnoise2(p.xz * 0.02 + u_time * float2(0.04, 0.015))));
+    g *= WAVE_SLOPE * gust;
+    var = 0.5 * lost * (WAVE_SLOPE * gust) * (WAVE_SLOPE * gust); // mean of cos^2 = 1/2
+    return normalize(float3(-g.x, 1.0, -g.y));
 }
 
 float water_fresnel(float3 dir, float3 n) {
@@ -765,6 +859,58 @@ float3 water_mix(float3 col, float d, float t_surface, float3 dir, float F, floa
     float3 deep = apply_fog(float4(water_deep_color(), 1.0), t_surface, dir).rgb;
     col = lerp(deep, col, exp(-d * WATER_ABSORB));
     return lerp(col, refl, F);
+}
+
+// Water reflects along a calmed normal: at grazing angles full ripples
+// swirl the mirrored hills apart. Shared by near and far water.
+#define REFL_RIPPLE 0.4
+
+// Sun glint off the waves: the full ripple normal plus three fine crossing
+// ripples (glint only), so the sun's reflection breaks into squiggly bright
+// lines up close and a glittering path far off instead of one smooth blob.
+// Shared by near and far water, so the glint carries on past the near
+// region; shadow-tested (near only) where it shows.
+#define GLINT_POWER 1500.0
+#define GLINT_GAIN  25.0
+#define GLINT_TILT  0.06  // fine ripple steepness
+
+float3 water_glint(float3 p, float3 n, float2 wave_var, float3 dir, bool shadowed) {
+    // Only the surface glints: a water cell's side faces (far tile steps,
+    // falls) have no waves, and n.y = 0 would divide by zero below.
+    if (n.y < 0.5) return float3(0, 0, 0);
+    float3 l = light_dir_normalized;
+    float2 tilt = float2(0, 0);
+    float2 vh  = water_view_xz(dir);
+    float2 var = wave_var;
+    {
+        static const float3 fine[3] = { float3(0.9, 0.62, 0.0), float3(-1.4, 0.43, 2.1), float3(2.6, 0.31, 4.4) }; // heading, wavelength, phase
+        [unroll]
+        for (int i = 0; i < 3; i++) {
+            float2 d = float2(cos(fine[i].x), sin(fine[i].x));
+            float  k = 6.2831853 / fine[i].y;
+            float  fade = wave_fade(fine[i].y, water_footprint(p, dir, d));
+            float  c = dot(d, vh);
+            tilt += d * (fade * sin(dot(d, p.xz) * k - sqrt(9.8 * k) * 0.6 * u_time + fine[i].z));
+            var  += float2(c * c, 1.0 - c * c) * (0.5 * GLINT_TILT * GLINT_TILT * (1.0 - fade * fade));
+        }
+    }
+    float3 nf = normalize(n + float3(tilt.x, 0.0, tilt.y) * GLINT_TILT);
+    // Lobe in normal space around the half vector: GLINT_POWER sets its base
+    // width (cos^P of the reflected angle, which tilts twice as far as the
+    // normal), widened along / across the view by the filtered-out wave
+    // slopes, so a far glitter path stretches into a column. The peak drops
+    // as the lobe widens to keep the same light.
+    float3 hv = normalize(l - dir);
+    float2 dn = hv.xz / max(hv.y, 0.05) - nf.xz / max(nf.y, 0.05); // slope offset to the facet that mirrors the sun
+    float2 da = float2(dot(dn, vh), dot(dn, float2(-vh.y, vh.x)));
+    float  s0 = 1.0 / (4.0 * GLINT_POWER);
+    float2 sv = s0 + var;
+    float  g = exp(-0.5 * (da.x * da.x / sv.x + da.y * da.y / sv.y)) * (s0 / sqrt(sv.x * sv.y))
+             * GLINT_GAIN * u_sun_intensity * step(0.0, l.y);
+    if (g < 0.01) return float3(0, 0, 0);
+    // Far water has no voxels to shadow-test against.
+    float3 o = p + float3(0.0, 0.01, 0.0);
+    return sun_tint() * (g * (shadowed ? trace_shadow_transmittance(o, l) : 1.0) * cloud_shadow(o, l));
 }
 
 // Far terrain: one flat color per cell (per-voxel texture detail would only
@@ -815,8 +961,12 @@ float3 far_block_color(uint id, int2 cell, float3 n, float y) {
 // before this ray segment (for fog).
 float4 shade_far(FarHit h, float3 dir, float t_off) {
     if (h.block_id == BLOCK_WATER) {
-        float3 n = h.normal.y > 0.5 ? water_normal(h.hit_pos) : h.normal;
-        float3 refl = sky_color_d(reflect(dir, n), light_dir_normalized);
+        // As near water (water_reflection) minus the world reflection.
+        float2 wv = float2(0, 0);
+        float3 n = h.normal.y > 0.5 ? water_normal(h.hit_pos, dir, wv) : h.normal;
+        float3 rd = reflect(dir, normalize(float3(n.x * REFL_RIPPLE, n.y, n.z * REFL_RIPPLE)));
+        rd = normalize(float3(rd.x, max(rd.y, 0.01), rd.z));
+        float3 refl = sky_color_impl(rd, light_dir_normalized, 0.0, 1.0, true) + water_glint(h.hit_pos, n, wv, dir, false);
         return apply_fog(float4(lerp(water_deep_color(), refl, water_fresnel(dir, n)), 1.0), h.t + t_off, dir);
     }
     float  j = hash31i(int3(h.cell.x, 7, h.cell.y)) - 0.5;
@@ -825,6 +975,7 @@ float4 shade_far(FarHit h, float3 dir, float t_off) {
     // Ground under a canopy is in the crown's shade: no sun, little sky.
     float sky = h.under_canopy ? 0.3 : 1.0;
     float sun = h.under_canopy ? 0.0 : saturate(dot(h.normal, light_dir_normalized));
+    if (sun > 0.0) sun *= cloud_shadow(h.hit_pos, light_dir_normalized);
     float3 lighting = (sky_ambient() * sky + MIN_AMBIENT) * face_shade(h.normal)
                     + sun_tint() * sun * u_sun_intensity;
     if (block_is_leaves(h.block_id)) {
@@ -852,6 +1003,130 @@ float4 shade_far(FarHit h, float3 dir, float t_off) {
 float primary_max_len(float3 o, float3 d, out int exit_axis) {
     float t = near_exit_t(o, d, exit_axis);
     return u_far_enabled != 0 ? t : RAY_MAX_LENGTH;
+}
+
+// Shading for a voxel hit: voxel light (sky, torches), sun with its shadow
+// ray, bounce light, emission, fog. t_acc: distance travelled before this
+// ray segment. full_sun = shadow rays (soft when enabled, entities, clouds);
+// the cheap path (reflections) has no AO and no shadow rays: the sun reaches
+// whatever sees the open sky (full sky light).
+float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_sun) {
+    float4 hit_color = float4(
+        voxel_surface_color(hit.block_id, hit.vkey, hit.hit_pos, hit.normal, hit.t + t_acc), 1.0);
+    float3 albedo = hit_color.rgb;
+
+    float3 hit_point   = hit.hit_pos;
+    float3 surf_normal = hit.normal;
+    float epsilon      = 0.01;
+
+    // Voxel light in front of this face: sky (ambient + whether the
+    // sun can reach at all) and block light (torches).
+    float2 lv = face_light(hit.vkey, surf_normal, hit_point);
+    float  sky_level = lv.x;
+    float3 lighting = (sky_ambient() * light_curve(sky_level) + MIN_AMBIENT
+                    + TORCH_LIGHT_COLOR * light_curve(lv.y)) * face_shade(surf_normal);
+
+    // Sun. No sky light means sealed off from the sky (caves), so the
+    // shadow ray is skipped there.
+    float3 l = light_dir_normalized;
+    float n_dot_l = dot(surf_normal, l);
+    if (n_dot_l > 0.0 && sky_level > 0.0) {
+        float3 shadow_origin = hit_point + surf_normal * epsilon;
+        float shadow_factor = full_sun ? trace_shadow_transmittance(shadow_origin, l)
+                                       : smoothstep(13.0, 15.0, sky_level);
+        // Soft shadow: 5-tap disc within a small sun cone (~3 deg).
+        // t0 is binary for solid occluders, so it can't detect
+        // penumbra by itself; only taken near the camera.
+        if (full_sun && (u_quality % 10) == 3 && hit.t + t_acc < 150.0) {
+            static const float2 disk[4] = {
+                float2( 0.0,    1.0),
+                float2( 0.866, -0.5),
+                float2(-0.866, -0.5),
+                float2( 0.0,   -0.3),
+            };
+            float3 tangent   = normalize(cross(abs(l.x) > 0.9 ? float3(0,1,0) : float3(1,0,0), l));
+            float3 bitangent = cross(l, tangent);
+            float spread = 0.052; // tan(3 deg)
+            float acc = shadow_factor;
+            for (int k = 0; k < 4; k++) {
+                float3 jitter = (disk[k].x * tangent + disk[k].y * bitangent) * spread;
+                acc += trace_shadow_transmittance(shadow_origin, normalize(l + jitter));
+            }
+            shadow_factor = acc / 5.0;
+        }
+        // Entity occlusion: one tap (entity penumbra isn't worth 5x).
+        if (full_sun && u_entity_count > 0 && shadow_factor > 0.0 && (u_ent_debug & 2) == 0) {
+            shadow_factor *= entity_shadow_transmittance(shadow_origin, l, RAY_MAX_LENGTH);
+        }
+        if (full_sun && shadow_factor > 0.0) shadow_factor *= cloud_shadow(shadow_origin, l);
+        lighting += sun_tint() * (n_dot_l * shadow_factor * u_sun_intensity);
+    }
+    // Sunlight bounced off the ground fills faces that look sideways
+    // or down, so shadowed walls and overhangs keep some warmth and
+    // shape instead of flat sky blue.
+    lighting += bounce_light(surf_normal) * light_curve(sky_level);
+
+    // Leaf backlit glow: sun behind the leaves tints them warm
+    // yellow-green, scaled by how open to the sky they are.
+    if (block_is_leaves(hit.block_id)) {
+        float back_light = saturate(-n_dot_l);
+        hit_color.rgb += float3(0.3, 0.45, 0.1) * back_light * light_curve(sky_level) * sun_tint();
+    }
+
+    float ao = ao_on ? compute_ao(hit_point + surf_normal * epsilon, surf_normal, hit_point) : 1.0;
+    hit_color.xyz *= lighting * ao;
+    // Emissive blocks radiate on their own — NOT multiplied by
+    // lighting/AO/shadow. Bright enough to trip the bloom threshold.
+    // The texture shapes the glow: ember texels burn bright, the
+    // charred wood between them only smoulders.
+    float3 emis = block_emission(hit.block_id);
+    if (emis.x > 0.0) {
+        float fl = 0.92 + 0.08 * sin(u_time * 9.0 + hash31i(hit.vkey) * 6.2831853);
+        hit_color.rgb += emis * albedo * albedo * fl;
+    }
+    hit_color = apply_fog(hit_color, hit.t + t_acc, dir);
+    return hit_color;
+}
+
+// What the water surface mirrors: one ray off it through the near voxels,
+// then the far terrain, else the sky, shaded the cheap way (no AO, no shadow
+// rays, no entities). Looking steeply down the Fresnel share is a few
+// percent and the sky stands in, faded in over REFL_MIN_F..REFL_FULL_F (of
+// the flat surface, so the cutoff doesn't flicker with the waves). A
+// pixel's AA samples meet the same stretch of water, so the first sample's
+// reflection is reused.
+#define REFL_MIN_F  0.04
+#define REFL_FULL_F 0.08
+static bool   g_refl_cached;
+static float3 g_refl;
+
+float3 water_reflection(float3 p, float3 n, float2 wave_var, float3 dir, float t_surf, bool cacheable) {
+    float3 o = p + float3(0.0, 0.01, 0.0);
+    float3 glint = water_glint(p, n, wave_var, dir, true);
+
+    if (cacheable && g_refl_cached) return g_refl + glint;
+    float3 rd = reflect(dir, normalize(float3(n.x * REFL_RIPPLE, n.y, n.z * REFL_RIPPLE)));
+    rd.y = max(rd.y, 0.01); // ripples can tip a grazing reflection under the surface
+    rd = normalize(rd);
+    // No sun (or moon) disc: through the calmed normal it mirrors as one
+    // smooth blob; the glint stands in for it.
+    float3 c = apply_fog(float4(sky_color_impl(rd, light_dir_normalized, 0.0, 1.0, true), 1.0), t_surf, dir).rgb;
+    float  Ff = water_fresnel(dir, float3(0.0, 1.0, 0.0));
+    if (Ff >= REFL_MIN_F && (u_ent_debug & 8) == 0) {
+        int exit_axis;
+        float near_len = primary_max_len(o, rd, exit_axis);
+        HitInfo h = trace_ray_chunk(o, rd, false, RAY_ITERATIONS, near_len, BLOCK_WATER);
+        float3 w = c;
+        if (h.block_id != 0u) {
+            w = shade_voxel(h, rd, t_surf, false, false).rgb;
+        } else if (u_far_enabled != 0) {
+            FarHit fh = far_trace(o, rd, near_len, exit_axis);
+            if (fh.hit) w = shade_far(fh, rd, t_surf).rgb;
+        }
+        c = lerp(c, w, smoothstep(REFL_MIN_F, REFL_FULL_F, Ff));
+    }
+    if (cacheable) { g_refl = c; g_refl_cached = true; }
+    return c + glint;
 }
 
 // hit0/far0/ehit0/use_hit0: precomputed primary voxel, far terrain and
@@ -909,9 +1184,10 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
 
         if (hit.block_id == BLOCK_WATER) {
             // Into the water: keep the reflection, carry on underneath.
-            float3 n   = hit.normal.y > 0.5 ? water_normal(hit.hit_pos) : hit.normal;
+            float2 wave_var = float2(0, 0);
+            float3 n   = hit.normal.y > 0.5 ? water_normal(hit.hit_pos, dir, wave_var) : hit.normal;
             water_F    = water_fresnel(dir, n);
-            water_refl = apply_fog(sky_color(reflect(dir, n)), t_acc + hit.t, dir).rgb;
+            water_refl = water_reflection(hit.hit_pos, n, wave_var, dir, t_acc + hit.t, bounce == 0);
             in_water   = true;
             t_acc     += hit.t;
             origin     = hit.hit_pos + dir * 0.01;
@@ -925,79 +1201,10 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
         }
 
         if (hit.block_id != 0u) {
-            float4 hit_color = float4(
-                voxel_surface_color(hit.block_id, hit.vkey, hit.hit_pos, hit.normal, hit.t + t_acc), 1.0);
-            float3 albedo = hit_color.rgb;
-
+            float4 hit_color = shade_voxel(hit, dir, t_acc, bounce == 0 && !in_water, true);
             float3 hit_point   = hit.hit_pos;
             float3 surf_normal = hit.normal;
-            float3 looking_dir = u_cam_fwd;
-            float epsilon      = 0.01;
-
-            // Voxel light in front of this face: sky (ambient + whether the
-            // sun can reach at all) and block light (torches).
-            float2 lv = face_light(hit.vkey, surf_normal, hit_point);
-            float  sky_level = lv.x;
-            float3 lighting = (sky_ambient() * light_curve(sky_level) + MIN_AMBIENT
-                            + TORCH_LIGHT_COLOR * light_curve(lv.y)) * face_shade(surf_normal);
-
-            // Sun. No sky light means sealed off from the sky (caves), so the
-            // shadow ray is skipped there.
-            float3 l = light_dir_normalized;
-            float n_dot_l = dot(surf_normal, l);
-            if (n_dot_l > 0.0 && sky_level > 0.0) {
-                float3 shadow_origin = hit_point + surf_normal * epsilon;
-                float shadow_factor = trace_shadow_transmittance(shadow_origin, l);
-                // Soft shadow: 5-tap disc within a small sun cone (~3 deg).
-                // t0 is binary for solid occluders, so it can't detect
-                // penumbra by itself; only taken near the camera.
-                if ((u_quality % 10) == 3 && hit.t + t_acc < 150.0) {
-                    static const float2 disk[4] = {
-                        float2( 0.0,    1.0),
-                        float2( 0.866, -0.5),
-                        float2(-0.866, -0.5),
-                        float2( 0.0,   -0.3),
-                    };
-                    float3 tangent   = normalize(cross(abs(l.x) > 0.9 ? float3(0,1,0) : float3(1,0,0), l));
-                    float3 bitangent = cross(l, tangent);
-                    float spread = 0.052; // tan(3 deg)
-                    float acc = shadow_factor;
-                    for (int k = 0; k < 4; k++) {
-                        float3 jitter = (disk[k].x * tangent + disk[k].y * bitangent) * spread;
-                        acc += trace_shadow_transmittance(shadow_origin, normalize(l + jitter));
-                    }
-                    shadow_factor = acc / 5.0;
-                }
-                // Entity occlusion: one tap (entity penumbra isn't worth 5x).
-                if (u_entity_count > 0 && shadow_factor > 0.0 && (u_ent_debug & 2) == 0) {
-                    shadow_factor *= entity_shadow_transmittance(shadow_origin, l, RAY_MAX_LENGTH);
-                }
-                lighting += sun_tint() * (n_dot_l * shadow_factor * u_sun_intensity);
-            }
-            // Sunlight bounced off the ground fills faces that look sideways
-            // or down, so shadowed walls and overhangs keep some warmth and
-            // shape instead of flat sky blue.
-            lighting += bounce_light(surf_normal) * light_curve(sky_level);
-
-            // Leaf backlit glow: sun behind the leaves tints them warm
-            // yellow-green, scaled by how open to the sky they are.
-            if (block_is_leaves(hit.block_id)) {
-                float back_light = saturate(-n_dot_l);
-                hit_color.rgb += float3(0.3, 0.45, 0.1) * back_light * light_curve(sky_level) * sun_tint();
-            }
-
-            float ao = (bounce == 0 && !in_water) ? compute_ao(hit_point + surf_normal * epsilon, surf_normal, hit_point) : 1.0;
-            hit_color.xyz *= lighting * ao;
-            // Emissive blocks radiate on their own — NOT multiplied by
-            // lighting/AO/shadow. Bright enough to trip the bloom threshold.
-            // The texture shapes the glow: ember texels burn bright, the
-            // charred wood between them only smoulders.
-            float3 emis = block_emission(hit.block_id);
-            if (emis.x > 0.0) {
-                float fl = 0.92 + 0.08 * sin(u_time * 9.0 + hash31i(hit.vkey) * 6.2831853);
-                hit_color.rgb += emis * albedo * albedo * fl;
-            }
-            hit_color = apply_fog(hit_color, hit.t + t_acc, dir);
+            float  epsilon     = 0.01;
             if (in_water) hit_color.rgb = water_mix(hit_color.rgb, hit.t, t_acc, dir, water_F, water_refl);
             pixel_color = lerp(pixel_color, hit_color, reflection_amount);
             if (in_water) break; // no reflection bounces under water
@@ -1044,6 +1251,8 @@ void main(uint3 id : SV_DispatchThreadID) {
     float near_len = primary_max_len(u_cam_pos, cdir, exit_axis);
     // Under water: pass through water, see only WATER_VIEW_DIST (as trace_pixel does).
     g_cam_in_water = sample_voxel(u_cam_pos) == BLOCK_WATER;
+    g_refl_cached  = false;
+    g_pix_angle    = 2.0 * length(u_cam_right) / dims.x;
     ent_set_pixel(uint2(ipix));
     HitInfo hit0 = trace_ray_chunk(u_cam_pos, cdir, false, RAY_ITERATIONS,
                                    g_cam_in_water ? WATER_VIEW_DIST : near_len,

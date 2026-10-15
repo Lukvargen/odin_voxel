@@ -12,7 +12,7 @@ import la "core:math/linalg"
 DAY_START_HOUR   :: 16.8   // late afternoon: long shadows, golden light
 DAY_LENGTH_MIN   :: 24.0   // real minutes per game day
 SUN_TILT         :: 0.62   // radians the sun's path leans south (max elevation ~54 deg)
-SUN_PEAK         :: 1.9    // sun_intensity at full day
+SUN_PEAK         :: 1.5    // sun_intensity at full day
 MOON_PEAK        :: 0.24   // moonlight intensity
 NIGHT_EXPOSURE   :: 2.8    // eye adaptation at night: lifts moonlit shapes out of black
 
