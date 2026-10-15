@@ -72,6 +72,8 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_SPRUCE_LEAVES 19u
 #define BLOCK_CACTUS        20u
 #define BLOCK_WEATHERED_STONE 21u // terrain surface rock (moss / ledge snow)
+#define BLOCK_STONE_BRICKS  22u // ruins
+#define BLOCK_CRYSTAL       23u // glowing amber crystal
 
 bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES; }
 
@@ -82,6 +84,7 @@ bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_
 // emissive blocks (lava, glowstone) slot in here.
 float3 block_emission(uint id) {
     if (id == BLOCK_TORCH) return float3(1.0, 0.62, 0.40) * 7.0; // times albedo^2 in shading
+    if (id == BLOCK_CRYSTAL) return float3(1.0, 0.85, 0.60) * 5.0;
     return float3(0.0, 0.0, 0.0);
 }
 

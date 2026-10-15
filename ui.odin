@@ -809,6 +809,8 @@ icon_colors :: proc(b: Block_Type) -> (top, side: [3]f32) {
     case .Gravel:     return {0.55, 0.53, 0.50}, {0.53, 0.51, 0.48}
     case .Cactus:     return {0.36, 0.60, 0.27}, {0.30, 0.54, 0.22}
     case .Weathered_Stone: return {0.45, 0.52, 0.36}, {0.50, 0.50, 0.50}
+    case .Stone_Bricks:    return {0.58, 0.57, 0.55}, {0.52, 0.51, 0.50}
+    case .Crystal:         return {1.00, 0.80, 0.42}, {0.95, 0.62, 0.25}
     }
     return {0.56, 0.56, 0.58}, {0.52, 0.52, 0.55}
 }
@@ -876,6 +878,8 @@ draw_block_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, b: Block_Type) {
                     if icon_hash(i, j, fi + 3) < 0.25 { col *= 0.7 }
                 case .Weathered_Stone:
                     if fi > 0 && j == 0 && icon_hash(i, j, fi) < 0.6 { col = top }
+                case .Stone_Bricks:
+                    if j % 2 == 1 || (i + (j / 2) * 2) % 4 == 0 { col *= 0.72 }
                 }
                 n := 0.9 + 0.2 * icon_hash(i, j, fi + int(b) * 5)
                 lit := col * f.shade * n

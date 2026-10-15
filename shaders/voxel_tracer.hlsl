@@ -511,6 +511,43 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         return float3(0.10, 0.28, 0.36);
     }
 
+    if (block_id == BLOCK_STONE_BRICKS) {
+        // Courses of bricks 8 texels long and 4 high (two courses per
+        // voxel), staggered by half a brick, with dark mortar joints. Weathering by world position: moss creeps
+        // over tops and the lower courses, lichen spots, soot-dark blocks.
+        int3 bk = tkey;
+        int  course = bk.y >> 2;
+        int  along  = top ? bk.x : (abs(nrm.x) > 0.5 ? bk.z : bk.x);
+        int  brick  = (along + (course & 1) * 4) >> 3;
+        bool mortar = (bk.y & 3) == 0 || ((along + (course & 1) * 4) & 7) == 0;
+        if (top) {
+            int  row = bk.z >> 2;
+            brick  = (bk.x + (row & 1) * 4) >> 3;
+            mortar = (bk.z & 3) == 0 || ((bk.x + (row & 1) * 4) & 7) == 0;
+            course = row;
+        }
+        float bh = hash31i(int3(brick, course, top ? 7 : (abs(nrm.x) > 0.5 ? bk.x : bk.z) >> 3));
+        float3 c = float3(0.55, 0.54, 0.51) * (0.78 + 0.32 * bh) * (0.92 + (hd - 0.5) * 0.16);
+        c *= lerp(float3(1, 1, 1), float3(1.06, 1.0, 0.90), step(0.8, bh)); // a few warm stones
+        if (mortar) c = lerp(c, float3(0.30, 0.29, 0.27), detail * 0.85);
+        float3 wp = (float3(tkey) + 0.5) / float(TEXELS);
+        float moss = smoothstep(0.45, 0.75, tex_noise(fuv, 5.0, 19.0)) * (top ? 0.9 : 0.55);
+        // Damp runs down the walls, vertically stretched like the rock streaks.
+        if (!top) moss += 0.5 * smoothstep(0.62, 0.85, vnoise2(float2(fuv.x / 3.0, wp.y / 4.0) + 7.0));
+        moss = saturate(moss);
+        c = lerp(c, float3(0.20, 0.30, 0.10) * (0.8 + 0.4 * hd), moss * 0.85);
+        if (h > 0.97 && detail > 0.3) c = lerp(c, float3(0.70, 0.72, 0.55), 0.6); // lichen
+        return saturate(c * (1.0 + vj * 0.05));
+    }
+
+    if (block_id == BLOCK_CRYSTAL) {
+        // Facets: bright veins on a deep amber body, a hot core per voxel.
+        float facet = abs(tex_noise(fuv, 2.0, 71.0) * 2.0 - 1.0);
+        float3 c = lerp(float3(0.95, 0.55, 0.16), float3(1.0, 0.88, 0.55), smoothstep(0.0, 0.25, 0.25 - facet));
+        c *= 0.75 + 0.25 * hd;
+        return saturate(c);
+    }
+
     if (block_id == BLOCK_TORCH) {
         // Charred wood body with bright ember texels. The emission term is
         // added unlit in shading, so the albedo stays modest.
@@ -754,6 +791,9 @@ float3 far_block_color(uint id, int2 cell, float3 n, float y) {
     if (id == BLOCK_ICE)           return float3(0.47, 0.62, 0.80);
     if (id == BLOCK_GRAVEL)        return float3(0.50, 0.48, 0.44);
     if (id == BLOCK_CACTUS)        return float3(0.22, 0.45, 0.15);
+    if (id == BLOCK_STONE_BRICKS)  return float3(0.40, 0.41, 0.36);
+    if (id == BLOCK_TORCH)         return float3(0.45, 0.26, 0.10);
+    if (id == BLOCK_CRYSTAL)       return float3(0.95, 0.65, 0.25);
     if (id == BLOCK_TERRACOTTA) {
         static const float3 bands[3] = { float3(0.62, 0.35, 0.20), float3(0.72, 0.51, 0.33), float3(0.54, 0.25, 0.17) };
         return n.y > 0.5 ? bands[0] : bands[uint(floor(y / 6.0)) % 3u];
@@ -796,7 +836,15 @@ float4 shade_far(FarHit h, float3 dir, float t_off) {
                     + sun_tint() * (0.35 + 0.5 * saturate(light_dir_normalized.y)) * 0.6 * u_sun_intensity;
         lighting = lerp(lighting * float3(1, 1, 1), soft, 0.75);
     }
-    return apply_fog(float4(c * lighting, 1.0), h.t + t_off, dir);
+    float3 col = c * lighting;
+    // A beacon fire or crystal on top of a far cell: a point of light that
+    // carries across the valleys at night (faded less by haze than the
+    // ground, as a bright light would be).
+    if (h.normal.y > 0.5 && (h.block_id == BLOCK_TORCH || h.block_id == BLOCK_CRYSTAL)) {
+        float fl = 0.85 + 0.15 * sin(u_time * 7.0 + float(h.cell.x * 13 + h.cell.y * 7));
+        col += block_emission(h.block_id) * 0.5 * fl;
+    }
+    return apply_fog(float4(col, 1.0), h.t + t_off, dir);
 }
 
 // Where the primary ray's voxel walk stops: the near region's edge when far

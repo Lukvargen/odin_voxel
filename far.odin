@@ -77,7 +77,10 @@ far_record :: proc(s: ^Far_Summary, lx, wy, lz: int, b: u8) {
         s.log_lo[ci] = min(s.log_lo[ci], wy)
         s.log_hi[ci] = max(s.log_hi[ci], wy)
     case:
-        if wy + 1 > s.ground_top[ci] {
+        // A beacon fire or crystal on top of its cell wins a tie, so it
+        // still glows on the far terrain.
+        emissive := b == u8(Block_Type.Torch) || b == u8(Block_Type.Crystal)
+        if wy + 1 > s.ground_top[ci] || (emissive && wy + 1 == s.ground_top[ci]) {
             s.ground_top[ci] = wy + 1
             s.ground_mat[ci] = b
         }
@@ -195,6 +198,7 @@ far_tile_compute :: proc(job: Far_Job) -> Far_Result {
             if kind != .None { generate_tree_kind(&tgt, kind, wx, base, wz) }
         }
     }
+    generate_landmarks(&tgt)
 
     res := Far_Result{key = job.key}
     for ci in 0 ..< FAR_CELLS_PER_TILE { res.cells[ci] = far_pack_cell(&s, ci) }

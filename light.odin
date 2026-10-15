@@ -19,6 +19,7 @@ import "core:time"
 
 LIGHT_MAX   :: 15
 TORCH_LIGHT :: 14
+CRYSTAL_LIGHT :: 9
 LIGHT_SKY   :: u8(LIGHT_MAX << 4) // full sky, no block light
 
 Light_Channel :: enum { Sky, Block }
@@ -28,7 +29,9 @@ block_opaque :: #force_inline proc(b: u8) -> bool {
 }
 
 block_emission :: #force_inline proc(b: u8) -> u8 {
-    return b == u8(Block_Type.Torch) ? TORCH_LIGHT : 0
+    if b == u8(Block_Type.Torch)   { return TORCH_LIGHT }
+    if b == u8(Block_Type.Crystal) { return CRYSTAL_LIGHT }
+    return 0
 }
 
 chan_get :: #force_inline proc(v: u8, ch: Light_Channel) -> u8 {

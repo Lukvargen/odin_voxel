@@ -169,6 +169,7 @@ main :: proc() {
             case a == "stream": bench_stream = true
             case a == "look": bench_look = true
             case a == "ui": bench_ui = true
+            case a == "landmarks": bench_landmarks = true
             case a == "build": bench_build = true
             case a == "combat": bench_combat = true
             case strings.has_prefix(a, "hour="):
@@ -451,12 +452,7 @@ main :: proc() {
         // Underground-ness (0 surface .. 1 deep below): drives cave darkness
         // and cave fog in the shaders. Smoothed ~0.5 s so moving through a
         // cave mouth reads as eye adaptation instead of a pop.
-        {
-            surface := surface_height_at(int(gs.camera.pos.x), int(gs.camera.pos.z))
-            depth_below := f32(surface) - gs.camera.pos.y
-            target := clamp((depth_below - 6.0) / 18.0, 0.0, 1.0)
-            gs.cave_factor += (target - gs.cave_factor) * min(1.0, dt * 2.0)
-        }
+        gs.cave_factor += (cave_factor_target(&gs) - gs.cave_factor) * min(1.0, dt * 2.0)
 
         // Enqueue new chunks when crossing a chunk boundary
         new_pc := [3]int{
@@ -500,6 +496,13 @@ main :: proc() {
 }
 
 HOTBAR_SLOTS :: 9
+// Underground-ness of the camera, 0 at the surface .. 1 from 24 voxels down.
+cave_factor_target :: proc(gs: ^Game_State) -> f32 {
+    surface := surface_height_at(int(gs.camera.pos.x), int(gs.camera.pos.z))
+    depth_below := f32(surface) - gs.camera.pos.y
+    return clamp((depth_below - 6.0) / 18.0, 0.0, 1.0)
+}
+
 DEFAULT_HOTBAR :: [HOTBAR_SLOTS]Block_Type{.Grass, .Dirt, .Stone, .Log, .Leaves, .Sand, .Snow, .Terracotta, .Torch}
 EDIT_REPEAT :: f32(0.22) // seconds between edits while a mouse button is held
 REACH       :: f32(200)  // voxels: building far away is half the fun here

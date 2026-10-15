@@ -134,6 +134,8 @@ Block_Type :: enum u8 {
     Spruce_Leaves = 19,
     Cactus        = 20,
     Weathered_Stone = 21, // natural surface rock: moss low down, ledge snow up high (shader)
+    Stone_Bricks  = 22,  // ruins (landmarks.odin)
+    Crystal       = 23,  // glowing amber crystal: caves, altars; a light source
     // Must stay below 32: the far LOD stores block ids in 5 bits.
 }
 
@@ -534,6 +536,8 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
         }
     }
     profile_add(.Tree_Scan, t_scan)
+    decorate_caves(column, gx, gz, height[:])
+    generate_landmarks(&tgt)
     for &c in column.chunks { chunk_compact(&c) }
     return column
 }
