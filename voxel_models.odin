@@ -21,6 +21,13 @@ Model_Id :: enum u32 {
     Fox_Body, Fox_Head, Fox_Leg, Fox_Tail,
     Bird_Body, Bird_Wing,
     Hum_Head, Hum_Torso, Hum_Arm, Hum_Leg,
+    // combat.odin, slime.odin
+    Sword,      // grip at the origin, blade along +z
+    Slime,      // 1 m cube-ish blob standing on its origin, face toward +z
+    Goo,        // a small cube: splatter, dust
+    Fist,       // a right hand around the sword's grip, in the sword's frame
+    Arm_Upper,  // sleeve along +z, 1 long: scale z to the length
+    Arm_Fore,   // sleeve, cuff, wrist along +z, 1 long
 }
 
 Voxel_Model :: struct {
@@ -45,6 +52,9 @@ Pal :: enum u8 {
     Fur, Fur_Light, Fur_Dark, Nose,
     Feather, Feather_Dark, Feather_White, Beak,
     Skin, Hair, Shirt, Shirt_Trim, Pants, Boot, Belt,
+    Blade, Blade_Edge, Guard, Grip, Pommel_Gem,
+    Blade_Fuller, Guard_Dark, Grip_Wrap, Glove, Glove_Dark, Glove_Light,
+    Slime, Slime_Light, Slime_Core, Mouth,
 }
 
 @(private="file")
@@ -74,6 +84,21 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Pants:         return {58, 66, 104}, 0
     case .Boot:          return {62, 42, 30}, 0
     case .Belt:          return {40, 30, 24}, 0
+    case .Blade:         return {196, 204, 216}, 0
+    case .Blade_Edge:    return {236, 242, 250}, 0
+    case .Guard:         return {214, 162, 58}, 0
+    case .Grip:          return {92, 54, 32}, 0
+    case .Pommel_Gem:    return {90, 200, 255}, PAL_EMIT
+    case .Blade_Fuller:  return {138, 146, 162}, 0
+    case .Guard_Dark:    return {150, 104, 34}, 0
+    case .Grip_Wrap:     return {160, 108, 60}, 0
+    case .Glove:         return {116, 72, 42}, 0
+    case .Glove_Dark:    return {70, 42, 26}, 0
+    case .Glove_Light:   return {156, 104, 62}, 0
+    case .Slime:         return {255, 255, 255}, PAL_TINT
+    case .Slime_Light:   return {255, 255, 255}, PAL_TINT | PAL_THIN
+    case .Slime_Core:    return {190, 190, 190}, PAL_TINT
+    case .Mouth:         return {40, 22, 30}, 0
     }
     return {255, 0, 255}, 0
 }
@@ -200,6 +225,7 @@ model_bake :: proc(lo, hi: [3]f32, voxel: f32, shape: proc(p: [3]f32, voxel: f32
 
 ent_models_bake :: proc() {
     creature_models_bake()
+    combat_models_bake()
     ent_models[.Crystal]      = model_bake({-0.3, -0.52, -0.3}, {0.3, 0.52, 0.3}, 1.0 / 16, shape_crystal)
     ent_models[.Glider_Wing]  = model_bake({-3.85, 0.95, -2.05}, {3.85, 2.05, 2.0}, 1.0 / 12, shape_glider_wing)
     ent_models[.Rod]          = model_bake({-0.05, -0.05, 0}, {0.05, 0.05, 1}, 1.0 / 24, shape_rod)

@@ -13,7 +13,7 @@ Clay_SDL3RendererData :: struct {
 
 // ── Per-size font cache ──────────────────────────────────────────────────────
 
-FONT_SIZE_CACHE_MAX :: 16
+FONT_SIZE_CACHE_MAX :: 64
 
 SizedFontEntry :: struct {
 	font:     ^TTF.Font,
@@ -414,7 +414,7 @@ SDL_Clay_RenderClayCommands :: proc(rendererData: ^Clay_SDL3RendererData, rcomma
 			SDL.RenderTexture(rendererData.renderer, texture, nil, &dest)
 
 		case .Custom:
-			// Custom element rendering - add your own here
+			ui_draw_custom(rendererData, rect, rcmd.renderData.custom.customData)
 
 		case:
 			SDL.Log("Unknown render command type: %d", rcmd.commandType)

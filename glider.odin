@@ -444,6 +444,8 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
     if g.deployed {
         target_roll = g.bank * 0.45
         target_fov  = 1 + clamp((g.airspeed - 12) / 35, 0, 1) * 0.28
+    } else if cam.sprinting {
+        target_fov = 1.1 // the sprint FOV kick
     }
     cam.roll      += (target_roll - cam.roll) * min(dt * 5, 1)
     cam.fov_scale += (target_fov - cam.fov_scale) * min(dt * 3, 1)
@@ -474,7 +476,7 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
     }
     rate: f32 = want < g.chase_dist ? 12 : 4 // pull in fast, ease out slowly
     g.chase_dist += (want - g.chase_dist) * min(dt * rate, 1)
-    cam.view_offset = {0, g.land_dip, 0}
+    cam.view_offset = {0, g.land_dip - cam.crouch * 0.3, 0}
     if g.chase_dist > 0.05 {
         cam.view_offset += back * g.chase_dist + [3]f32{0, 1.2 * clamp(g.chase_dist / 3, 0, 1), 0}
     }

@@ -309,7 +309,12 @@ player_anim_update :: proc(gs: ^Game_State, dt: f32) {
     a := &gs.player_anim
     v := gs.camera.velocity
     sp := math.sqrt(v.x * v.x + v.z * v.z)
-    if sp > 0.6 {
+    if gs.combat.sword {
+        // Sword drawn: squared up to where you look, strafing.
+        target := -math.to_radians(gs.camera.yaw)
+        d := math.mod(target - a.body_yaw + 3 * math.PI, 2 * math.PI) - math.PI
+        a.body_yaw += d * min(dt * 14, 1)
+    } else if sp > 0.6 {
         target := math.atan2(-v.x, v.z)
         d := math.mod(target - a.body_yaw + 3 * math.PI, 2 * math.PI) - math.PI
         a.body_yaw += d * min(dt * 10, 1)
@@ -338,7 +343,17 @@ player_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     attach(f, .Hum_Leg, feet, rot, 1, hips + {-0.1, 0, 0}, basis_rot_x(leg_r), PLAYER_TINT)
     attach(f, .Hum_Torso, feet, rot, 1, hips, basis_rot_x(-0.06 * a.amp), PLAYER_TINT)
     attach(f, .Hum_Arm, feet, rot, 1, hips + {0.27, 0.52, 0}, basis_rot_z(arm_out) * basis_rot_x(-0.8 * sw), PLAYER_TINT)
-    attach(f, .Hum_Arm, feet, rot, 1, hips + {-0.27, 0.52, 0}, basis_rot_z(-arm_out) * basis_rot_x(0.8 * sw), PLAYER_TINT)
+    if gs.combat.sword {
+        // The sword arm reaches for the grip, posed as in first person from
+        // a viewpoint at the eyes.
+        fwd, right, up := camera_basis(gs.camera)
+        eye := feet + [3]f32{0, 1.5, 0} + fwd * 0.15
+        shoulder := feet + rot * (hips + [3]f32{-0.27, 0.52, 0})
+        grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
+        sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4)
+    } else {
+        attach(f, .Hum_Arm, feet, rot, 1, hips + {-0.27, 0.52, 0}, basis_rot_z(-arm_out) * basis_rot_x(0.8 * sw), PLAYER_TINT)
+    }
     // Head follows the camera a little.
     cam_yaw := -math.to_radians(gs.camera.yaw)
     look := clamp(math.mod(cam_yaw - a.body_yaw + 3 * math.PI, 2 * math.PI) - math.PI, -0.9, 0.9)

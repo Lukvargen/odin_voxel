@@ -238,6 +238,8 @@ entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
     // Player things first, so a full list never drops them.
     glider_add_parts(gs, frame)
     player_add_parts(gs, frame)
+    combat_add_parts(gs, frame)
+    slimes_add_parts(gs, frame)
     for c in cands {
         e := gs.entities[c.idx]
         // Birds circle far overhead: their shadows would be specks, but

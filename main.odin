@@ -18,6 +18,8 @@ Game_State :: struct {
     camera: Camera,
     glider: Glider, // hang glider (glider.odin)
     player_anim: Player_Anim, // third-person body animation (creatures.odin)
+    combat: Combat, // the sword, health, combos (combat.odin)
+    slimes: Slimes, // slimes, goo, damage numbers (slime.odin)
     sky_thermals:      [MAX_SKY_THERMALS]Sky_Thermal, // strong thermals near the player, for cumulus (glider.odin)
     sky_thermal_count: int,
     sky_thermal_cell:  [2]int,
@@ -83,9 +85,10 @@ Game_State :: struct {
     ent_transfer: ^SDL.GPUTransferBuffer, // persistent staging for the per-frame entity data
     ent_upload_size: int,             // bytes staged this frame, copied at the start of gpu_render
 
-    brush_radius:  int,  // edit sphere radius, 0 = single voxel (Ctrl+scroll)
-    left_pressed:  bool, // single-frame press edges — with Ctrl held a click
-    right_pressed: bool, // performs exactly one edit instead of repeating
+    brush_radius:  int,  // edit sphere radius, 0 = single voxel (B cycles)
+    left_pressed:  bool, // single-frame press edges: a click edits at once,
+    right_pressed: bool, // holding repeats every EDIT_REPEAT seconds
+    edit_timer:    f32,
 
     // Settings
     light_dir:      [3]f32,
@@ -101,7 +104,9 @@ Game_State :: struct {
     fog_density:    f32,   // base distance-fog density (options panel)
     cave_factor:    f32,   // 0 surface .. 1 deep underground, smoothed per frame
     sun_intensity:  f32,   // sun direct-light multiplier
-    selected_block: Block_Type, // hotbar selection (keys 1-0)
+    selected_block: Block_Type, // = hotbar[hotbar_slot]
+    hotbar:         [HOTBAR_SLOTS]Block_Type, // keys 1-9 / wheel; middle click and E change it
+    hotbar_slot:    int,
 
     // Entities (entities.odin, voxel_models.odin)
     entities:         [dynamic]Entity,
@@ -115,6 +120,8 @@ Game_State :: struct {
     left_held:           bool,
     right_held:          bool,
     space_last_press_ms: u64,
+    w_last_press_ms:     u64,  // double-tap W sprints
+    sprint_latched:      bool, // ... until W is let go
     jump_pressed:        bool, // single-frame jump signal
 
     // UI
@@ -143,8 +150,9 @@ main :: proc() {
     gs.exposure       = 1.0
     gs.fog_density    = 0.0006 // far terrain reaches ~1900 voxels; haze starts showing past ~600
     gs.sun_intensity  = 1.9
-    gs.selected_block = .Stone
-    gs.brush_radius   = BRUSH_RADIUS
+    gs.hotbar         = DEFAULT_HOTBAR
+    gs.selected_block = gs.hotbar[0]
+    gs.brush_radius   = 0
     gs.entities_enabled = true
     gs.clouds_enabled   = true
     gs.far_enabled      = true
@@ -158,6 +166,8 @@ main :: proc() {
             case a == "entcost": bench_entcost = true
             case a == "stream": bench_stream = true
             case a == "look": bench_look = true
+            case a == "ui": bench_ui = true
+            case a == "combat": bench_combat = true
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])
@@ -171,6 +181,7 @@ main :: proc() {
     gs.camera.pitch   = -20
     gs.camera.fly_mode = false // start in walk mode
     gs.camera.fov_scale = 1
+    combat_init(&gs.combat)
 
     // SDL init
     if !SDL.Init({.VIDEO, .EVENTS}) {
@@ -229,14 +240,14 @@ main :: proc() {
         if dt > 0.1 { dt = 0.1 }
 
         // Input state for this frame
-        move_fwd, move_back, move_left, move_right: bool
-        run_fast, run_ultra: bool
         mouse_dx, mouse_dy: f32
         wheel_dy: f32
         gs.jump_pressed  = false
         gs.left_pressed  = false
         gs.right_pressed = false
+        dodge_pressed   := false
         quit := false
+        playing := gs.ui.screen == .None
 
         event: SDL.Event
         for SDL.PollEvent(&event) {
@@ -246,60 +257,71 @@ main :: proc() {
 
             case .KEY_DOWN:
                 key := event.key.key
+                if event.key.repeat { break }
+                // Keys that work on menu screens too.
                 switch key {
                 case SDL.K_ESCAPE:
-                    quit = true
+                    ui_back(&gs) // pause menu, or one screen back
+                case SDL.K_E:
+                    if gs.ui.screen == .None || gs.ui.screen == .Inventory {
+                        ui_open(&gs, gs.ui.screen == .None ? .Inventory : .None)
+                    }
                 case SDL.K_M:
                     audio_toggle_mute()
-                case SDL.K_TAB:
-                    gs.mouse_locked = !gs.mouse_locked
-                    _ = SDL.SetWindowRelativeMouseMode(gs.window, gs.mouse_locked)
-                case SDL.K_O:
-                    gs.ui.options_open = !gs.ui.options_open
-                    gs.mouse_locked = !gs.ui.options_open
-                    _ = SDL.SetWindowRelativeMouseMode(gs.window, gs.mouse_locked)
+                    ui_toast(&gs, audio.muted ? "Sound muted" : "Sound on")
+                }
+                if !playing { break }
+                switch key {
                 case SDL.K_F1:
-                    fmt.printf("Cam pos: %.1f %.1f %.1f | yaw %.1f pitch %.1f | fly=%v\n",
-                        gs.camera.pos.x, gs.camera.pos.y, gs.camera.pos.z,
-                        gs.camera.yaw, gs.camera.pitch, gs.camera.fly_mode)
+                    gs.ui.hud_hidden = !gs.ui.hud_hidden
                 case SDL.K_F2:
-                    gs.aa_samples = gs.aa_samples == 1 ? 2 : (gs.aa_samples == 2 ? 4 : 1)
-                    fmt.printf("AA samples: %d\n", gs.aa_samples)
+                    _ = os.make_directory_all("screenshots")
+                    path := fmt.tprintf("screenshots/%d.bmp", SDL.GetTicks())
+                    bench_screenshot(&gs, path)
+                    ui_toast(&gs, fmt.tprintf("Saved %s", path))
                 case SDL.K_F3:
-                    gs.shadow_rays = gs.shadow_rays == 3 ? 1 : 3
-                    fmt.printf("shadow rays (near): %d\n", gs.shadow_rays)
-                case SDL.K_F4:
-                    gs.vol_enabled = !gs.vol_enabled
-                    fmt.printf("volumetric: %v\n", gs.vol_enabled)
+                    gs.ui.debug_open = !gs.ui.debug_open
+                case SDL.K_H:
+                    gs.ui.help_open = !gs.ui.help_open
+                    gs.ui.help_t = 0
                 case SDL.K_F5:
-                    gs.vol_steps = gs.vol_steps == 16 ? 24 : (gs.vol_steps == 24 ? 32 : 16)
-                    fmt.printf("volumetric steps: %d\n", gs.vol_steps)
-                // Hotbar: block selection for left-click placement.
-                // (Reflection bounces moved to the options panel.)
-                case SDL.K_1: gs.selected_block = .Stone
-                case SDL.K_2: gs.selected_block = .Dirt
-                case SDL.K_3: gs.selected_block = .Grass
-                case SDL.K_4: gs.selected_block = .Sand
-                case SDL.K_5: gs.selected_block = .Sandstone
-                case SDL.K_6: gs.selected_block = .Log
-                case SDL.K_7: gs.selected_block = .Leaves
-                case SDL.K_8: gs.selected_block = .Snow
-                case SDL.K_9: gs.selected_block = .Terracotta
-                case SDL.K_0: gs.selected_block = .Torch
+                    gs.glider.third_person = !gs.glider.third_person
+                case SDL.K_F6:
+                    slime_debug_spawn(&gs)
+                case SDL.K_F7:
+                    slimes_clear(&gs)
+                case SDL.K_1 ..= SDL.K_9:
+                    if gs.combat.sword { combat_toggle_sword(&gs) } // back to building
+                    hotbar_select(&gs, int(key - SDL.K_1))
+                case SDL.K_R:
+                    combat_toggle_sword(&gs)
+                case SDL.K_LSHIFT:
+                    dodge_pressed = gs.combat.sword
+                case SDL.K_B:
+                    // Brush sizes for big edits; 0 is one block.
+                    BRUSHES :: [6]int{0, 1, 2, 3, 5, 8}
+                    brushes := BRUSHES
+                    next := 0
+                    for r, i in brushes { if r == gs.brush_radius { next = (i + 1) % len(brushes) } }
+                    gs.brush_radius = brushes[next]
+                    ui_toast(&gs, gs.brush_radius == 0 ? "Brush: one block" : fmt.tprintf("Brush: radius %d", gs.brush_radius))
                 case SDL.K_G:
                     if gs.glider.deployed { glider_toggle_deploy(&gs) }
                     gs.glider.equipped = !gs.glider.equipped
                     if gs.glider.equipped { gs.camera.fly_mode = false }
-                case SDL.K_V:
-                    gs.glider.third_person = !gs.glider.third_person
+                    ui_toast(&gs, gs.glider.equipped ? "Hang glider: jump, then Space in the air" : "Hang glider put away")
+                case SDL.K_W:
+                    press_time := SDL.GetTicks()
+                    if press_time - gs.w_last_press_ms <= DOUBLE_TAP_MS { gs.sprint_latched = true }
+                    gs.w_last_press_ms = press_time
                 case SDL.K_SPACE:
                     // Glider equipped: Space in mid-air opens / releases the
                     // wing (and double-tap fly mode is off while it's on).
-                    if gs.glider.equipped && !event.key.repeat && glider_can_toggle(&gs) {
+                    if gs.glider.equipped && glider_can_toggle(&gs) {
                         glider_toggle_deploy(&gs)
                     } else if gs.glider.equipped {
-                        if !event.key.repeat { gs.jump_pressed = true }
-                    } else if !event.key.repeat {
+                        gs.jump_pressed = true
+                    } else {
                         press_time := SDL.GetTicks()
                         if gs.space_last_press_ms > 0 && (press_time - gs.space_last_press_ms) <= DOUBLE_TAP_MS {
                             gs.camera.fly_mode = !gs.camera.fly_mode
@@ -325,8 +347,11 @@ main :: proc() {
 
             case .MOUSE_BUTTON_DOWN:
                 if gs.mouse_locked {
-                    if event.button.button == 1 { gs.left_held  = true; gs.left_pressed  = true }
-                    if event.button.button == 3 { gs.right_held = true; gs.right_pressed = true }
+                    switch event.button.button {
+                    case 1: gs.left_held  = true; gs.left_pressed  = true
+                    case 3: gs.right_held = true; gs.right_pressed = true
+                    case 2: pick_block(&gs)
+                    }
                 } else {
                     gs.ui.mouse_pos = {event.button.x, event.button.y}
                     if event.button.button == 1 {
@@ -342,38 +367,53 @@ main :: proc() {
             }
         }
 
+        if gs.ui.quit_requested { quit = true }
         if quit {
             if gs.save_enabled { save_all_modified(&gs) }
             break
         }
 
-        // Keyboard held-state for movement
+        // Held keys. Ctrl or a double-tapped W sprints, Shift sneaks (and
+        // sinks / flies down), Alt flies very fast.
         kb := SDL.GetKeyboardState(nil)
-        move_fwd   = kb[SDL.Scancode.W]
-        move_back  = kb[SDL.Scancode.S]
-        move_left  = kb[SDL.Scancode.A]
-        move_right = kb[SDL.Scancode.D]
-        run_fast   = kb[SDL.Scancode.LSHIFT]
-        run_ultra  = kb[SDL.Scancode.LALT]
+        move_fwd   := kb[SDL.Scancode.W]
+        move_back  := kb[SDL.Scancode.S]
+        move_left  := kb[SDL.Scancode.A]
+        move_right := kb[SDL.Scancode.D]
+        ctrl_held  := bool(kb[SDL.Scancode.LCTRL])
+        if !move_fwd { gs.sprint_latched = false }
+        sprint := ctrl_held || gs.sprint_latched
+        sneak  := bool(kb[SDL.Scancode.LSHIFT]) && !gs.combat.sword // drawn, Shift dodges
+        ultra  := bool(kb[SDL.Scancode.LALT])
+        if !gs.mouse_locked { move_fwd, move_back, move_left, move_right, sneak = false, false, false, false, false }
 
         // In fly mode, Space held moves up
-        if gs.camera.fly_mode && kb[SDL.Scancode.SPACE] {
+        if gs.camera.fly_mode && kb[SDL.Scancode.SPACE] && gs.mouse_locked {
             gs.jump_pressed = true // reuse as move_up in fly
         }
-        gs.camera.swim_up = kb[SDL.Scancode.SPACE]
+        gs.camera.swim_up = kb[SDL.Scancode.SPACE] && gs.mouse_locked
 
-        // Light dir: hold L + look direction. (Moved off Ctrl — Ctrl now
-        // modifies edits: Ctrl+scroll = brush radius, Ctrl+click = single.)
+        // Light dir: hold L + look direction.
         if gs.mouse_locked && kb[SDL.Scancode.L] {
             fwd := camera_forward(gs.camera)
             gs.light_dir = fwd
         }
 
-        // Ctrl+scroll: edit brush radius (0 = single voxel).
-        ctrl_held := bool(kb[SDL.Scancode.LCTRL])
-        if ctrl_held && wheel_dy != 0 {
-            gs.brush_radius = clamp(gs.brush_radius + (wheel_dy > 0 ? 1 : -1), 0, 8)
+        // The wheel walks the hotbar (down = next).
+        if wheel_dy != 0 && gs.mouse_locked && !gs.glider.deployed {
+            if gs.combat.sword { combat_toggle_sword(&gs) }
+            hotbar_select(&gs, (gs.hotbar_slot + (wheel_dy < 0 ? 1 : HOTBAR_SLOTS - 1)) % HOTBAR_SLOTS)
         }
+
+        // A solid hit freezes the world for a few frames (hit stop); the
+        // mouse still looks around.
+        world_dt := combat_world_dt(&gs, dt)
+        combat_in := Combat_Input{
+            attack = gs.left_pressed, attack_held = gs.left_held, special = gs.right_pressed, dodge = dodge_pressed,
+            move = {f32(int(move_right)) - f32(int(move_left)), f32(int(move_fwd)) - f32(int(move_back))},
+        }
+        if !gs.mouse_locked { combat_in = {} }
+        combat_pre_update(&gs, combat_in, world_dt)
 
         if gs.mouse_locked {
             if gs.glider.deployed {
@@ -381,12 +421,15 @@ main :: proc() {
                 glider_update(&gs, -mouse_dx, mouse_dy, dt,
                     move_fwd, move_back, move_left, move_right, ctrl_held)
             } else {
-                camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, dt,
+                camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, world_dt,
                     move_fwd, move_back, move_left, move_right, gs.jump_pressed,
-                    run_fast, run_ultra)
+                    sprint, sneak, ultra)
             }
         }
+        combat_post_update(&gs, world_dt)
+        slimes_update(&gs, world_dt)
         glider_view_update(&gs, dt)
+        combat_view_update(&gs, dt, world_dt)
 
         // Underground-ness (0 surface .. 1 deep below): drives cave darkness
         // and cave fog in the shaders. Smoothed ~0.5 s so moving through a
@@ -418,34 +461,26 @@ main :: proc() {
         integrate_far_tiles(&gs)
         stitch_pending_columns(&gs)
 
-        // Edits. The brush radius is user-set (Ctrl+scroll, 0 = single voxel)
-        // and applies to place AND break. Ctrl turns either button into a
-        // single-shot (one edit per press — e.g. Ctrl+right with brush 0 is
-        // a clean torch pickup); without Ctrl, holding repeats per frame.
-        left_edit  := ctrl_held ? gs.left_pressed  : gs.left_held
-        right_edit := ctrl_held ? gs.right_pressed : gs.right_held
-        if gs.mouse_locked && (left_edit || right_edit) {
+        // Edits, Minecraft style: left breaks, right places. A click edits at
+        // once; holding the button repeats every EDIT_REPEAT seconds. The
+        // brush radius (B) applies to both; torches are always one block.
+        gs.edit_timer -= dt
+        breaking := gs.left_pressed  || (gs.left_held  && gs.edit_timer <= 0)
+        placing  := gs.right_pressed || (gs.right_held && gs.edit_timer <= 0)
+        if gs.mouse_locked && !gs.glider.deployed && !gs.combat.sword && (breaking || placing) {
+            gs.edit_timer = EDIT_REPEAT
             fwd := camera_forward(gs.camera)
-            hit, nrm, hit_ok := raycast_voxel(&gs, gs.camera.pos, fwd, 200)
+            hit, nrm, hit_ok := raycast_voxel(&gs, gs.camera.pos, fwd, REACH)
             if hit_ok {
-                target: [3]int
-                block: Block_Type
-                if left_edit {
+                target := hit
+                block  := Block_Type.Air
+                if !breaking {
                     target = {hit[0] + nrm[0], hit[1] + nrm[1], hit[2] + nrm[2]}
                     block  = gs.selected_block
-                } else {
-                    target = hit
-                    block  = .Air
                 }
-                // Torch placement stays a single voxel regardless of brush,
-                // one per click.
-                radius  := gs.brush_radius
-                do_edit := true
-                if block == .Torch {
-                    radius  = 0
-                    do_edit = gs.left_pressed
-                }
-                if do_edit {
+                radius := block == .Torch ? 0 : gs.brush_radius
+                // Don't build a single block into yourself.
+                if block == .Air || radius > 0 || !aabb_hits_voxel(gs.camera.pos, target) {
                     old := Block_Type(u8(get_voxel(&gs, target[0], target[1], target[2])))
                     dirty: map[int]bool
                     defer delete(dirty)
@@ -461,7 +496,7 @@ main :: proc() {
         }
 
         flush_gpu_uploads(&gs)
-        entities_update(&gs, dt)
+        entities_update(&gs, world_dt)
         audio_update(&gs, dt)
         gpu_render(&gs)
         ui_build_and_render(&gs, dt)
@@ -476,4 +511,37 @@ main :: proc() {
             gs.prof_frames = 0
         }
     }
+}
+
+HOTBAR_SLOTS :: 9
+DEFAULT_HOTBAR :: [HOTBAR_SLOTS]Block_Type{.Grass, .Dirt, .Stone, .Log, .Leaves, .Sand, .Snow, .Terracotta, .Torch}
+EDIT_REPEAT :: f32(0.22) // seconds between edits while a mouse button is held
+REACH       :: f32(200)  // voxels: building far away is half the fun here
+
+hotbar_select :: proc(gs: ^Game_State, slot: int) {
+    gs.hotbar_slot = clamp(slot, 0, HOTBAR_SLOTS - 1)
+    gs.selected_block = gs.hotbar[gs.hotbar_slot]
+}
+
+// Middle click: the block you're looking at into your hand. Already on the
+// hotbar? Select it; otherwise it replaces the selected slot.
+pick_block :: proc(gs: ^Game_State) {
+    hit, _, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH)
+    if !ok { return }
+    b := Block_Type(u8(get_voxel(gs, hit.x, hit.y, hit.z)))
+    if b == .Air || b == .Water { return }
+    for h, i in gs.hotbar {
+        if h == b { hotbar_select(gs, i); return }
+    }
+    gs.hotbar[gs.hotbar_slot] = b
+    hotbar_select(gs, gs.hotbar_slot)
+}
+
+// Whether the player's box (eye at `eye`) overlaps voxel v.
+aabb_hits_voxel :: proc(eye: [3]f32, v: [3]int) -> bool {
+    lo := eye - {PLAYER_HALF_W, PLAYER_EYE_HEIGHT, PLAYER_HALF_W}
+    hi := eye + {PLAYER_HALF_W, PLAYER_HEAD_ABOVE, PLAYER_HALF_W}
+    return f32(v.x) < hi.x && f32(v.x + 1) > lo.x &&
+           f32(v.y) < hi.y && f32(v.y + 1) > lo.y &&
+           f32(v.z) < hi.z && f32(v.z + 1) > lo.z
 }

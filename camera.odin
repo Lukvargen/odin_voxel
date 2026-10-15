@@ -10,6 +10,9 @@ PLAYER_HEAD_ABOVE :: f32(0.3) // distance from eye to top of head
 GRAVITY        :: f32(36.0)
 JUMP_SPEED     :: f32(9.0)
 WALK_SPEED     :: f32(5.0)
+SPRINT_FACTOR  :: f32(1.6)   // Ctrl or double-tapped W
+SNEAK_FACTOR   :: f32(0.3)   // Shift: slow, and never walks off an edge
+FLY_SPEED      :: f32(11.0)
 WALK_ACCEL     :: f32(14.0)
 WALK_FRICTION  :: f32(12.0)
 AIR_ACCEL      :: f32(2.5)
@@ -28,6 +31,9 @@ Camera :: struct {
     fly_mode:          bool,
     on_ground:         bool,
     swim_up:           bool,   // jump held: swim upward in water
+    sprinting:         bool,
+    sneaking:          bool,
+    crouch:            f32,    // 0..1 sneak pose, eased (lowers the view)
     step_visual_offset: f32,  // negative when stepping up, lerps back to 0
 
     // View-only effects (glider.odin): never affect physics or aiming.
@@ -108,34 +114,41 @@ move_axis :: proc(gs: ^Game_State, pos: [3]f32, delta: [3]f32) -> (new_pos: [3]f
     return
 }
 
+// sprint/sneak: Ctrl / Shift. Flying, jump/sneak are up/down and ultra (Alt)
+// is for crossing the world.
 camera_update :: proc(cam: ^Camera, gs: ^Game_State, mouse_dx, mouse_dy, dt: f32,
                       move_fwd, move_back, move_left, move_right, jump: bool,
-                      run_fast, run_ultra: bool) {
+                      sprint, sneak, ultra: bool) {
     // Mouse look
     cam.yaw   += mouse_dx * 0.1
     cam.pitch  = clamp(cam.pitch - mouse_dy * 0.1, -89, 89)
 
+    cam.sprinting = sprint && move_fwd && !sneak
+    cam.sneaking  = sneak && !cam.fly_mode
+    cam.crouch += ((cam.sneaking ? f32(1) : 0) - cam.crouch) * min(dt * 12, 1)
     if cam.fly_mode {
-        _camera_update_fly(cam, dt, move_fwd, move_back, move_left, move_right, jump, run_fast, run_ultra)
+        _camera_update_fly(cam, dt, move_fwd, move_back, move_left, move_right, jump, sneak, cam.sprinting, ultra)
     } else {
-        _camera_update_walk(cam, gs, dt, move_fwd, move_back, move_left, move_right, jump, run_fast)
+        _camera_update_walk(cam, gs, dt, move_fwd, move_back, move_left, move_right, jump, cam.sprinting, cam.sneaking)
     }
 }
 
+// Creative-style flight: WASD on the level, jump up, sneak down.
 _camera_update_fly :: proc(cam: ^Camera, dt: f32,
-                            move_fwd, move_back, move_left, move_right, move_up: bool,
-                            run_fast, run_ultra: bool) {
-    speed: f32 = 10.0
-    if run_fast  { speed *= 4.0 }
-    if run_ultra { speed *= 40.0 }
+                            move_fwd, move_back, move_left, move_right, move_up, move_down: bool,
+                            sprint, ultra: bool) {
+    speed := FLY_SPEED
+    if sprint { speed *= 2.5 }
+    if ultra  { speed *= 40.0 }
 
-    fwd, right, _ := camera_basis(cam^)
+    fwd, right := camera_flat_forward(cam^), camera_flat_right(cam^)
     dir: [3]f32
     if move_fwd   { dir += fwd }
     if move_back  { dir -= fwd }
     if move_right { dir += right }
     if move_left  { dir -= right }
     if move_up    { dir += [3]f32{0, 1, 0} }
+    if move_down  { dir -= [3]f32{0, 1, 0} }
 
     norm := la.length(dir)
     if norm > 0.0001 {
@@ -146,9 +159,10 @@ _camera_update_fly :: proc(cam: ^Camera, dt: f32,
 }
 
 _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
-                             move_fwd, move_back, move_left, move_right, jump, run_fast: bool) {
+                             move_fwd, move_back, move_left, move_right, jump, sprint, sneak: bool) {
     wish_speed: f32 = WALK_SPEED
-    if run_fast { wish_speed *= 2.5 }
+    if sprint { wish_speed *= SPRINT_FACTOR }
+    if sneak  { wish_speed *= SNEAK_FACTOR }
 
     // Build XZ wish direction from input.
     flat_fwd   := camera_flat_forward(cam^)
@@ -174,6 +188,7 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
         }
         cam.velocity.y -= GRAVITY * 0.15 * dt
         if jump || cam.swim_up { cam.velocity.y += SWIM_UP_ACCEL * dt }
+        if sneak { cam.velocity.y -= SWIM_UP_ACCEL * 0.6 * dt }
         cam.on_ground = false
     } else if cam.on_ground {
         // Friction
@@ -221,6 +236,21 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
     new_pos := cam.pos
     was_on_ground := cam.on_ground
     cam.on_ground = false
+
+    // Sneaking on the ground never steps off an edge: a move that would leave
+    // nothing under the feet is dropped, axis by axis.
+    guard := sneak && was_on_ground
+    supported :: proc(gs: ^Game_State, p: [3]f32) -> bool {
+        y := int(math.floor(p.y - PLAYER_EYE_HEIGHT - 0.1))
+        for ix in int(math.floor(p.x - PLAYER_HALF_W)) ..= int(math.floor(p.x + PLAYER_HALF_W)) {
+            for iz in int(math.floor(p.z - PLAYER_HALF_W)) ..= int(math.floor(p.z + PLAYER_HALF_W)) {
+                if solid_at(gs, ix, y, iz) { return true }
+            }
+        }
+        return false
+    }
+    if guard && !supported(gs, new_pos + {delta.x, 0, 0}) { delta.x = 0; cam.velocity.x = 0 }
+    if guard && !supported(gs, new_pos + {delta.x, 0, delta.z}) { delta.z = 0; cam.velocity.z = 0 }
 
     // X axis
     moved_x: bool

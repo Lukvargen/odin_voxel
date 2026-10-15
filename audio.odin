@@ -47,6 +47,9 @@ Sound :: enum u8 {
     Drip, // water dripping in a cave
     Bird_Warble, Bird_Whistle, Bird_Trill, Bird_Chatter,
     Click,
+    // combat.odin, slime.odin
+    Sword_Draw, Sword_Swing, Dodge, Slam, Hurt,
+    Slime_Hop, Slime_Hit, Slime_Pop,
 }
 
 Loop_Kind :: enum u8 { Wind, Rush, Leaves, Water, Underwater, Cave, Insects }
@@ -93,11 +96,10 @@ Audio :: struct {
     next_bird, next_eagle, next_drip, next_biome, last_edit: f32,
 }
 
-audio: Audio
+// The volume settings start at 70%, with room to turn them up.
+audio := Audio{effects = 0.7, ambience = 0.7}
 
 audio_init :: proc() {
-    // The volume settings start at 70%, with room to turn them up.
-    audio.effects, audio.ambience = 0.7, 0.7
     if !SDL.InitSubSystem({.AUDIO}) {
         fmt.eprintln("No audio:", SDL.GetError())
         return
@@ -817,6 +819,14 @@ synth :: proc(sound: Sound) -> []f32 {
     case .Bird_Trill:   return synth_trill()
     case .Bird_Chatter: return synth_chatter()
     case .Click:       return synth_click()
+    case .Sword_Draw:  return synth_draw()
+    case .Sword_Swing: return synth_whoosh(0.28, 0.06, 0.5)
+    case .Dodge:       return synth_whoosh(0.3, 0.02, 0.18)
+    case .Slam:        return crunch({length = 0.9, attack = 0.002, decay = 0.6, band = {0.01, 0.3}, hiss = 0.6, grains = 1800, grain_len = 0.006, thump = 1, thump_hz = 42})
+    case .Hurt:        return synth_hurt()
+    case .Slime_Hop:   return synth_boing()
+    case .Slime_Hit:   return synth_squelch(0.35, 1)
+    case .Slime_Pop:   return synth_squelch(0.6, 1.8)
     }
     return new_buf(0.01)
 }
@@ -1066,6 +1076,82 @@ note :: proc(buf: []f32, start, length, f0, f1, wobble, amp: f32) {
         phase = fract(phase + f / SAMPLE_RATE)
         buf[i0 + j] += math.sin(phase * math.TAU) * math.sin(math.PI * lt / length) * amp
     }
+}
+
+// Drawing the sword: a scrape off the scabbard ringing out into a bright shing.
+@(private="file")
+synth_draw :: proc() -> []f32 {
+    buf := crunch({length = 0.6, attack = 0.06, decay = 0.4, band = {0.3, 0.9}, hiss = 0.4, grains = 900, grain_len = 0.001, thump = 0, thump_hz = 100, ring = 0.6, ring_hz = 3200, ring_q = 0.01})
+    normalize(buf, 0.6)
+    for f in ([3]f32{2650, 4180, 5900}) {
+        p: f32
+        for &s, i in buf {
+            t := f32(i) / SAMPLE_RATE
+            s += osc(&p, f * rand.float32_range(0.995, 1.005)) * env(t - 0.08, 0.005, 0.45) * 0.13
+        }
+    }
+    return buf
+}
+
+// Air torn by a blade: noise through a band that sweeps up then down.
+@(private="file")
+synth_whoosh :: proc(length, attack, bright: f32) -> []f32 {
+    buf := new_buf(length)
+    lo, hi: f32
+    for &s, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        k := math.sin(math.PI * clamp(t / length, 0, 1))
+        n := white()
+        lo += (n - lo) * (0.01 + 0.05 * k * bright)
+        hi += (n - hi) * (0.04 + 0.3 * k * bright)
+        s = (hi - lo) * env(t, attack, length * 0.7)
+    }
+    return buf
+}
+
+// A wet slap into jelly: a low knock, a squelch, and a bloop sliding down.
+@(private="file")
+synth_squelch :: proc(length, size: f32) -> []f32 {
+    buf := crunch({length = length, attack = 0.002, decay = length * 0.6, band = {0.02, 0.25}, hiss = 0.3, grains = 1400 * size, grain_len = 0.004, thump = 1, thump_hz = 70 / size})
+    normalize(buf, 0.7)
+    p: f32
+    f0 := rand.float32_range(380, 460) / size
+    for &s, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        s += osc(&p, slide(t, f0, f0 * 0.45, 0.12) + 30 * math.sin(t * 140)) * env(t, 0.004, 0.16 * size) * 0.5
+    }
+    return buf
+}
+
+// A slime's hop: a soft boing rising, with a damp pat.
+@(private="file")
+synth_boing :: proc() -> []f32 {
+    buf := crunch({length = 0.3, attack = 0.002, decay = 0.08, band = {0.03, 0.2}, hiss = 0.4, grains = 600, grain_len = 0.003, thump = 0.6, thump_hz = 90})
+    normalize(buf, 0.4)
+    p: f32
+    f0 := rand.float32_range(170, 210)
+    for &s, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        s += osc(&p, slide(t, f0, f0 * 1.9, 0.18) + 18 * math.sin(t * 90)) * env(t, 0.006, 0.22) * 0.6
+    }
+    return buf
+}
+
+// Getting hit: a dull body thump and a short breathy grunt.
+@(private="file")
+synth_hurt :: proc() -> []f32 {
+    buf := crunch({length = 0.4, attack = 0.001, decay = 0.2, band = {0.01, 0.12}, hiss = 0.5, grains = 300, grain_len = 0.004, thump = 1, thump_hz = 60})
+    normalize(buf, 0.7)
+    p, lp: f32
+    for &s, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        n := white()
+        lp += (n - lp) * 0.2
+        voice := osc(&p, slide(t, 160, 110, 0.2))
+        voice = voice * 0.6 + math.sign(voice) * 0.25 + lp * 0.4 // a little buzz and breath
+        s += voice * env(t - 0.02, 0.02, 0.2) * 0.35
+    }
+    return buf
 }
 
 // A run of quick, wandering notes.
