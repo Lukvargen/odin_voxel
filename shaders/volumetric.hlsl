@@ -106,7 +106,7 @@ void main(uint3 id : SV_DispatchThreadID) {
         accum = a;
     }
 
-    float3 shaft = accum * phase * VOL_INTENSITY * sun_tint_d(L);
+    float3 shaft = accum * phase * VOL_INTENSITY * sun_tint_d(L) * (u_sun_intensity / 1.9);
     // Damp sun shafts underground so the closed-form sky term can't glow
     // through cave ceilings near the surface.
     shaft *= lerp(1.0, 0.25, u_cave_factor);

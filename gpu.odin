@@ -44,6 +44,8 @@ Camera_Uniform :: struct #packed {
     ent_debug:      i32,   // 1/2 = bench: skip entity view rays / shadows; 4 = no cumulus (bench or options)
     _pad5:          f32,
     near_circle:    [4]f32, // near (voxel) region: XZ center, radius in voxels, unused
+    sun_true:       [4]f32, // xyz = real sun direction (light_dir is the moon at night), w = night 0..1
+    atmos:          [4]f32, // x = valley mist amount, yzw unused
     thermals:       [MAX_SKY_THERMALS][4]f32, // cumulus over thermals: XZ centre at cloud base, radius, strength
     thermal_count:  [4]i32, // x = count
     cloud_puffs:    [MAX_SKY_THERMALS * 4][4]f32, // per thermal 4 towers: offset (cloud radii), radius
@@ -623,7 +625,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         vol            = (gs.vol_enabled ? 100 : 0) + gs.vol_steps,
         entity_count   = gs.entity_count,
         time           = f32(SDL.GetTicks()) / 1000.0,
-        exposure       = gs.exposure,
+        exposure       = gs.exposure * gs.day.eye,
         fog_density    = gs.fog_density,
         cave_factor    = gs.cave_factor,
         sun_intensity  = gs.sun_intensity,
@@ -638,6 +640,8 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
             max(f32(near_r * CHUNK_VOXELS) - 6, 0),
             0,
         },
+        sun_true       = {gs.day.sun_true.x, gs.day.sun_true.y, gs.day.sun_true.z, gs.day.night},
+        atmos          = {gs.day.mist, 0, 0, 0},
     }
     sky_thermals_update(gs)
     for th, i in gs.sky_thermals[:gs.sky_thermal_count] {

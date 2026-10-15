@@ -1437,6 +1437,24 @@ menu_graphics :: proc(gs: ^Game_State) {
         row_label("Reflections")
         if i := segmented("Bnc", {"1", "2", "3", "4", "5"}, int(gs.reflect_amount) - 1); i >= 0 { gs.reflect_amount = i32(i + 1) }
     }
+    // Time of day: dragging sets the clock; the toggle runs or stops it.
+    if clay.UI()(setting_row()) {
+        row_label("Time of day")
+        t := gs.day.hour / 24
+        hh, mm := day_clock(gs.day.hour)
+        if slider(gs, clay.ID("Hour"), &t, fmt.tprintf("%02d:%02d", hh, mm)) {
+            gs.day.hour = clamp(t, 0, 0.999) * 24
+            gs.day.manual = false
+            day_update(gs, 0)
+        }
+    }
+    if clay.UI()(setting_row()) {
+        row_label("Day cycle")
+        running := !gs.day.paused
+        toggle("Day", &running)
+        gs.day.paused = !running
+        if running { gs.day.manual = false }
+    }
     // Exposure 0.25..4 and haze (fog density 0.0003..0.006), both on log scales.
     if clay.UI()(setting_row()) {
         row_label("Exposure")

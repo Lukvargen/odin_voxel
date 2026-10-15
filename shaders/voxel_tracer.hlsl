@@ -46,31 +46,40 @@ float4 sky_color(float3 dir) {
     return float4(sky_color_d(dir, light_dir_normalized), 1.0);
 }
 
-// Spatial fog: three transmittance terms composed multiplicatively.
-//  1) distance haze (squared-exponential, tunable via u_fog_density)
+// Spatial fog: transmittance terms composed multiplicatively.
+//  1) distance haze (squared-exponential, tunable via u_fog_density) times a
+//     gentle exponential aerial perspective, so ridges fade into layers of
+//     blue with distance instead of all reading at the same contrast
 //  2) exponential HEIGHT fog — density falls off with altitude, integrated in
 //     closed form along the ray → valleys collect haze, peaks stay clear
 //  3) cave fog — short-range murk that scales with u_cave_factor so caves
 //     feel enclosed; tinted near-black blue instead of sky color
+//  4) valley mist — a thin dense layer just above sea level whose amount
+//     follows the clock (u_atmos.x: thickest at dawn)
 #define FOG_BASE_Y         10.0   // terrain minimum — height-fog reference plane
 #define FOG_FALLOFF        40.0   // height-fog density e-fold distance (voxels)
 #define FOG_HEIGHT_DENSITY 0.004  // height-fog density at FOG_BASE_Y
+#define AERIAL_DENSITY     0.0003 // exponential aerial perspective per voxel
 #define CAVE_FOG_DENSITY   0.025  // cave murk density at cave_factor = 1
+#define MIST_BASE_Y        24.0   // sea level
+#define MIST_FALLOFF       13.0
+#define MIST_DENSITY       0.018
+
+// Optical depth from the camera along rd for dist through a medium of
+// density r0 * exp(-(y - cam_y) * k) (closed form, near-horizontal guarded).
+float height_od(float r0, float k, float dist, float3 rd) {
+    return (abs(rd.y) > 1e-3) ? r0 * (1.0 - exp(-dist * rd.y * k)) / (rd.y * k) : r0 * dist;
+}
 
 float4 apply_fog(float4 color, float dist, float3 ray_dir) {
     float3 rd = normalize(ray_dir);
 
-    // 1) Distance haze
-    float t_dist = clamp(exp(-pow(dist * u_fog_density, 2.0)), 0.0, 1.0);
+    // 1) Distance haze + aerial perspective
+    float t_dist = clamp(exp(-pow(dist * u_fog_density, 2.0)), 0.0, 1.0) * exp(-dist * AERIAL_DENSITY);
 
-    // 2) Height fog: rho(y) = H * exp(-(y - BASE)/FALLOFF); optical depth along
-    // the ray has a closed form (guard near-horizontal rays).
+    // 2) Height fog: rho(y) = H * exp(-(y - BASE)/FALLOFF)
     float k  = 1.0 / FOG_FALLOFF;
-    float r0 = FOG_HEIGHT_DENSITY * exp(-(u_cam_pos.y - FOG_BASE_Y) * k);
-    float od = (abs(rd.y) > 1e-3)
-             ? r0 * (1.0 - exp(-dist * rd.y * k)) / (rd.y * k)
-             : r0 * dist;
-    float t_height = exp(-max(od, 0.0));
+    float t_height = exp(-max(height_od(FOG_HEIGHT_DENSITY * exp(-(u_cam_pos.y - FOG_BASE_Y) * k), k, dist, rd), 0.0));
 
     // 3) Cave murk
     float t_cave = exp(-dist * CAVE_FOG_DENSITY * u_cave_factor);
@@ -84,16 +93,32 @@ float4 apply_fog(float4 color, float dist, float3 ray_dir) {
     fog_color.rgb = lerp(fog_color.rgb, float3(0.010, 0.014, 0.022), u_cave_factor);
 
     float transmit = t_dist * t_height * t_cave;
-    return lerp(fog_color, color, transmit);
+    color = lerp(fog_color, color, transmit);
+
+    // 4) Valley mist: a little brighter than the haze (it scatters the sun
+    // it sits in), and none of it underground.
+    float mist = u_atmos.x * (1.0 - u_cave_factor);
+    if (mist > 0.001) {
+        float km = 1.0 / MIST_FALLOFF;
+        // Capped at the sea-level density: below it (caves, under water)
+        // the exponential would keep growing.
+        float od = min(height_od(MIST_DENSITY * mist * exp(-(u_cam_pos.y - MIST_BASE_Y) * km), km, dist, rd),
+                       dist * MIST_DENSITY * mist);
+        float3 mist_col = fog_color.rgb * 1.08 + sun_tint() * (u_sun_intensity * 0.05 * saturate(light_dir_normalized.y + 0.1));
+        color.rgb = lerp(mist_col, color.rgb, exp(-max(od, 0.0)));
+    }
+    return color;
 }
 
 // ---- Light colors -------------------------------------------------------------
 
-// Ambient light from the open sky at full sky light: cool blue by day, warm
-// and dim with the sun at the horizon.
+// Ambient light from the open sky at full sky light: blue by day, dusky
+// lavender with the sun low (a cool fill against the warm low sun, so
+// shadows read blue at golden hour), deep blue at night.
 float3 sky_ambient() {
-    return lerp(float3(0.22, 0.16, 0.13), float3(0.38, 0.48, 0.66),
-                smoothstep(0.0, 0.4, sun_elevation()));
+    float3 day = lerp(float3(0.27, 0.26, 0.34), float3(0.36, 0.46, 0.66),
+                      smoothstep(0.0, 0.4, saturate(u_sun_true.y)));
+    return lerp(day, float3(0.036, 0.052, 0.100), u_sun_true.w);
 }
 
 #define TORCH_LIGHT_COLOR float3(1.6, 0.95, 0.45) // block light at level 15
@@ -534,23 +559,6 @@ static const float2 aa_offsets[4] = {
 #define CLOUD_STEPS  20
 #define CLOUD_TOP    (CUMULUS_BASE + 160.0) // above any tower (1.75 x the largest radius)
 #define CLOUD_SIGMA  0.07   // extinction per metre at density 1
-
-float vnoise3(float3 p) {
-    float3 i = floor(p);
-    float3 f = p - i;
-    f = f * f * (3.0 - 2.0 * f);
-    int3 ip = int3(i);
-    float a = hash31i(ip);
-    float b = hash31i(ip + int3(1, 0, 0));
-    float c = hash31i(ip + int3(0, 1, 0));
-    float d = hash31i(ip + int3(1, 1, 0));
-    float e = hash31i(ip + int3(0, 0, 1));
-    float g = hash31i(ip + int3(1, 0, 1));
-    float h = hash31i(ip + int3(0, 1, 1));
-    float k = hash31i(ip + int3(1, 1, 1));
-    return lerp(lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y),
-                lerp(lerp(e, g, f.x), lerp(h, k, f.x), f.y), f.z);
-}
 
 // Density of cloud ci (u_thermals[ci]: xz centre, radius, strength) at p,
 // 0..1: a wide flat-bottomed base plus four towers (u_cloud_puffs), all as

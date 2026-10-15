@@ -93,6 +93,7 @@ Game_State :: struct {
 
     // Settings
     light_dir:      [3]f32,
+    day:            Day_Cycle, // time of day: sun, moon, night, mist (daycycle.odin)
     reflect_amount: i32,
     aa_samples:     i32,   // anti-alias samples: 1/2/4 (F2 cycles)
     shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
@@ -147,7 +148,6 @@ main :: proc() {
     gs.render_scale   = RENDER_SCALE // 1 = full-res, 2/4 = pixel-art (options screen)
     gs.render_w       = TEX_W / gs.render_scale
     gs.render_h       = TEX_H / gs.render_scale
-    gs.light_dir      = {0.55, 0.52, 0.65} // mid-afternoon: long shadows, golden light
     gs.exposure       = 1.0
     gs.fog_density    = 0.0006 // far terrain reaches ~1900 voxels; haze starts showing past ~600
     gs.sun_intensity  = 1.9
@@ -158,6 +158,7 @@ main :: proc() {
     gs.clouds_enabled   = true
     gs.far_enabled      = true
     gs.camera.pos     = find_spawn()
+    day_init(&gs)
     if bench {
         // bench [quick] [at=x,z] [shot_dir]
         for a in os.args[2:] {
@@ -170,6 +171,11 @@ main :: proc() {
             case a == "ui": bench_ui = true
             case a == "build": bench_build = true
             case a == "combat": bench_combat = true
+            case strings.has_prefix(a, "hour="):
+                h, _ := strconv.parse_f32(a[5:])
+                gs.day.hour = h
+                day_update(&gs, 0)
+                gs.day.eye = day_target_eye(gs.day.night, gs.day.sun_true.y)
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])
@@ -404,7 +410,10 @@ main :: proc() {
         if gs.mouse_locked && kb[SDL.Scancode.L] {
             fwd := camera_forward(gs.camera)
             gs.light_dir = fwd
+            gs.sun_intensity = SUN_PEAK
+            gs.day.paused, gs.day.manual = true, true // until the clock is set or restarted (options)
         }
+        day_update(&gs, dt)
 
         // The wheel walks the hotbar (down = next) or sizes the current
         // tool (up = bigger), by the modifiers held (build_tools.odin).

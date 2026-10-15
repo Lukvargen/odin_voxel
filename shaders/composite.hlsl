@@ -85,6 +85,10 @@ void main(uint3 id : SV_DispatchThreadID) {
     float lum = dot(c2, float3(0.2126, 0.7152, 0.0722));
     c2 = lerp(lum.xxx, c2, GRADE_SATURATION);
     c2 = saturate((c2 - 0.5) * GRADE_CONTRAST + 0.5);
+    // Night vision: colour fades and shifts blue in moonlight (scotopic),
+    // except for bright things (torches keep their warmth).
+    float night = u_sun_true.w * (1.0 - smoothstep(0.25, 0.7, lum));
+    c2 = lerp(c2, lum * float3(0.80, 0.92, 1.18), night * 0.65);
     // Split toning: shadows lean cool, highlights warm (sunlit vs sky-lit).
     c2 *= lerp(float3(0.96, 0.99, 1.05), float3(1.03, 1.0, 0.95), smoothstep(0.1, 0.8, lum));
     // Vignette: corners ~15% darker, pulls the eye to the centre.

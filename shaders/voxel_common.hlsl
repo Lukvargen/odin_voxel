@@ -108,13 +108,21 @@ float3 hash33i(int3 v) {
 //   StructuredBuffer<int2> chunk_owner;   StructuredBuffer<uint> voxel_mask;
 //   cbuffer CameraUniforms { ... u_light_dir_raw ... }  (only sun_tint_d uses it indirectly via arg)
 
-// Sun tint by elevation (pass-agnostic; takes normalized light dir).
+// Colour of the light along Ln (the sun by day, the moon at night: see
+// u_sun_true). Sun: orange at the horizon, golden through the afternoon, near
+// white only high overhead. Moon: cool silver-blue.
 float3 sun_tint_d(float3 Ln) {
-    // Orange at the horizon, golden through the afternoon, near white only
-    // with the sun high overhead.
     float elev = clamp(Ln.y, 0.0, 1.0);
-    float3 c = lerp(float3(1.0, 0.45, 0.10), float3(1.0, 0.88, 0.70), smoothstep(0.0, 0.30, elev));
-    return lerp(c, float3(1.0, 0.97, 0.92), smoothstep(0.45, 0.95, elev));
+    float3 c = lerp(float3(1.0, 0.42, 0.10), float3(1.0, 0.85, 0.66), smoothstep(0.0, 0.30, elev));
+    c = lerp(c, float3(1.0, 0.96, 0.90), smoothstep(0.45, 0.95, elev));
+    return lerp(c, float3(0.55, 0.68, 1.0), u_sun_true.w);
+}
+
+// Colour of the real sun (for the sky), whatever lights the world.
+float3 true_sun_tint() {
+    float elev = clamp(u_sun_true.y, 0.0, 1.0);
+    float3 c = lerp(float3(1.0, 0.42, 0.10), float3(1.0, 0.85, 0.66), smoothstep(0.0, 0.30, elev));
+    return lerp(c, float3(1.0, 0.96, 0.90), smoothstep(0.45, 0.95, elev));
 }
 
 // voxel_chunk packs 4 voxels (1 byte each) per uint.
@@ -342,27 +350,113 @@ float fbm2(float2 p) {
     return v; // ~[0,1]
 }
 
+float vnoise3(float3 p) {
+    float3 i = floor(p);
+    float3 f = p - i;
+    f = f * f * (3.0 - 2.0 * f);
+    int3 ip = int3(i);
+    float a = hash31i(ip);
+    float b = hash31i(ip + int3(1, 0, 0));
+    float c = hash31i(ip + int3(0, 1, 0));
+    float d = hash31i(ip + int3(1, 1, 0));
+    float e = hash31i(ip + int3(0, 0, 1));
+    float g = hash31i(ip + int3(1, 0, 1));
+    float h = hash31i(ip + int3(0, 1, 1));
+    float k = hash31i(ip + int3(1, 1, 1));
+    return lerp(lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y),
+                lerp(lerp(e, g, f.x), lerp(h, k, f.x), f.y), f.z);
+}
+
 #define CLOUD_SCALE  1.6    // sky-plane uv scale (smaller = bigger clouds)
-#define CLOUD_COVER  0.48   // fbm threshold (higher = fewer clouds)
+#define CLOUD_COVER  0.50   // fbm threshold (higher = fewer clouds)
 #define CLOUD_DRIFT  float2(0.004, 0.0015) // uv/sec
 
+// Stars: one candidate per cell of a 3D grid over the unit sphere, so they
+// are fixed to directions. A faint milky band crosses the sky. The sky turns
+// slowly with the clock.
+float3 night_sky(float3 dir) {
+    float a = u_time * 0.004;
+    float ca = cos(a), sa = sin(a);
+    float3 d = float3(dir.x * ca - dir.z * sa, dir.y, dir.x * sa + dir.z * ca);
+    float3 p = d * 260.0;
+    int3   c = int3(floor(p));
+    float  h = hash31i(c + int3(11, 23, 5));
+    float3 col = float3(0, 0, 0);
+    if (h > 0.985) {
+        float3 sp = float3(c) + 0.5 + (hash33i(c) - 0.5) * 0.5;
+        float  r  = length(p - sp);
+        float  b  = (h - 0.985) / 0.015;               // 0..1, few bright ones
+        float  tw = 0.75 + 0.25 * sin(u_time * (2.0 + 5.0 * hash31i(c)) + h * 40.0);
+        float3 tint = lerp(float3(1.0, 0.82, 0.65), float3(0.70, 0.82, 1.0), hash31i(c + 99));
+        col += tint * (0.25 + 2.6 * b * b) * tw * smoothstep(0.55, 0.0, r);
+    }
+    // Milky way: a band of soft fbm around a tilted great circle.
+    // 3D noise on the direction: seamless and unstretched on the sphere.
+    float off  = dot(d, normalize(float3(0.35, 0.55, -0.76)));
+    float band = exp(-pow(off * 3.2, 2.0));
+    float neb  = 0.0;
+    if (band > 0.02) {
+        float3 q = d * 7.0 + 31.0;
+        neb = vnoise3(q) * 0.55 + vnoise3(q * 2.1) * 0.30 + vnoise3(q * 4.3) * 0.15;
+    }
+    col += float3(0.10, 0.11, 0.16) * band * smoothstep(0.35, 0.8, neb) * 0.9;
+    return col * smoothstep(0.0, 0.25, dir.y);
+}
+
 float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt, bool clouds) {
-    float t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
-    float elev = clamp(Ln.y, 0.0, 1.0);
-    float3 horizon = lerp(float3(0.90, 0.55, 0.25), float3(0.74, 0.83, 0.93), smoothstep(0.0, 0.3, elev));
-    float3 zenith  = lerp(float3(0.20, 0.10, 0.05), float3(0.08, 0.28, 0.70), smoothstep(0.0, 0.4, elev));
+    float3 S = u_sun_true.xyz;          // the real sun (Ln is the moon at night)
+    float  night = u_sun_true.w;
+    float  t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
+    float  elev = clamp(S.y, 0.0, 1.0);
+    // Low sun (and the twilight after it sets): warm horizon, deep zenith.
+    float  golden = 1.0 - smoothstep(0.0, 0.32, S.y);
+    float3 horizon = lerp(float3(0.70, 0.80, 0.92), float3(0.98, 0.56, 0.30), golden);
+    float3 zenith  = lerp(float3(0.10, 0.30, 0.68), float3(0.12, 0.22, 0.48), golden);
+    // Night: deep blue-black, horizon a touch lighter (airglow).
+    horizon = lerp(horizon, float3(0.022, 0.034, 0.064), night);
+    zenith  = lerp(zenith,  float3(0.004, 0.008, 0.024), night);
     float3 sky = lerp(horizon, zenith, pow(t, 0.55));
-    float sun_dot  = dot(normalize(dir), Ln);
-    float sun_disc = smoothstep(0.9985, 0.9995, sun_dot) * disc_amt;
-    float sun_glow = smoothstep(0.960,  0.9985, sun_dot) * 0.4 * glow_amt;
-    sky = lerp(sky, sun_tint_d(Ln), sun_disc + sun_glow * 0.6);
+
+    // Sunset band: the sky low over the sun's side blazes orange-pink, the
+    // opposite horizon turns dusky violet (the earth's shadow).
+    float2 hd = dir.xz / max(length(dir.xz), 1e-4);
+    float2 hs = S.xz / max(length(S.xz), 1e-4);
+    float  side = dot(hd, hs) * 0.5 + 0.5;
+    float  low  = exp(-abs(dir.y) * 5.0);
+    float  dusk = golden * (1.0 - smoothstep(-0.05, 0.18, -S.y));
+    sky += float3(1.00, 0.36, 0.10) * low * pow(side, 3.0) * dusk * 0.55;
+    sky  = lerp(sky, sky * float3(0.80, 0.76, 0.95), low * (1.0 - side) * dusk * 0.5);
+
+    float sun_dot  = dot(normalize(dir), S);
+    float sun_vis  = smoothstep(-0.03, 0.01, S.y);
+    float sun_disc = smoothstep(0.9985, 0.9995, sun_dot) * disc_amt * sun_vis;
+    float sun_glow = smoothstep(0.960,  0.9985, sun_dot) * 0.4 * glow_amt * sun_vis;
+    float3 st = true_sun_tint();
+    sky = lerp(sky, st, sun_disc + sun_glow * 0.6);
     // The disc itself is far brighter than the sky: it blooms, and still
     // shows as a bright patch through thin cloud.
-    sky += sun_tint_d(Ln) * sun_disc * 6.0;
+    sky += st * sun_disc * 6.0;
     // Wide forward-scatter halo: the sky around the sun and the haze toward
     // it brighten and warm, the opposite sky stays deep blue.
     float halo = pow(saturate(sun_dot * 0.5 + 0.5), 6.0);
-    sky += sun_tint_d(Ln) * float3(0.30, 0.22, 0.12) * halo * glow_amt * (1.0 - t * 0.5);
+    sky += st * float3(0.30, 0.22, 0.12) * halo * glow_amt * (1.0 - t * 0.5) * smoothstep(-0.15, 0.05, S.y);
+
+    // Night: stars, and the moon opposite the sun with a soft halo.
+    if (night > 0.0) {
+        float3 M = -S;
+        float  md = dot(normalize(dir), M);
+        float3 nsky = disc_amt > 0.0 ? night_sky(dir) * disc_amt : float3(0, 0, 0); // fog colour: no stars
+        float  moon = smoothstep(0.99955, 0.99975, md) * disc_amt;
+        if (moon > 0.0) {
+            // Maria: darker patches on the disc.
+            float3 off = normalize(dir) - M;
+            float  mar = vnoise2(off.xz * 900.0 + 3.0) * 0.6 + vnoise2(off.xy * 2100.0) * 0.4;
+            nsky = lerp(nsky, float3(0.95, 0.96, 1.0) * (1.5 - 0.6 * smoothstep(0.45, 0.7, mar)), moon);
+        }
+        nsky += float3(0.10, 0.13, 0.20) * pow(saturate(md), 400.0) * glow_amt;
+        nsky += float3(0.05, 0.06, 0.10) * pow(saturate(md * 0.5 + 0.5), 8.0) * glow_amt;
+        sky += nsky * night * smoothstep(0.0, 0.05, M.y + 0.05);
+    }
 
     // Cloud layer, drawn over the disc (sun behind cloud = dimmed). Project
     // the ray onto a flat sky plane; fade out at the horizon (projection
@@ -371,10 +465,14 @@ float3 sky_color_impl(float3 dir, float3 Ln, float disc_amt, float glow_amt, boo
         float2 uv  = dir.xz / (dir.y + 0.15) * CLOUD_SCALE + u_time * CLOUD_DRIFT;
         float  den = smoothstep(CLOUD_COVER, CLOUD_COVER + 0.32, fbm2(uv));
         den *= smoothstep(0.02, 0.18, dir.y);
-        // Sunlit tops vs gray-blue underside by density; warm at low sun.
-        float3 lit   = float3(1.04, 1.02, 0.98) * lerp(float3(1,1,1), sun_tint_d(Ln), 0.35);
-        float3 shade = float3(0.62, 0.67, 0.78);
+        // Sunlit tops vs grey-blue undersides by density. Near sunset the
+        // clouds catch the light: gold toward the sun, rose away from it.
+        float3 glow  = lerp(float3(1.0, 0.55, 0.45), float3(1.15, 0.62, 0.28), side);
+        float3 lit   = lerp(float3(1.04, 1.02, 0.98), glow, golden * 0.75);
+        float3 shade = lerp(float3(0.62, 0.67, 0.78), float3(0.62, 0.54, 0.58), golden);
         float3 ccol  = lerp(lit, shade, den * 0.7);
+        // After dusk: dark silhouettes against the stars, faintly moonlit.
+        ccol = lerp(ccol, float3(0.035, 0.045, 0.07), night);
         sky = lerp(sky, ccol, den * 0.9);
     }
     return sky;
