@@ -174,6 +174,7 @@ main :: proc() {
             case a == "slimes": bench_slimes = true
             case a == "enemies": bench_enemies = true
             case a == "fight": bench_fight = true
+            case a == "nav": bench_nav = true
             case a == "build": bench_build = true
             case a == "combat": bench_combat = true
             case strings.has_prefix(a, "hour="):
@@ -435,6 +436,7 @@ main :: proc() {
         world_dt := combat_world_dt(&gs, dt)
         combat_in := Combat_Input{
             attack = gs.left_pressed, attack_held = gs.left_held, special = gs.right_pressed, dodge = dodge_pressed,
+            block = bool(kb[SDL.Scancode.F]),
             move = {f32(int(move_right)) - f32(int(move_left)), f32(int(move_fwd)) - f32(int(move_back))},
         }
         if !gs.mouse_locked { combat_in = {} }

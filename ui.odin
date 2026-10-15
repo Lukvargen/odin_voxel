@@ -1544,10 +1544,10 @@ menu_controls :: proc(gs: ^Game_State) {
             }
         }
     }
-    moving   := Group{"Moving", {"WASD", "move", "Ctrl  or  W W", "sprint", "Shift", "sneak (won't fall off)", "Space", "jump; hold to swim up", "Space twice", "fly: Shift down, Alt fast"}}
+    moving   := Group{"Moving", {"WASD", "move", "Ctrl  or  W W", "sprint", "Shift", "sneak: quiet, hard to spot, won't fall off", "Space", "jump; hold to swim up", "Space twice", "fly: Shift down, Alt fast"}}
     building := Group{"Building", {"L / R click", "break / place; hold repeats", "Middle click", "pick the block you look at", "1-9, wheel", "hotbar", "E", "all blocks", "B, Ctrl+wheel", "brush size", "T", "tool: block / area / shape", "Ctrl Z / Ctrl Y", "undo / redo"}}
     tools    := Group{"Area and shape", {"Area: hold L / R", "drag a box, let go", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "area height; shape size", "Shift+wheel", "shape height", "Alt+wheel", "turn the shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V", "cycle back"}}
-    fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll"}}
+    fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll", "F (hold)", "guard; parry just in time"}}
     gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
     other    := Group{"Other", {"F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)"}}
     cols := controls_columns(gs) == 3 ? [][]Group{{moving, building}, {tools, gliding}, {fighting, other}} : [][]Group{{moving, building, fighting}, {tools, gliding, other}}

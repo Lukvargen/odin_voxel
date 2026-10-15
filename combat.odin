@@ -19,6 +19,10 @@ import la "core:math/linalg"
 //   (once per jump).
 // - Shift: a dodge roll the way you're moving (backwards standing still),
 //   briefly untouchable; cancels a swing; once per jump in the air.
+// - F (hold): guard. Hits from in front land as a fraction of themselves
+//   with little knockback; raised just before a hit lands (PARRY_WINDOW) it
+//   is a parry: nothing gets through and the attacker is left reeling. You
+//   move slowly and can't swing while guarding.
 //
 // A hit stops the sword in what it hit for a few hundredths of a second
 // while the slime shudders in place (hit stop), and the rest of the world
@@ -67,6 +71,14 @@ DODGE_SPEED        :: f32(16)   // at least this fast the dodge's way...
 DODGE_TIME         :: f32(0.24) // ...for this long
 DODGE_INVULN       :: f32(0.32)
 DODGE_COOLDOWN     :: f32(0.45)
+
+BLOCK_CHIP         :: f32(0.2)  // share of a blocked hit that gets through...
+BLOCK_CHIP_HEAVY   :: f32(0.35) // ...of a heavy one (HEAVY_HIT or more)
+HEAVY_HIT          :: f32(20)
+BLOCK_KNOCK        :: f32(0.35) // knockback kept when blocked
+BLOCK_ARC          :: f32(0.3)  // cos of the half angle in front a guard covers (~73 deg)
+BLOCK_SPEED        :: f32(0.5)  // of walking speed, guarding
+PARRY_WINDOW       :: f32(0.22) // a guard this fresh parries
 
 SWING_PIVOT        :: [3]f32{0.06, -0.24, 0.45} // view space: swings circle around it...
 SWING_RADIUS       :: f32(0.36) // ...the grip this far out
@@ -132,6 +144,7 @@ Sword_Pose :: struct { grip, blade, back: [3]f32 }
 
 Combat_Input :: struct {
     attack, attack_held, special, dodge: bool,
+    block: bool, // held
     move: [2]f32, // x right, y forward: the dodge's direction
 }
 
@@ -159,6 +172,10 @@ Combat :: struct {
     last_look:   [2]f32,      // yaw, pitch last frame
     last_vy:     f32,
     time:        f32,
+
+    blocking:    bool,
+    block_time:  f32, // since the guard went up
+    guard:       f32, // 0..1, the sword easing into the guard pose
 
     dodge_time:     f32, // since the dodge started
     dodge_dir:      [3]f32,
@@ -234,7 +251,7 @@ combat_pre_update :: proc(gs: ^Game_State, in_: Combat_Input, dt: f32) {
     c.dodge_cooldown = max(c.dodge_cooldown - dt, 0)
     c.cooldown = max(c.cooldown - dt, 0)
     c.chain_timer = max(c.chain_timer - dt, 0)
-    if !c.sword || gs.glider.deployed { c.attack = .None; return }
+    if !c.sword || gs.glider.deployed { c.attack, c.blocking = .None, false; return }
 
     // Dodge: cancels the swing.
     if in_.dodge && c.dodge_cooldown == 0 && (grounded(gs) || !c.air_dodge_used) {
@@ -264,6 +281,27 @@ combat_pre_update :: proc(gs: ^Game_State, in_: Combat_Input, dt: f32) {
         }
     }
     c.dodge_time = min(c.dodge_time + dt, 10)
+
+    // Guard: up when asked for, unless mid-swing past the wind-up (it comes
+    // up as soon as the swing is done) or rolling.
+    if in_.block && !combat_dodging(c) {
+        can := c.attack == .None || (c.attack != .Plunge && c.attack_time < ATTACKS[c.attack].windup)
+        if !c.blocking && can {
+            c.blocking, c.block_time = true, 0
+            c.attack, c.queued = .None, .None
+        }
+    } else {
+        c.blocking = false
+    }
+    if c.blocking {
+        c.block_time += dt
+        // Slow, braced steps.
+        if grounded(gs) {
+            limit := WALK_SPEED * BLOCK_SPEED
+            if sp := la.length(cam.velocity.xz); sp > limit { cam.velocity.xz *= limit / sp }
+        }
+        return
+    }
 
     // Queue or start swings, on a click or while held. No click is lost: one
     // made during a swing (or the breath after a combo) is remembered and the
@@ -555,11 +593,39 @@ hit_enemy :: proc(gs: ^Game_State, en: ^Enemy, kind: Attack_Kind) {
     hit_feedback(gs, kind, killed, &en.freeze)
 }
 
-// The player is hit. False if it didn't land (dodging, just hurt).
-combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32) -> bool {
+Hurt_Result :: enum u8 { Missed, Hit, Blocked, Parried }
+
+// The player is hit by something at `from` (zero: from nowhere in
+// particular, which a guard doesn't stop). Missed if it didn't land
+// (dodging, just hurt); Blocked or Parried if the guard took it.
+combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32, from: [3]f32 = {}) -> Hurt_Result {
     c := &gs.combat
     cam := &gs.camera
-    if c.invuln > 0 { return false }
+    if c.invuln > 0 { return .Missed }
+    if c.blocking && from != 0 {
+        to := la.normalize0((from - cam.pos).xz)
+        fwd := camera_flat_forward(cam^).xz
+        if la.dot(to, la.normalize0(fwd)) > BLOCK_ARC {
+            contact := cam.pos + camera_flat_forward(cam^) * 0.7 + {0, -0.3, 0}
+            if c.block_time < PARRY_WINDOW {
+                splat(&gs.slimes, contact, {1.9, 1.6, 0.9}, -knock, 14, 0.9)
+                play(.Clang, 1, 1.25 * vary(0.04))
+                slow_down(c, SLOWMO_KILL)
+                gs.glider.shake = min(gs.glider.shake + 0.5, 1.5)
+                c.invuln = 0.2
+                return .Parried
+            }
+            chip := damage >= HEAVY_HIT ? BLOCK_CHIP_HEAVY : BLOCK_CHIP
+            c.hp = max(c.hp - damage * chip, 1)
+            c.since_hurt = 0
+            c.invuln = HURT_INVULN * 0.6
+            cam.velocity += knock * BLOCK_KNOCK
+            splat(&gs.slimes, contact, {1.6, 1.3, 0.8}, -knock, 6, 0.6)
+            play(.Clang, 0.8, (damage >= HEAVY_HIT ? 0.8 : 1) * vary(0.06))
+            gs.glider.shake = min(gs.glider.shake + (damage >= HEAVY_HIT ? 0.6 : 0.3), 1.5)
+            return .Blocked
+        }
+    }
     c.hp -= damage
     c.since_hurt = 0
     c.invuln = HURT_INVULN
@@ -589,7 +655,7 @@ combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32) -> bool {
         enemies_scatter(gs, cam.pos)
         ui_toast(gs, "Knocked out! Back on your feet...", 2.5)
     }
-    return true
+    return .Hit
 }
 
 // Per frame in real time: feedback that keeps fading during hit stop, the
@@ -598,6 +664,7 @@ combat_view_update :: proc(gs: ^Game_State, dt, world_dt: f32) {
     c := &gs.combat
     cam := &gs.camera
     c.hurt_flash = max(c.hurt_flash - 2.5 * dt, 0)
+    c.guard += ((c.blocking ? f32(1) : 0) - c.guard) * min(dt * 18, 1)
     c.combo_pop = max(c.combo_pop - 5 * dt, 0)
     if combat_dodging(c) && c.sword {
         t := c.dodge_time / DODGE_TIME
@@ -658,10 +725,17 @@ blend_sword :: proc(a, b: Sword_Pose, t: f32) -> Sword_Pose {
 }
 
 @(private="file")
+// The guard: the blade held level across the body, edge out.
+SWORD_GUARD :: Sword_Pose{grip = {0.16, -0.28, 0.5}, blade = {-1, 0.22, 0.12}, back = {0.1, 0.3, 1}}
+
 sword_pose :: proc(gs: ^Game_State, run: f32) -> Sword_Pose {
     c := &gs.combat
     air: f32 = grounded(gs) ? 0 : 1
     carry := sword_carry(run, gs.player_anim.walk_phase, air)
+    if c.guard > 0.001 && c.attack == .None {
+        g := c.guard * c.guard * (3 - 2 * c.guard)
+        return blend_sword(carry, SWORD_GUARD, g)
+    }
     if c.attack == .None { return carry }
     a := ATTACKS[c.attack]
     t := c.attack_time

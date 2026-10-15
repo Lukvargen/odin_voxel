@@ -124,6 +124,17 @@ Enemy :: struct {
     death:      f32,    // seconds since it died
     rising:     f32,    // 1 while clawing up out of the ground, to 0
     nocturnal:  bool,   // crumbles at dawn
+    // Senses and getting about (enemy_path.odin)
+    sees:       bool,   // the player, last time it looked
+    see_timer:  f32,    // until it looks again
+    last_seen:  [3]f32, // where the player's feet were
+    seen_ago:   f32,
+    path:       [PATH_MAX][3]i32,
+    path_len:   int,
+    path_i:     int,
+    repath:     f32,
+    stuck_t:    f32,
+    stuck_pos:  [3]f32,
     // Guards
     home:       [3]f32,
     guard:      bool,
@@ -180,6 +191,7 @@ enemies_update :: proc(gs: ^Game_State, dt: f32) {
     s := &gs.enemies
     if dt <= 0 { return }
     s.time += dt
+    enemy_paths_frame()
     feet := gs.camera.pos - {0, PLAYER_EYE_HEIGHT, 0}
     night := gs.day.night
 
@@ -271,11 +283,23 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
         return
     }
 
+    // Look for the player now and then (a ray from the eyes).
+    e.see_timer -= dt
+    if e.see_timer <= 0 {
+        e.see_timer = 0.25
+        e.sees = dist < 64 && enemy_sees_player(gs, e)
+    }
+    cam := &gs.camera
+    sight := sp.aggro * (cam.sneaking ? 0.55 : 1)
+    hear: f32 = cam.sneaking ? 1.5 : (cam.sprinting ? 8 : 4)
+
     switch e.state {
     case .Idle, .Wander:
         if e.rising > 0 { break }
-        if hunting && dist < sp.aggro && abs(to_player.y) < 8 {
+        if hunting && abs(to_player.y) < 8 && ((e.sees && dist < sight) || dist < hear) {
             e.state, e.timer = .Chase, 0
+            e.last_seen, e.seen_ago = feet, 0
+            e.repath = 0
             enemy_voice(e, 0.7)
             break
         }
@@ -294,24 +318,41 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
             if l < 0.6 || e.timer <= 0 {
                 e.state, e.timer = .Idle, rand.float32_range(1.5, 5)
             } else {
-                face_towards(&e.yaw, d / l, dt * 3)
-                want_speed = sp.walk
-                accel = d / l
+                // Guards heading home find their way round things.
+                goal := e.target
+                if e.guard && la.length((e.home - e.pos).xz) > 6 { goal = enemy_steer(gs, e, e.target, dt) }
+                w := la.normalize0((goal - e.pos).xz)
+                if w != 0 {
+                    face_towards(&e.yaw, w, dt * 3)
+                    want_speed = sp.walk
+                    accel = w
+                }
             }
         }
     case .Chase:
-        face_towards(&e.yaw, dir, dt * 7)
-        lost := dist > sp.aggro * 1.8 || !hunting || (e.guard && la.length((e.pos - e.home).xz) > GUARD_LEASH && dist > 4)
+        // Keep track of where the player is, or was last seen.
+        if e.sees || dist < 2.5 { e.last_seen, e.seen_ago = feet, 0 } else { e.seen_ago += dt }
+        lost := e.seen_ago > 5 || dist > sp.aggro * 1.8 || !hunting || (e.guard && la.length((e.pos - e.home).xz) > GUARD_LEASH && dist > 4)
         if lost {
             e.state, e.timer = .Wander, 6
-            e.target = e.guard ? e.home : e.pos
-        } else if dist < sp.reach && abs(to_player.y) < 2 && e.on_ground {
+            e.target = e.guard ? e.home : e.last_seen
+        } else if dist < sp.reach && abs(to_player.y) < 2 && e.on_ground && e.sees {
+            face_towards(&e.yaw, dir, dt * 7)
             e.state, e.timer, e.struck = .Windup, sp.windup, false
             e.swing = rand.float32() < OVERHEAD_CHANCE[e.kind] ? .Overhead : .Slash
             enemy_voice(e, 0.9)
         } else {
-            want_speed = sp.run
-            accel = dir
+            // Where they last saw you, by a path round what's in the way.
+            goal := e.sees ? feet : e.last_seen
+            wp := enemy_steer(gs, e, goal, dt)
+            w := la.normalize0((wp - e.pos).xz)
+            if !e.sees && la.length((e.last_seen - e.pos).xz) < 1 {
+                e.state, e.timer = .Idle, rand.float32_range(1, 3) // nobody here
+            } else if w != 0 {
+                face_towards(&e.yaw, dist < 4 && e.sees ? dir : w, dt * 7)
+                want_speed = sp.run
+                accel = w
+            }
         }
     case .Windup:
         face_towards(&e.yaw, dir, dt * 5)
@@ -324,8 +365,21 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
            la.dot(dir, fwd) > (e.swing == .Slash ? -0.1 : 0.45) {
             e.struck = true
             knock := [3]f32{dir.x * sp.knock[0], sp.knock[1], dir.y * sp.knock[0]}
-            if combat_hurt(gs, sp.damage, knock) {
+            switch combat_hurt(gs, sp.damage, knock, enemy_center(e)) {
+            case .Hit:
                 play_at(e.kind == .Skeleton ? .Bone_Hit : .Slam, feet + {0, 1, 0}, 0.5, 1.3 * vary(0.06), 10)
+            case .Blocked:
+                e.vel.xz -= dir * (3 / sp.weight)
+                e.timer = sp.strike * 0.5 // the swing's spent
+            case .Parried:
+                // Thrown off balance: reeling, wide open.
+                e.state, e.timer = .Stagger, 1.3
+                e.vel = {-dir.x * 5 / sp.weight, 3, -dir.y * 5 / sp.weight}
+                e.on_ground = false
+                e.flash = 1
+                enemy_voice(e, 1)
+                return
+            case .Missed:
             }
         }
         if e.timer <= 0 { e.state, e.timer = .Recover, sp.recover }
@@ -445,6 +499,7 @@ enemy_damage :: proc(gs: ^Game_State, e: ^Enemy, damage: f32, knock: [3]f32, boo
     e.vel.y = knock.y / math.sqrt(sp.weight)
     e.on_ground = false
     e.rising = 0
+    e.last_seen, e.seen_ago = gs.camera.pos - {0, PLAYER_EYE_HEIGHT, 0}, 0
     c := enemy_center(e)
     add_number(&gs.slimes, c + {0, sp.height * 0.5, 0}, damage, boosted)
     splat(&gs.slimes, c, sp.gore, knock, 5, 0.5)

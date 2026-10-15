@@ -169,4 +169,28 @@ bench_enemies_run :: proc(gs: ^Game_State) {
         bench_measure(gs)
         bench_screenshot(gs, fmt.tprintf("%s/close_%v.bmp", bench_shot_dir, kind))
     }
+    // The guard: first person and from behind, an orc winding up in front.
+    for &e in gs.enemies.list { e.alive = false }
+    {
+        px, pz := base.x, base.z + 2.8
+        g := bench_ground(gs, int(math.floor(px)), int(math.floor(pz))) + 1
+        if e := enemy_spawn(gs, .Orc, {px, f32(g), pz}); e != nil {
+            e.yaw, e.on_ground, e.state, e.timer, e.swing = math.PI, true, .Windup, ENEMY_SPECS[.Orc].windup * 0.3, .Overhead
+        }
+    }
+    cam.fly_mode = false
+    cam.pos = base + {0, PLAYER_EYE_HEIGHT, 0}
+    cam.yaw, cam.pitch = 0, 4
+    combat_init(&gs.combat)
+    combat_toggle_sword(gs)
+    gs.combat.blocking, gs.combat.guard = true, 1
+    for view in 0 ..< 2 {
+        gs.glider.third_person = view == 1
+        for _ in 0 ..< 30 { glider_view_update(gs, 1.0 / 60.0); combat_view_update(gs, 1.0 / 60.0, 0) }
+        gs.combat.guard = 1
+        combat_view_update(gs, 0, 0)
+        bench_measure(gs)
+        bench_screenshot(gs, fmt.tprintf("%s/guard_%d.bmp", bench_shot_dir, view))
+    }
+    gs.glider.third_person = false
 }

@@ -137,8 +137,9 @@ bench_open_ground :: proc(gs: ^Game_State, x, z: int) -> (int, int) {
 
 // `bench fight`: no pictures. For each enemy kind: one spawned 7 voxels in
 // front of a player standing still with the sword out; logs its state
-// changes and the player's health for 5 s; then the player swings at it
-// (facing it) until it dies, logging how long that took.
+// changes and the player's health: 0-5 s taking the hits, 5-10 s holding
+// the guard, 10-15 s raising the guard just before each strike (parries);
+// then the player swings at it (facing it) until it dies.
 bench_fight: bool
 
 bench_fight_run :: proc(gs: ^Game_State) {
@@ -164,10 +165,12 @@ bench_fight_run :: proc(gs: ^Game_State) {
         last := Enemy_State(255)
         fmt.printf("fight: %v (hp %.0f)\n", kind, e.hp)
         killed_at := f32(-1)
-        for f in 0 ..< 60 * 14 {
+        for f in 0 ..< 60 * 24 {
             t := f32(f) * dt
             in_: Combat_Input
-            fighting := t >= 5
+            if t >= 5 && t < 10 { in_.block = true }
+            if t >= 10 && t < 15 { in_.block = e.state == .Strike || (e.state == .Windup && e.timer < 0.1) }
+            fighting := t >= 15
             if fighting && e.alive && e.state != .Dead {
                 to := e.pos - cam.pos
                 cam.yaw = math.to_degrees(math.atan2(to.x, to.z))
@@ -183,7 +186,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
                 fmt.printf("  %5.2fs %v  dist %.1f  player hp %.0f  enemy hp %.0f\n", t, e.state, la.length((e.pos - cam.pos).xz), gs.combat.hp, e.hp)
                 last = e.state
             }
-            if e.state == .Dead && killed_at < 0 { killed_at = t; fmt.printf("  killed after %.2fs of fighting\n", t - 5) }
+            if e.state == .Dead && killed_at < 0 { killed_at = t; fmt.printf("  killed after %.2fs of fighting\n", t - 15) }
             if !e.alive { break }
         }
     }
@@ -219,4 +222,101 @@ bench_fight_run :: proc(gs: ^Game_State) {
     rising := 0
     for e in gs.enemies.list { if e.alive { counts[e.kind] += 1; if e.nocturnal { rising += 1 } } }
     fmt.printf("night roamers after 20 s: %v (%d risen from the ground)\n", counts, rising)
+}
+
+// `bench nav`: no pictures. Enemies against walls, a raised platform and
+// line of sight, on open plains; logs what they do.
+bench_nav: bool
+
+bench_nav_run :: proc(gs: ^Game_State) {
+    x, z, found := bench_find_biome(.Plains)
+    if !found { x, z = 0, 0 }
+    bench_teleport(gs, {f32(x) + 0.5, f32(surface_height_at(x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5})
+    x, z = bench_open_ground(gs, x, z)
+    cam := &gs.camera
+    dt := f32(1.0 / 60.0)
+    gs.slimes = {}
+    gs.slimes.spawn_timer = 1e9
+    gy := bench_ground(gs, x, z) + 1 // feet level
+    put :: proc(gs: ^Game_State, x, y, z: int, b: Block_Type) {
+        dirty: map[int]bool
+        changed: [dynamic][3]int
+        edit_sphere(gs, {x, y, z}, b, &dirty, &changed, 0)
+        delete(dirty); delete(changed)
+    }
+    clear_area :: proc(gs: ^Game_State, x, z, gy: int, put: proc(^Game_State, int, int, int, Block_Type)) {
+        for dz in -4 ..= 16 { for dx in -10 ..= 10 { for dy in 0 ..< 6 { put(gs, x + dx, gy + dy, z + dz, .Air) } } }
+    }
+    reset :: proc(gs: ^Game_State) {
+        for &e in gs.enemies.list { e.alive = false }
+        gs.enemies.spawn_timer, gs.enemies.site_timer = 1e9, 1e9
+    }
+    run :: proc(gs: ^Game_State, e: ^Enemy, seconds: f32, dt: f32) -> (first_strike: f32, closest: f32) {
+        first_strike, closest = -1, 1e9
+        cam := &gs.camera
+        last := e.state
+        for f in 0 ..< int(seconds / dt) {
+            t := f32(f) * dt
+            combat_pre_update(gs, {}, dt)
+            camera_update(cam, gs, 0, 0, dt, false, false, false, false, false, false, false, false)
+            combat_post_update(gs, dt)
+            enemies_update(gs, dt)
+            closest = min(closest, la.length((e.pos - (cam.pos - {0, PLAYER_EYE_HEIGHT, 0})).xz))
+            if e.state != last {
+                fmt.printf("    %5.2fs %v at (%.1f %.1f %.1f)\n", t, e.state, e.pos.x, e.pos.y, e.pos.z)
+                last = e.state
+            }
+            if e.state == .Strike && first_strike < 0 { first_strike = t }
+        }
+        return
+    }
+    player_at :: proc(gs: ^Game_State, p: [3]f32) {
+        cam := &gs.camera
+        cam.pos = p + {0, PLAYER_EYE_HEIGHT, 0}
+        cam.fly_mode, cam.velocity = false, {}
+        combat_init(&gs.combat)
+    }
+
+    // 1) A 3-high wall between them, open at one end: it has to go round.
+    clear_area(gs, x, z, gy, put)
+    for dx in -6 ..= 4 { for dy in 0 ..< 3 { put(gs, x + dx, gy + dy, z + 5, .Stone) } }
+    reset(gs)
+    player_at(gs, {f32(x) + 0.5, f32(gy), f32(z) + 0.5})
+    for kind in Enemy_Kind {
+        reset(gs)
+        e := enemy_spawn(gs, kind, {f32(x) + 0.5, f32(gy), f32(z) + 9.5})
+        e.state, e.last_seen, e.repath = .Chase, {f32(x) + 0.5, f32(gy), f32(z) + 0.5}, 0
+        fmt.printf("wall, %v: knows where you are, wall in between\n", kind)
+        fs, cl := run(gs, e, 12, dt)
+        fmt.printf("  first strike %.2fs, closest %.1f\n", fs, cl)
+    }
+
+    // 2) The player on a 4-high platform, stairs up one side.
+    clear_area(gs, x, z, gy, put)
+    for dz in 6 ..= 8 { for dx in -1 ..= 1 { for dy in 0 ..< 4 { put(gs, x + dx, gy + dy, z + dz, .Stone) } } }
+    for k in 0 ..< 4 { for dy in 0 ..= k { put(gs, x + 2 + 3 - k, gy + dy, z + 7, .Stone) } } // steps from +x
+    player_at(gs, {f32(x) + 0.5, f32(gy + 4), f32(z) + 7.5})
+    for kind in ([2]Enemy_Kind{.Goblin, .Orc}) {
+        reset(gs)
+        e := enemy_spawn(gs, kind, {f32(x) + 0.5, f32(gy), f32(z) + 0.5})
+        e.state, e.last_seen, e.repath = .Chase, cam.pos - {0, PLAYER_EYE_HEIGHT, 0}, 0
+        fmt.printf("platform, %v: player 4 up, stairs on the far side\n", kind)
+        fs, cl := run(gs, e, 12, dt)
+        fmt.printf("  first strike %.2fs, closest %.1f, ended at height %.1f (player %d)\n", fs, cl, e.pos.y, gy + 4)
+    }
+
+    // 3) Sight: idle 10 away behind a wall (doesn't notice), then in the open.
+    clear_area(gs, x, z, gy, put)
+    for dx in -6 ..= 6 { for dy in 0 ..< 3 { put(gs, x + dx, gy + dy, z + 5, .Stone) } }
+    player_at(gs, {f32(x) + 0.5, f32(gy), f32(z) + 0.5})
+    reset(gs)
+    e := enemy_spawn(gs, .Skeleton, {f32(x) + 0.5, f32(gy), f32(z) + 10.5})
+    e.timer = 100 // stands still
+    fmt.println("sight: skeleton 10 away behind a wall")
+    run(gs, e, 4, dt)
+    fmt.printf("  after 4 s: %v\n", e.state)
+    for dx in -6 ..= 6 { for dy in 0 ..< 3 { put(gs, x + dx, gy + dy, z + 5, .Air) } }
+    fmt.println("  wall gone")
+    run(gs, e, 3, dt)
+    fmt.printf("  after 3 s more: %v\n", e.state)
 }

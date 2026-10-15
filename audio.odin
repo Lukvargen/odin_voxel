@@ -52,6 +52,7 @@ Sound :: enum u8 {
     Slime_Hop, Slime_Hit, Slime_Pop,
     // enemies.odin
     Bone_Hit, Bone_Rattle, Bone_Break,
+    Clang, // a blow caught on the blade
 }
 
 Loop_Kind :: enum u8 { Wind, Rush, Leaves, Water, Underwater, Cave, Insects }
@@ -833,6 +834,8 @@ synth :: proc(sound: Sound) -> []f32 {
     case .Slime_Hit:   return synth_squelch(0.35, 1)
     case .Slime_Pop:   return synth_squelch(0.6, 1.8)
     // Dry knocks of bone: a hard tick ringing hollow, a loose clatter, a collapse.
+    // Metal on metal: a hard strike and a long bright ring.
+    case .Clang:       return crunch({length = 0.7, attack = 0.001, decay = 0.35, band = {0.15, 0.9}, hiss = 0.25, grains = 300, grain_len = 0.002, thump = 0.4, thump_hz = 220, ring = 1.2, ring_hz = 2600, ring_q = 0.012})
     case .Bone_Hit:    return crunch({length = 0.25, attack = 0.001, decay = 0.07, band = {0.08, 0.6}, hiss = 0.1, grains = 900, grain_len = 0.002, thump = 0.5, thump_hz = 140, ring = 0.6, ring_hz = 1100, ring_q = 0.12})
     case .Bone_Rattle: return crunch({length = 0.5, attack = 0.02, decay = 0.25, band = {0.1, 0.55}, hiss = 0.02, grains = 140, grain_len = 0.003, thump_hz = 60, ring = 0.5, ring_hz = 900, ring_q = 0.15}) // thump_hz: the slide divides by it, even silent
     case .Bone_Break:  return crunch({length = 0.9, attack = 0.002, decay = 0.4, band = {0.05, 0.55}, hiss = 0.1, grains = 700, grain_len = 0.003, thump = 0.7, thump_hz = 90, ring = 0.4, ring_hz = 800, ring_q = 0.18})

@@ -326,7 +326,8 @@ slime_think :: proc(gs: ^Game_State, sl: ^Slime, feet: [3]f32, dt: f32) {
             sl.state, sl.timer = .Chase, 0.9 // sitting a moment after: the opening
         } else if slime_touches_player(sl, gs) {
             knock := [3]f32{dir.x * 9, 5, dir.y * 9}
-            if combat_hurt(gs, kind.damage, knock) {
+            if r := combat_hurt(gs, kind.damage, knock, slime_center(sl)); r != .Missed {
+                if r == .Parried { sl.state, sl.timer = .Stunned, 1.2; sl.vel = {-dir.x * 7, 6, -dir.y * 7}; sl.flash = 1; return }
                 sl.vel = {-dir.x * 3, 4, -dir.y * 3}
                 sl.state, sl.timer = .Chase, 1
             }
