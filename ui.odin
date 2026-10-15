@@ -721,7 +721,7 @@ health_bar :: proc(gs: ^Game_State, w, h: f32) {
 @(private="file")
 combat_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     c := &gs.combat
-    s := &gs.slimes
+    fx := &gs.fx
     cam := gs.camera
     eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
 
@@ -748,7 +748,7 @@ combat_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
         }
     }
 
-    for n, i in s.numbers {
+    for n, i in fx.numbers {
         if n.life <= 0 { continue }
         x, y, ok := glider_project(cam, n.pos - eye, w, h)
         if !ok { continue }

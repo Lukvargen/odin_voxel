@@ -352,32 +352,17 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
     step := c.hitstop > 0 && c.attack != .Plunge ? 0 : dt
     c.attack_time += step
     a := ATTACKS[c.attack]
-    s := &gs.slimes
 
     #partial switch c.attack {
     case .Plunge:
         if c.attack_time < a.windup { break }
-        // Bounce off a slime below.
+        // Bounce off something below.
         feet := cam.pos - {0, PLAYER_EYE_HEIGHT, 0}
-        for &sl in s.list {
-            if !sl.alive || sl.hit_id == c.attack_id { continue }
-            r := slime_radius(sl.size)
-            d := slime_center(&sl) - (feet + {0, 0.3, 0})
-            if la.length(d.xz) < r + PLAYER_HALF_W + 0.4 && d.y > -r - 1.6 && d.y < r + 0.8 {
-                hit_slime(gs, &sl, .Plunge)
-                cam.velocity.y = PLUNGE_BOUNCE
-                cam.on_ground = false
-                c.attack, c.chain = .None, .None
-                c.rise_used, c.air_dodge_used = false, false
-                return
-            }
-        }
-        for &en in gs.enemies.list {
-            if !en.alive || en.state == .Dead || en.hit_id == c.attack_id { continue }
-            r := enemy_hit_radius(&en)
-            d := enemy_center(&en) - (feet + {0, 0.3, 0})
-            if la.length(d.xz) < r + PLAYER_HALF_W + 0.4 && d.y > -r - 1.6 && d.y < r + 0.8 {
-                hit_enemy(gs, &en, .Plunge)
+        for t in combat_targets(gs) {
+            if t.hit_id^ == c.attack_id { continue }
+            d := t.center - (feet + {0, 0.3, 0})
+            if la.length(d.xz) < t.radius + PLAYER_HALF_W + 0.4 && d.y > -t.radius - 1.6 && d.y < t.radius + 0.8 {
+                hit_target(gs, t, .Plunge)
                 cam.velocity.y = PLUNGE_BOUNCE
                 cam.on_ground = false
                 c.attack, c.chain = .None, .None
@@ -387,19 +372,10 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
         }
         if grounded(gs) || c.attack_time > 4 {
             start_attack(gs, .Plunge_Land)
-            slimes_shockwave(s, feet)
+            fx_shockwave(&gs.fx, feet)
             play(.Slam, 1, vary(0.06))
-            for &sl in s.list {
-                if !sl.alive { continue }
-                if la.length(slime_center(&sl) - feet) < PLUNGE_RADIUS + slime_radius(sl.size) {
-                    hit_slime(gs, &sl, .Plunge_Land)
-                }
-            }
-            for &en in gs.enemies.list {
-                if !en.alive || en.state == .Dead { continue }
-                if la.length(enemy_center(&en) - feet) < PLUNGE_RADIUS + enemy_hit_radius(&en) {
-                    hit_enemy(gs, &en, .Plunge_Land)
-                }
+            for t in combat_targets(gs) {
+                if la.length(t.center - feet) < PLUNGE_RADIUS + t.radius { hit_target(gs, t, .Plunge_Land) }
             }
             slow_down(c, SLOWMO_HEAVY)
             gs.glider.shake = min(gs.glider.shake + ATTACKS[.Plunge_Land].shake, 1.5)
@@ -411,13 +387,9 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
             if c.attack_time - step < a.windup { play(.Sword_Swing, 0.8, (c.attack == .Finisher ? 0.85 : 1) * vary(0.06)) }
             eye := cam.pos
             fwd := camera_flat_forward(cam^)
-            for &sl in s.list {
-                if !sl.alive || sl.hit_id == c.attack_id { continue }
-                if sword_reaches(slime_center(&sl), slime_radius(sl.size), eye, fwd, cam.pitch * DEG, a) { hit_slime(gs, &sl, c.attack) }
-            }
-            for &en in gs.enemies.list {
-                if !en.alive || en.state == .Dead || en.hit_id == c.attack_id { continue }
-                if sword_reaches(enemy_center(&en), enemy_hit_radius(&en), eye, fwd, cam.pitch * DEG, a) { hit_enemy(gs, &en, c.attack) }
+            for t in combat_targets(gs) {
+                if t.hit_id^ == c.attack_id { continue }
+                if sword_reaches(t.center, t.radius, eye, fwd, cam.pitch * DEG, a) { hit_target(gs, t, c.attack) }
             }
         }
     }
@@ -476,8 +448,8 @@ height_above_ground :: proc(gs: ^Game_State) -> f32 {
     return feet.y - f32(hit.y + 1)
 }
 
-// A ground swing starting with a slime just ahead steps toward it, stopping
-// short of it.
+// A ground swing starting with something just ahead steps toward it,
+// stopping short of it.
 @(private="file")
 lunge :: proc(gs: ^Game_State) {
     cam := &gs.camera
@@ -485,18 +457,10 @@ lunge :: proc(gs: ^Game_State) {
     fwd := camera_flat_forward(cam^)
     best := LUNGE_RANGE
     dir: [3]f32
-    for &sl in gs.slimes.list {
-        if !sl.alive { continue }
-        d := slime_center(&sl) - cam.pos
+    for t in combat_targets(gs) {
+        d := t.center - cam.pos
         d.y = 0
-        dist := la.length(d) - slime_radius(sl.size)
-        if dist < best && la.dot(la.normalize0(d), fwd) > 0.75 { best, dir = dist, la.normalize0(d) }
-    }
-    for &en in gs.enemies.list {
-        if !en.alive || en.state == .Dead { continue }
-        d := enemy_center(&en) - cam.pos
-        d.y = 0
-        dist := la.length(d) - ENEMY_SPECS[en.kind].radius
+        dist := la.length(d) - t.radius
         if dist < best && la.dot(la.normalize0(d), fwd) > 0.75 { best, dir = dist, la.normalize0(d) }
     }
     want := min((best - LUNGE_STOP) * 6, LUNGE_SPEED)
@@ -577,20 +541,42 @@ hit_feedback :: proc(gs: ^Game_State, kind: Attack_Kind, killed: bool, freeze: ^
     }
 }
 
+// Anything a swing can hit: where it is, how big, which swing last hit it
+// (each swing hits each target once), and what it is. A new kind of
+// target is added in combat_targets and hit_target.
+Target :: struct {
+    center: [3]f32,
+    radius: f32,
+    hit_id: ^u32,
+    slime:  ^Slime,
+    enemy:  ^Enemy,
+}
+
+// This moment's targets (temp allocator).
 @(private="file")
-hit_slime :: proc(gs: ^Game_State, sl: ^Slime, kind: Attack_Kind) {
-    sl.hit_id = gs.combat.attack_id
-    damage, knock, boosted := hit_amount(gs, kind, slime_center(sl))
-    killed := slime_damage(&gs.slimes, sl, damage, knock, boosted)
-    hit_feedback(gs, kind, killed, &sl.freeze)
+combat_targets :: proc(gs: ^Game_State) -> []Target {
+    out := make([dynamic]Target, 0, MAX_SLIMES + MAX_ENEMIES, context.temp_allocator)
+    for &sl in gs.slimes.list {
+        if sl.alive { append(&out, Target{center = slime_center(&sl), radius = slime_radius(sl.size), hit_id = &sl.hit_id, slime = &sl}) }
+    }
+    for &en in gs.enemies.list {
+        if en.alive && en.state != .Dead { append(&out, Target{center = enemy_center(&en), radius = enemy_hit_radius(&en), hit_id = &en.hit_id, enemy = &en}) }
+    }
+    return out[:]
 }
 
 @(private="file")
-hit_enemy :: proc(gs: ^Game_State, en: ^Enemy, kind: Attack_Kind) {
-    en.hit_id = gs.combat.attack_id
-    damage, knock, boosted := hit_amount(gs, kind, enemy_center(en))
-    killed := enemy_damage(gs, en, damage, knock, boosted)
-    hit_feedback(gs, kind, killed, &en.freeze)
+hit_target :: proc(gs: ^Game_State, t: Target, kind: Attack_Kind) {
+    t.hit_id^ = gs.combat.attack_id
+    damage, knock, boosted := hit_amount(gs, kind, t.center)
+    killed: bool
+    freeze: ^f32
+    if t.slime != nil {
+        killed, freeze = slime_damage(gs, t.slime, damage, knock, boosted), &t.slime.freeze
+    } else {
+        killed, freeze = enemy_damage(gs, t.enemy, damage, knock, boosted), &t.enemy.freeze
+    }
+    hit_feedback(gs, kind, killed, freeze)
 }
 
 Hurt_Result :: enum u8 { Missed, Hit, Blocked, Parried }
@@ -608,7 +594,7 @@ combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32, from: [3]f32 = 
         if la.dot(to, la.normalize0(fwd)) > BLOCK_ARC {
             contact := cam.pos + camera_flat_forward(cam^) * 0.7 + {0, -0.3, 0}
             if c.block_time < PARRY_WINDOW {
-                splat(&gs.slimes, contact, {1.9, 1.6, 0.9}, -knock, 14, 0.9)
+                splat(&gs.fx, contact, {1.9, 1.6, 0.9}, -knock, 14, 0.9)
                 play(.Clang, 1, 1.25 * vary(0.04))
                 slow_down(c, SLOWMO_KILL)
                 gs.glider.shake = min(gs.glider.shake + 0.5, 1.5)
@@ -620,7 +606,7 @@ combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32, from: [3]f32 = 
             c.since_hurt = 0
             c.invuln = HURT_INVULN * 0.6
             cam.velocity += knock * BLOCK_KNOCK
-            splat(&gs.slimes, contact, {1.6, 1.3, 0.8}, -knock, 6, 0.6)
+            splat(&gs.fx, contact, {1.6, 1.3, 0.8}, -knock, 6, 0.6)
             play(.Clang, 0.8, (damage >= HEAVY_HIT ? 0.8 : 1) * vary(0.06))
             gs.glider.shake = min(gs.glider.shake + (damage >= HEAVY_HIT ? 0.6 : 0.3), 1.5)
             return .Blocked
@@ -637,21 +623,11 @@ combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32, from: [3]f32 = 
     if c.attack == .Plunge { c.attack = .None }
     play(.Hurt, 0.9, vary(0.06))
     if c.hp <= 0 {
-        // Knocked out: back on your feet at full health, the slimes about
+        // Knocked out: back on your feet at full health, everything about
         // scattered and calmed down.
         c.hp = PLAYER_MAX_HP
         c.invuln = 2
-        for &sl in gs.slimes.list {
-            if !sl.alive { continue }
-            d := sl.pos - cam.pos
-            d.y = 0
-            if la.length(d) < 16 {
-                n := la.normalize0(d)
-                sl.vel = n * 12 + {0, 7, 0}
-                sl.on_ground = false
-                sl.state, sl.timer = .Idle, 3
-            }
-        }
+        slimes_scatter(gs, cam.pos)
         enemies_scatter(gs, cam.pos)
         ui_toast(gs, "Knocked out! Back on your feet...", 2.5)
     }

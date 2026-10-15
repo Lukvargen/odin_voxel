@@ -79,6 +79,7 @@ bench_combat_run :: proc(gs: ^Game_State) {
         camera_update(cam, gs, 0, 0, world_dt, false, false, move_left, false, jump, false, false, false)
         combat_post_update(gs, world_dt)
         slimes_update(gs, world_dt)
+        fx_update(gs, world_dt)
         glider_view_update(gs, dt)
         combat_view_update(gs, dt, world_dt)
         flush_gpu_uploads(gs)
@@ -181,6 +182,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
             camera_update(cam, gs, 0, 0, world_dt, false, false, false, false, false, false, false, false)
             combat_post_update(gs, world_dt)
             enemies_update(gs, world_dt)
+            fx_update(gs, world_dt)
             combat_view_update(gs, dt, world_dt)
             if e.state != last {
                 fmt.printf("  %5.2fs %v  dist %.1f  player hp %.0f  enemy hp %.0f\n", t, e.state, la.length((e.pos - cam.pos).xz), gs.combat.hp, e.hp)

@@ -261,13 +261,6 @@ enemies_update :: proc(gs: ^Game_State, dt: f32) {
 }
 
 @(private="file")
-face_towards :: proc(yaw: ^f32, dir: [2]f32, amount: f32) {
-    target := math.atan2(-dir.x, dir.y)
-    d := math.mod(target - yaw^ + 3 * math.PI, 2 * math.PI) - math.PI
-    yaw^ += clamp(d, -amount, amount)
-}
-
-@(private="file")
 enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
     sp := ENEMY_SPECS[e.kind]
     to_player := feet - e.pos
@@ -323,7 +316,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
                 if e.guard && la.length((e.home - e.pos).xz) > 6 { goal = enemy_steer(gs, e, e.target, dt) }
                 w := la.normalize0((goal - e.pos).xz)
                 if w != 0 {
-                    face_towards(&e.yaw, w, dt * 3)
+                    turn_towards(&e.yaw, w, dt * 3)
                     want_speed = sp.walk
                     accel = w
                 }
@@ -337,7 +330,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
             e.state, e.timer = .Wander, 6
             e.target = e.guard ? e.home : e.last_seen
         } else if dist < sp.reach && abs(to_player.y) < 2 && e.on_ground && e.sees {
-            face_towards(&e.yaw, dir, dt * 7)
+            turn_towards(&e.yaw, dir, dt * 7)
             e.state, e.timer, e.struck = .Windup, sp.windup, false
             e.swing = rand.float32() < OVERHEAD_CHANCE[e.kind] ? .Overhead : .Slash
             enemy_voice(e, 0.9)
@@ -349,13 +342,13 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
             if !e.sees && la.length((e.last_seen - e.pos).xz) < 1 {
                 e.state, e.timer = .Idle, rand.float32_range(1, 3) // nobody here
             } else if w != 0 {
-                face_towards(&e.yaw, dist < 4 && e.sees ? dir : w, dt * 7)
+                turn_towards(&e.yaw, dist < 4 && e.sees ? dir : w, dt * 7)
                 want_speed = sp.run
                 accel = w
             }
         }
     case .Windup:
-        face_towards(&e.yaw, dir, dt * 5)
+        turn_towards(&e.yaw, dir, dt * 5)
         if e.timer <= 0 { e.state, e.timer = .Strike, sp.strike; play_at(.Sword_Swing, enemy_center(e), 0.55, 0.75 / sp.scale * vary(0.06), 14) }
     case .Strike:
         // Lunges a step into the swing; hurts once if the player is in front.
@@ -424,19 +417,6 @@ enemy_voice :: proc(e: ^Enemy, volume: f32) {
 }
 
 @(private="file")
-ebox_solid :: proc(gs: ^Game_State, pos: [3]f32, hw, h: f32) -> bool {
-    E :: f32(0.001)
-    for iy in int(math.floor(pos.y + E)) ..= int(math.floor(pos.y + h - E)) {
-        for ix in int(math.floor(pos.x - hw + E)) ..= int(math.floor(pos.x + hw - E)) {
-            for iz in int(math.floor(pos.z - hw + E)) ..= int(math.floor(pos.z + hw - E)) {
-                if solid_at(gs, ix, iy, iz) { return true }
-            }
-        }
-    }
-    return false
-}
-
-@(private="file")
 enemy_move :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
     sp := ENEMY_SPECS[e.kind]
     hw, h := sp.radius, sp.height * 0.92
@@ -458,9 +438,9 @@ enemy_move :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
         if d[axis] == 0 { continue }
         q := p
         q[axis] += d[axis]
-        if !ebox_solid(gs, q, hw, h) { p = q; continue }
+        if !box_solid(gs, q, hw, h) { p = q; continue }
         // A single block: step up onto it.
-        if e.on_ground && !ebox_solid(gs, q + {0, 1.01, 0}, hw, h) && e.state != .Dead {
+        if e.on_ground && !box_solid(gs, q + {0, 1.01, 0}, hw, h) && e.state != .Dead {
             p = q + {0, 1.01, 0}
             continue
         }
@@ -468,19 +448,19 @@ enemy_move :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
         e.vel[axis] = 0
     }
     if d.y != 0 {
-        if ebox_solid(gs, p + {0, d.y, 0}, hw, h) {
+        if box_solid(gs, p + {0, d.y, 0}, hw, h) {
             if d.y < 0 {
                 top := math.floor(p.y + d.y) + 1
-                if top <= p.y && !ebox_solid(gs, {p.x, top, p.z}, hw, h) { p.y = top }
+                if top <= p.y && !box_solid(gs, {p.x, top, p.z}, hw, h) { p.y = top }
             }
             e.vel.y = 0
         } else {
             p.y += d.y
         }
     }
-    if ebox_solid(gs, p, hw, h) { p.y = math.floor(p.y) + 1 }
+    if box_solid(gs, p, hw, h) { p.y = math.floor(p.y) + 1 }
     e.pos = p
-    e.on_ground = e.vel.y <= 0.01 && ebox_solid(gs, p - {0, 0.03, 0}, hw, h)
+    e.on_ground = e.vel.y <= 0.01 && box_solid(gs, p - {0, 0.03, 0}, hw, h)
     // Higher than a step in the way while chasing: jump it.
     if blocked && e.on_ground && (e.state == .Chase || e.state == .Wander) {
         e.vel.y = ENEMY_JUMP
@@ -501,8 +481,8 @@ enemy_damage :: proc(gs: ^Game_State, e: ^Enemy, damage: f32, knock: [3]f32, boo
     e.rising = 0
     e.last_seen, e.seen_ago = gs.camera.pos - {0, PLAYER_EYE_HEIGHT, 0}, 0
     c := enemy_center(e)
-    add_number(&gs.slimes, c + {0, sp.height * 0.5, 0}, damage, boosted)
-    splat(&gs.slimes, c, sp.gore, knock, 5, 0.5)
+    add_number(&gs.fx, c + {0, sp.height * 0.5, 0}, damage, boosted)
+    splat(&gs.fx, c, sp.gore, knock, 5, 0.5)
     if e.kind == .Skeleton {
         play_at(.Bone_Hit, c, 0.9, vary(0.08), 16)
     } else {
@@ -524,7 +504,7 @@ enemy_die :: proc(gs: ^Game_State, e: ^Enemy, knock: [3]f32) {
     e.state, e.death = .Dead, 0
     e.bar = 0
     c := enemy_center(e)
-    splat(&gs.slimes, c, sp.gore, knock, 14, 1)
+    splat(&gs.fx, c, sp.gore, knock, 14, 1)
     if e.kind == .Skeleton {
         play_at(.Bone_Break, c, 1, vary(0.06), 18)
     } else {
@@ -537,7 +517,7 @@ enemy_die :: proc(gs: ^Game_State, e: ^Enemy, knock: [3]f32) {
 // Skeletons of the night at dawn: a puff of bone dust, gone.
 @(private="file")
 enemy_crumble :: proc(gs: ^Game_State, e: ^Enemy) {
-    splat(&gs.slimes, enemy_center(e), {0.7, 0.66, 0.58}, {0, 1, 0}, 10, 0.5)
+    splat(&gs.fx, enemy_center(e), {0.7, 0.66, 0.58}, {0, 1, 0}, 10, 0.5)
     play_at(.Bone_Break, enemy_center(e), 0.5, 0.8, 14)
     e.alive = false
 }
@@ -591,7 +571,7 @@ enemy_try_spawn :: proc(gs: ^Game_State, feet: [3]f32, night: f32) {
             if kind == .Skeleton && night > 0.6 {
                 e.nocturnal = true
                 e.rising = 1 // claws up out of the ground
-                splat(&gs.slimes, e.pos + {0, 0.2, 0}, {0.36, 0.27, 0.18}, {0, 1, 0}, 8, 0.4)
+                splat(&gs.fx, e.pos + {0, 0.2, 0}, {0.36, 0.27, 0.18}, {0, 1, 0}, 8, 0.4)
             }
         }
         return

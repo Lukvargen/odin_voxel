@@ -18,12 +18,10 @@ import la "core:math/linalg"
 //
 // They aren't voxels and aren't the player: a box swept through the world
 // axis by axis (like the camera), drawn as one voxel-model part
-// (voxel_models.odin) squashed and stretched by its scale. Also here: the
-// goo splatter and the damage numbers the HUD draws (ui.odin).
+// (voxel_models.odin) squashed and stretched by its scale. Their goo and
+// damage numbers are effects (fx.odin).
 
 MAX_SLIMES        :: 40
-MAX_GOO           :: 48
-MAX_NUMBERS       :: 24
 
 SLIME_RANGE       :: f32(48)  // keep SLIME_POPULATION slimes within this...
 SLIME_POPULATION  :: 6
@@ -97,28 +95,8 @@ Slime :: struct {
     age:        f32,
 }
 
-Goo :: struct {
-    pos, vel:  [3]f32,
-    life, max: f32,
-    size:      f32, // voxels
-    color:     [3]f32,
-    floor:     f32, // bounces here
-}
-
-Damage_Number :: struct {
-    pos:     [3]f32,
-    life:    f32,
-    value:   int,
-    boosted: bool, // the speed bonus was big: drawn hotter
-    big:     bool,
-}
-
 Slimes :: struct {
     list:        [MAX_SLIMES]Slime,
-    goo:         [MAX_GOO]Goo,
-    next_goo:    int,
-    numbers:     [MAX_NUMBERS]Damage_Number,
-    next_number: int,
     spawn_timer: f32,
 }
 
@@ -133,19 +111,6 @@ slime_center :: proc(sl: ^Slime) -> [3]f32 {
 slime_box :: proc(size: Slime_Size) -> (hw, h: f32) {
     w := SLIME_KINDS[size].width
     return w * 0.4, w * 0.8
-}
-
-@(private="file")
-box_solid :: proc(gs: ^Game_State, pos: [3]f32, hw, h: f32) -> bool {
-    E :: f32(0.001)
-    for iy in int(math.floor(pos.y + E)) ..= int(math.floor(pos.y + h - E)) {
-        for ix in int(math.floor(pos.x - hw + E)) ..= int(math.floor(pos.x + hw - E)) {
-            for iz in int(math.floor(pos.z - hw + E)) ..= int(math.floor(pos.z + hw - E)) {
-                if solid_at(gs, ix, iy, iz) { return true }
-            }
-        }
-    }
-    return false
 }
 
 slime_spawn :: proc(s: ^Slimes, size: Slime_Size, pos, vel: [3]f32, color: [3]f32) -> ^Slime {
@@ -219,24 +184,6 @@ slimes_update :: proc(gs: ^Game_State, dt: f32) {
             }
         }
     }
-
-    // Goo and numbers.
-    for &g in s.goo {
-        if g.life <= 0 { continue }
-        g.life -= dt
-        g.vel.y -= 22 * dt
-        g.pos += g.vel * dt
-        if g.pos.y < g.floor {
-            g.pos.y = g.floor
-            g.vel.y = abs(g.vel.y) * 0.3
-            g.vel.xz *= 0.55
-        }
-    }
-    for &n in s.numbers {
-        if n.life <= 0 { continue }
-        n.life -= dt
-        n.pos.y += dt * 1.4
-    }
 }
 
 // Somewhere on dry, loaded ground a little way off.
@@ -256,13 +203,6 @@ slime_try_spawn :: proc(gs: ^Game_State, feet: [3]f32) {
         slime_spawn(&gs.slimes, size, {x, f32(ground) + 1.5, z}, {}, slime_color_for(terrain_at(ix, iz).biome))
         return
     }
-}
-
-@(private="file")
-turn_towards :: proc(yaw: ^f32, dir: [2]f32, amount: f32) {
-    target := math.atan2(-dir.x, dir.y) // entity convention
-    d := math.mod(target - yaw^ + 3 * math.PI, 2 * math.PI) - math.PI
-    yaw^ += clamp(d, -amount, amount)
 }
 
 @(private="file")
@@ -424,7 +364,9 @@ slime_touches_player :: proc(sl: ^Slime, gs: ^Game_State) -> bool {
 // Damage a slime and knock it with velocity `knock` (divided by its
 // weight). At no health left it pops, splitting into two of the next size
 // down. Returns true if it died.
-slime_damage :: proc(s: ^Slimes, sl: ^Slime, damage: f32, knock: [3]f32, boosted: bool) -> bool {
+slime_damage :: proc(gs: ^Game_State, sl: ^Slime, damage: f32, knock: [3]f32, boosted: bool) -> bool {
+    s := &gs.slimes
+    fx := &gs.fx
     kind := SLIME_KINDS[sl.size]
     sl.hp -= damage
     sl.flash = 1
@@ -436,13 +378,13 @@ slime_damage :: proc(s: ^Slimes, sl: ^Slime, damage: f32, knock: [3]f32, boosted
     sl.state, sl.timer = .Stunned, 0.45
 
     c := slime_center(sl)
-    add_number(s, c + {0, slime_radius(sl.size) + 0.4, 0}, damage, boosted)
-    splat(s, c, sl.color, knock, 5, 0.6)
+    add_number(fx, c + {0, slime_radius(sl.size) + 0.4, 0}, damage, boosted)
+    splat(fx, c, sl.color, knock, 5, 0.6)
     play_at(.Slime_Hit, c, 1, vary(0.08) / math.pow(kind.width, 0.3), 16)
 
     if sl.hp > 0 { return false }
     sl.alive = false
-    splat(s, c, sl.color, knock, 16, 1.2)
+    splat(fx, c, sl.color, knock, 16, 1.2)
     play_at(.Slime_Pop, c, 1, vary(0.08) / math.pow(kind.width, 0.4), 18)
     if sl.size > .Small {
         child := Slime_Size(int(sl.size) - 1)
@@ -486,35 +428,18 @@ slimes_clear :: proc(gs: ^Game_State) {
     ui_toast(gs, "Slimes cleared")
 }
 
-// A ring of dust where a plunge lands.
-slimes_shockwave :: proc(s: ^Slimes, pos: [3]f32) {
-    for i in 0 ..< 20 {
-        a := f32(i) / 20 * 2 * math.PI
-        dir := [3]f32{math.cos(a), 0, math.sin(a)}
-        add_goo(s, {pos = pos + dir * 0.6 + {0, 0.15, 0}, vel = dir * rand.float32_range(11, 15) + {0, rand.float32_range(1, 4), 0},
-            life = 0.45, max = 0.45, size = 0.18, color = {0.8, 0.76, 0.68}, floor = pos.y})
+// Knocked out: the slimes about are flung away and calm down.
+slimes_scatter :: proc(gs: ^Game_State, pos: [3]f32) {
+    for &sl in gs.slimes.list {
+        if !sl.alive { continue }
+        d := sl.pos - pos
+        d.y = 0
+        if la.length(d) < 16 {
+            sl.vel = la.normalize0(d) * 12 + {0, 7, 0}
+            sl.on_ground = false
+            sl.state, sl.timer = .Idle, 3
+        }
     }
-}
-
-splat :: proc(s: ^Slimes, c, color, knock: [3]f32, count: int, force: f32) {
-    dir := la.normalize0(knock)
-    for _ in 0 ..< count {
-        r := [3]f32{rand.float32_range(-1, 1), rand.float32_range(-0.2, 1), rand.float32_range(-1, 1)}
-        life := rand.float32_range(0.4, 0.8)
-        add_goo(s, {pos = c + r * 0.25, vel = (dir * 5 + r * 5) * force + {0, 3, 0}, life = life, max = life,
-            size = rand.float32_range(0.1, 0.2) * (0.7 + force * 0.3), color = color * rand.float32_range(0.8, 1.15), floor = c.y - 1})
-    }
-}
-
-add_goo :: proc(s: ^Slimes, g: Goo) {
-    s.goo[s.next_goo] = g
-    s.next_goo = (s.next_goo + 1) % MAX_GOO
-}
-
-add_number :: proc(s: ^Slimes, pos: [3]f32, damage: f32, boosted: bool) {
-    j := [3]f32{rand.float32_range(-0.3, 0.3), 0, rand.float32_range(-0.3, 0.3)}
-    s.numbers[s.next_number] = {pos = pos + j, life = 0.9, value = int(math.round(damage)), boosted = boosted, big = damage >= 25}
-    s.next_number = (s.next_number + 1) % MAX_NUMBERS
 }
 
 // ─── Drawing ────────────────────────────────────────────────────────────────
@@ -550,8 +475,7 @@ combat_models_bake :: proc() {
     ent_models[.Arm_Fore]  = model_bake({-2.5 * v, -2.5 * v, 0}, {2.5 * v, 2.5 * v, 1}, v, shape_arm_fore)
 }
 
-// Each slime is one squashed and stretched part; the goo is one entity of
-// small cubes (no shadows: specks).
+// Each slime is one squashed and stretched part.
 slimes_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     s := &gs.slimes
     eye := gs.camera.pos
@@ -569,13 +493,4 @@ slimes_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         ent_part(f, .Slime, pos, basis_yaw(sl.yaw), scale, tint)
         ent_end(f)
     }
-    any := false
-    for g in s.goo { if g.life > 0 { any = true; break } }
-    if !any || !ent_begin(f, false) { return }
-    for g in s.goo {
-        if g.life <= 0 { continue }
-        k := g.size / 0.125 * math.sqrt(g.life / g.max)
-        ent_part(f, .Goo, g.pos, IDENTITY, {k, k, k}, g.color)
-    }
-    ent_end(f)
 }

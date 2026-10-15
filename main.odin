@@ -19,7 +19,8 @@ Game_State :: struct {
     glider: Glider, // hang glider (glider.odin)
     player_anim: Player_Anim, // third-person body animation (creatures.odin)
     combat: Combat, // the sword, health, combos (combat.odin)
-    slimes: Slimes, // slimes, goo, damage numbers (slime.odin)
+    slimes: Slimes, // (slime.odin)
+    fx: Effects, // goo, sparks, dust, damage numbers (fx.odin)
     enemies: Enemies, // skeletons, goblins, orcs; landmark guards (enemies.odin)
     sky_thermals:      [MAX_SKY_THERMALS]Sky_Thermal, // strong thermals near the player, for cumulus (glider.odin)
     sky_thermal_count: int,
@@ -456,6 +457,7 @@ main :: proc() {
         combat_post_update(&gs, world_dt)
         slimes_update(&gs, world_dt)
         enemies_update(&gs, world_dt)
+        fx_update(&gs, world_dt)
         glider_view_update(&gs, dt)
         combat_view_update(&gs, dt, world_dt)
 
