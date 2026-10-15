@@ -20,14 +20,14 @@
 //  dynamic base:          header (Ent_Header): (tiles x, tiles y, -, -), (sun u axis, u0), (sun v axis, v0), -
 //  + ENT_ENTS_OFS:        MAX_ENTITIES x 2: (box min, first part), (box max, part count)
 //  + ENT_PARTS_OFS:       parts, 6 each: 3 rows world->grid, (box min, model), (box max, flags), (tint, -)
-//  + ENT_TILES_OFS:       64-bit entity mask per 16x16 screen tile (2 per uint4)
-//  + ENT_SUN_OFS:         64-bit shadow-caster mask per sun-grid cell (2 per uint4)
+//  + ENT_TILES_OFS:       128-bit entity mask per 16x16 screen tile (one uint4)
+//  + ENT_SUN_OFS:         128-bit shadow-caster mask per sun-grid cell (one uint4)
 // See ent_build_masks in voxel_models.odin for how the masks are built.
 #define ENT_PAL_BASE    1
 #define ENT_MODEL_BASE  65
-#define ENT_MAX         64
+#define ENT_MAX         128
 #define ENT_PART_STRIDE 6
-#define ENT_MAX_PARTS   256
+#define ENT_MAX_PARTS   1024
 #define ENT_TILE        16
 #define ENT_TILE_COUNT  2500  // (TEX_W / 16) * (TEX_H / 16), TEX_W = TEX_H = 800
 #define ENT_SUN_GRID    64
@@ -35,10 +35,10 @@
 #define ENT_ENTS_OFS    4
 #define ENT_PARTS_OFS   (ENT_ENTS_OFS + ENT_MAX * 2)
 #define ENT_TILES_OFS   (ENT_PARTS_OFS + ENT_MAX_PARTS * ENT_PART_STRIDE)
-#define ENT_SUN_OFS     (ENT_TILES_OFS + ENT_TILE_COUNT / 2)
+#define ENT_SUN_OFS     (ENT_TILES_OFS + ENT_TILE_COUNT)
 
 // This pixel's screen-tile mask; the tracer sets it before tracing view rays.
-static uint2 g_ent_tile_mask;
+static uint4 g_ent_tile_mask;
 
 #define PAL_TINT 1u
 #define PAL_EMIT 2u
@@ -174,14 +174,14 @@ bool ent_trace_part(uint p, float3 ro_w, float3 rd_w, float t_max,
     return false;
 }
 
-uint2 ent_mask_at(uint base, uint k) {
-    uint4 q = ent_data[base + (k >> 1)];
-    return (k & 1u) != 0u ? q.zw : q.xy;
+// 128-bit entity mask k of the table at base (bit i = entity i).
+uint4 ent_mask_at(uint base, uint k) {
+    return ent_data[base + k];
 }
 
 // Mask of the 16x16 tile holding pixel `pix` (call once per pixel).
 void ent_set_pixel(uint2 pix) {
-    g_ent_tile_mask = uint2(0, 0);
+    g_ent_tile_mask = uint4(0, 0, 0, 0);
     if (u_entity_count == 0) return; // masks weren't uploaded this frame
     uint dyn = ent_dyn_base();
     uint tiles_x = ent_data[dyn].x;
@@ -190,16 +190,18 @@ void ent_set_pixel(uint2 pix) {
 
 // Trace the entities in `mask` (bit i = entity i). any_hit: stop at the
 // first hit (shadow rays).
-bool ent_trace_mask(uint2 mask, float3 ro, float3 rd, float t_max, bool any_hit, inout EntityHit hit) {
+bool ent_trace_mask(uint4 mask, float3 ro, float3 rd, float t_max, bool any_hit, inout EntityHit hit) {
     float3 inv = 1.0 / ent_safe_dir(rd);
     uint dyn = ent_dyn_base();
     float best = t_max;
     bool found = false;
     [loop]
-    while ((mask.x | mask.y) != 0u) {
+    while (any(mask != 0u)) {
         uint e;
-        if (mask.x != 0u) { e = firstbitlow(mask.x); mask.x &= mask.x - 1u; }
-        else              { e = 32u + firstbitlow(mask.y); mask.y &= mask.y - 1u; }
+        if      (mask.x != 0u) { e =       firstbitlow(mask.x); mask.x &= mask.x - 1u; }
+        else if (mask.y != 0u) { e = 32u + firstbitlow(mask.y); mask.y &= mask.y - 1u; }
+        else if (mask.z != 0u) { e = 64u + firstbitlow(mask.z); mask.z &= mask.z - 1u; }
+        else                   { e = 96u + firstbitlow(mask.w); mask.w &= mask.w - 1u; }
         uint4 e0 = ent_data[dyn + ENT_ENTS_OFS + e * 2u];
         uint4 e1 = ent_data[dyn + ENT_ENTS_OFS + e * 2u + 1u];
         float t0, t1;
@@ -232,7 +234,7 @@ EntityHit trace_entities(float3 ro, float3 rd, float t_max) {
     EntityHit hit;
     hit.index = -1; hit.t = 1e30; hit.hit_pos = float3(0, 0, 0);
     hit.normal = float3(0, 1, 0); hit.pal = 0u; hit.vhash = 0u;
-    if (u_entity_count > 0 && t_max > 0.0 && (g_ent_tile_mask.x | g_ent_tile_mask.y) != 0u &&
+    if (u_entity_count > 0 && t_max > 0.0 && any(g_ent_tile_mask != 0u) &&
         ent_trace_mask(g_ent_tile_mask, ro, rd, t_max, false, hit)) hit.hit_pos = ro + rd * hit.t;
     return hit;
 }
@@ -246,8 +248,8 @@ float entity_shadow_transmittance(float3 ro, float3 rd, float max_t) {
     float4 hv = asfloat(ent_data[dyn + 2]);
     int cu = clamp(int(floor((dot(ro, hu.xyz) - hu.w) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1);
     int cv = clamp(int(floor((dot(ro, hv.xyz) - hv.w) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1);
-    uint2 mask = ent_mask_at(dyn + ENT_SUN_OFS, uint(cv * ENT_SUN_GRID + cu));
-    if ((mask.x | mask.y) == 0u) return 1.0;
+    uint4 mask = ent_mask_at(dyn + ENT_SUN_OFS, uint(cv * ENT_SUN_GRID + cu));
+    if (all(mask == 0u)) return 1.0;
     EntityHit h;
     h.index = -1; h.t = 1e30; h.hit_pos = float3(0, 0, 0);
     h.normal = float3(0, 1, 0); h.pal = 0u; h.vhash = 0u;

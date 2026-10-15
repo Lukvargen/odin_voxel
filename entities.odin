@@ -13,7 +13,7 @@ import SDL "vendor:sdl3"
 // where those parts are put — and uploaded for the tracer
 // (shaders/entity_voxel.hlsl).
 
-MAX_ENTITIES        :: 64
+MAX_ENTITIES        :: 128 // one bit each in the 128-bit culling masks (voxel_models.odin)
 ENTITY_CULL_RADIUS  :: f32(96.0)  // gather range around camera (birds: BIRD_CULL_RADIUS)
 FOX_WALK_SPEED      :: f32(1.6)   // voxels/s
 FOX_FLEE_SPEED      :: f32(5.5)
@@ -269,7 +269,7 @@ entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
     #assert(offset_of(Ent_Frame, ents)  == 4 * 16)
     #assert(offset_of(Ent_Frame, parts) == (4 + MAX_ENTITIES * 2) * 16)
     #assert(offset_of(Ent_Frame, tiles) == (4 + MAX_ENTITIES * 2 + MAX_ENT_PARTS * 6) * 16)
-    #assert(offset_of(Ent_Frame, sun)   == (4 + MAX_ENTITIES * 2 + MAX_ENT_PARTS * 6) * 16 + ENT_TILES_X * ENT_TILES_Y * 8)
+    #assert(offset_of(Ent_Frame, sun)   == (4 + MAX_ENTITIES * 2 + MAX_ENT_PARTS * 6) * 16 + ENT_TILES_X * ENT_TILES_Y * 16)
     dst := SDL.MapGPUTransferBuffer(gs.gpu_device, gs.ent_transfer, true)
     mem.copy(dst, frame, size)
     SDL.UnmapGPUTransferBuffer(gs.gpu_device, gs.ent_transfer)

@@ -176,6 +176,7 @@ main :: proc() {
             case a == "enemies": bench_enemies = true
             case a == "fight": bench_fight = true
             case a == "nav": bench_nav = true
+            case a == "crowd": bench_crowd = true
             case a == "build": bench_build = true
             case a == "combat": bench_combat = true
             case strings.has_prefix(a, "hour="):

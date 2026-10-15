@@ -312,7 +312,7 @@ ent_static_words :: proc() -> (words: []u32, dyn_base: int) {
 
 // ─── Instances ──────────────────────────────────────────────────────────────
 
-MAX_ENT_PARTS :: 256
+MAX_ENT_PARTS :: 1024
 
 // Matches the 2-uint4 entity record in entity_voxel.hlsl.
 Ent_Gpu :: struct #packed {
@@ -353,18 +353,20 @@ Ent_Header :: struct #packed {
     _pad1: [4]u32,
 }
 
+// One bit per entity (MAX_ENTITIES): a uint4 on the GPU.
+Ent_Mask :: [2]u64
+
 Ent_Frame :: struct {
     hdr:    Ent_Header,
     ents:   [MAX_ENTITIES]Ent_Gpu,
     parts:  [MAX_ENT_PARTS]Part_Gpu,
-    tiles:  [ENT_TILES_X * ENT_TILES_Y]u64,
-    sun:    [ENT_SUN_GRID * ENT_SUN_GRID]u64,
+    tiles:  [ENT_TILES_X * ENT_TILES_Y]Ent_Mask,
+    sun:    [ENT_SUN_GRID * ENT_SUN_GRID]Ent_Mask,
     // CPU only below
     n_ents, n_parts: int,
     no_shadow: [MAX_ENTITIES]bool,
     corners: [MAX_ENT_PARTS][8][3]f32, // oriented part boxes, for the screen masks
 }
-#assert(ENT_TILES_X * ENT_TILES_Y % 2 == 0)
 
 // Pixel rect (x0, y0, x1, y1) of part p's oriented box, or false when it's
 // entirely behind the eye or off screen.
@@ -433,7 +435,7 @@ ent_build_masks :: proc(f: ^Ent_Frame, gs: ^Game_State) {
 
     for i in 0 ..< f.n_ents {
         e := f.ents[i]
-        bit := u64(1) << u64(i)
+        word, bit := i >> 6, u64(1) << u64(i & 63)
         // Screen tiles: each part's oriented box, clipped at the eye plane.
         // Only a part whose box holds the eye covers the whole screen; the
         // glider's wing and frame otherwise claim just the tiles they span.
@@ -444,7 +446,7 @@ ent_build_masks :: proc(f: ^Ent_Frame, gs: ^Game_State) {
             bx := clamp(int(math.floor((r[2] + 1) / ENT_TILE)), 0, tx - 1)
             ay := clamp(int(math.floor((r[1] - 1) / ENT_TILE)), 0, ty - 1)
             by := clamp(int(math.floor((r[3] + 1) / ENT_TILE)), 0, ty - 1)
-            for yy in ay ..= by { for xx in ax ..= bx { f.tiles[yy * tx + xx] |= bit } }
+            for yy in ay ..= by { for xx in ax ..= bx { f.tiles[yy * tx + xx][word] |= bit } }
         }
         umin, vmin, umax, vmax := f32(1e9), f32(1e9), f32(-1e9), f32(-1e9)
         for c in 0 ..< 8 {
@@ -457,7 +459,7 @@ ent_build_masks :: proc(f: ^Ent_Frame, gs: ^Game_State) {
         cu1 := clamp(int(math.floor((umax - f.hdr.u0) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1)
         cv0 := clamp(int(math.floor((vmin - f.hdr.v0) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1)
         cv1 := clamp(int(math.floor((vmax - f.hdr.v0) / ENT_SUN_CELL)), 0, ENT_SUN_GRID - 1)
-        for vv in cv0 ..= cv1 { for uu in cu0 ..= cu1 { f.sun[vv * ENT_SUN_GRID + uu] |= bit } }
+        for vv in cv0 ..= cv1 { for uu in cu0 ..= cu1 { f.sun[vv * ENT_SUN_GRID + uu][word] |= bit } }
     }
 }
 

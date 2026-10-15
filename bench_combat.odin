@@ -322,3 +322,46 @@ bench_nav_run :: proc(gs: ^Game_State) {
     run(gs, e, 3, dt)
     fmt.printf("  after 3 s more: %v\n", e.state)
 }
+
+// `bench crowd`: a crowd around the player (every enemy and slime slot),
+// GPU time per frame with and without them, and the CPU time spent posing
+// and packing the entity data (the profile dump).
+bench_crowd: bool
+
+bench_crowd_run :: proc(gs: ^Game_State) {
+    x, z, found := bench_find_biome(.Plains)
+    if !found { x, z = 0, 0 }
+    bench_teleport(gs, {f32(x) + 0.5, f32(surface_height_at(x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5})
+    x, z = bench_open_ground(gs, x, z)
+    cam := &gs.camera
+    cam.pos = {f32(x) + 0.5, f32(bench_ground(gs, x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5}
+    cam.fly_mode, cam.yaw, cam.pitch = true, 0, -12
+    gs.slimes, gs.enemies.spawn_timer, gs.enemies.site_timer = {}, 1e9, 1e9
+    gs.slimes.spawn_timer = 1e9
+    for &e in gs.enemies.list { e.alive = false }
+    gs.entities_enabled = false
+    fmt.printf("crowd: none        %.2f ms\n", bench_measure(gs))
+    gs.entities_enabled = true
+    for i in 0 ..< MAX_ENEMIES {
+        a := f32(i) / MAX_ENEMIES * 2.4 - 1.2
+        r := 5 + f32(i % 4) * 2.5
+        px, pz := f32(x) + 0.5 + math.sin(a) * r, f32(z) + 0.5 + math.cos(a) * r
+        g := bench_ground(gs, int(math.floor(px)), int(math.floor(pz))) + 1
+        if e := enemy_spawn(gs, Enemy_Kind(i % 3), {px, f32(g), pz}); e != nil { e.yaw, e.timer = math.PI, 1e9 }
+    }
+    for i in 0 ..< MAX_SLIMES {
+        a := f32(i) / MAX_SLIMES * 2.4 - 1.2
+        r := 4 + f32(i % 5) * 2
+        px, pz := f32(x) + 0.5 + math.sin(a) * r, f32(z) + 0.5 + math.cos(a) * r
+        g := bench_ground(gs, int(math.floor(px)), int(math.floor(pz))) + 1
+        if sl := slime_spawn(&gs.slimes, Slime_Size(i % 3), {px, f32(g), pz}, {}, SLIME_COLORS[i % len(SLIME_COLORS)]); sl != nil { sl.age, sl.timer = 10, 1e9 }
+    }
+    frame := new(Ent_Frame, context.temp_allocator)
+    profile_reset()
+    ms := bench_measure(gs)
+    // Count what one frame holds.
+    enemies_add_parts(gs, frame); slimes_add_parts(gs, frame)
+    fmt.printf("crowd: %d enemies + %d slimes: %.2f ms, %d entities / %d parts in the frame\n", MAX_ENEMIES, MAX_SLIMES, ms, frame.n_ents, frame.n_parts)
+    profile_dump("crowd")
+    if bench_shot_dir != "" { bench_screenshot(gs, fmt.tprintf("%s/crowd.bmp", bench_shot_dir)) }
+}
