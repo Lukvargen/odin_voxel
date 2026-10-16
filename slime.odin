@@ -94,11 +94,13 @@ Slime :: struct {
     freeze:     f32,    // stuck on the sword: held still, shuddering, then knocked away
     age:        f32,
     prey:       int,    // the player it hops after (sim.odin)
+    uid:        u32,    // which slime this slot holds (a hit names it: Msg_Hit)
 }
 
 Slimes :: struct {
     list:        [MAX_SLIMES]Slime,
     spawn_timer: f32,
+    last_uid:    u32,
 }
 
 slime_radius :: proc(size: Slime_Size) -> f32 { return SLIME_KINDS[size].width * 0.5 }
@@ -124,6 +126,8 @@ slime_spawn :: proc(s: ^Slimes, size: Slime_Size, pos, vel: [3]f32, color: [3]f3
             timer = rand.float32_range(0.5, 2),
             color = color,
         }
+        s.last_uid += 1
+        sl.uid = s.last_uid
         return &sl
     }
     return nil
@@ -425,12 +429,15 @@ slime_debug_spawn :: proc(gs: ^Game_State) {
     at := feet + camera_flat_forward(gs.camera) * 4 + {0, 1.5, 0}
     size := debug_next_size
     debug_next_size = size == .Small ? .Big : Slime_Size(int(size) - 1)
-    if sl := slime_spawn(&gs.slimes, size, at, {}, slime_color_for(terrain_at(int(at.x), int(at.z)).biome)); sl != nil {
-        sl.yaw = -math.to_radians(gs.camera.yaw) + math.PI // facing you
-        ui_toast(gs, fmt.tprintf("Spawned a %v slime", size))
-    } else {
+    free := 0
+    for sl in gs.slimes.list { if !sl.alive { free += 1 } }
+    if free == 0 {
         ui_toast(gs, "Too many slimes")
+        return
     }
+    yaw := -math.to_radians(gs.camera.yaw) + math.PI // facing you
+    client_send(gs, .Spawn, Msg_Spawn{target = .Slime, kind = u8(size), pos = at, yaw = yaw})
+    ui_toast(gs, fmt.tprintf("Spawned a %v slime", size))
 }
 
 // Debug (F7): every slime gone, and none spawning for a while.

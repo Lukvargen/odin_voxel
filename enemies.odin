@@ -126,6 +126,7 @@ Enemy :: struct {
     nocturnal:  bool,   // crumbles at dawn
     // Senses and getting about (enemy_path.odin)
     prey:       int,    // the player it watches and goes after (sim.odin)
+    uid:        u32,    // which enemy this slot holds (a hit names it: Msg_Hit)
     sees:       bool,   // the player, last time it looked
     see_timer:  f32,    // until it looks again
     last_seen:  [3]f32, // where the player's feet were
@@ -153,6 +154,7 @@ Enemies :: struct {
     spawn_timer: f32,
     site_timer:  f32,
     time:        f32,
+    last_uid:    u32,
     landmarks:   map[[2]int]Landmark, // cell -> its landmark (cached)
     sites:       map[[2]int]Site,
 }
@@ -181,6 +183,8 @@ enemy_spawn :: proc(sim: ^Sim, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
             yaw = rand.float32_range(0, 2 * math.PI), hp = ENEMY_SPECS[kind].hp,
             timer = rand.float32_range(0.5, 3), tint = tint, walk_phase = rand.float32_range(0, 6),
         }
+        s.last_uid += 1
+        e.uid = s.last_uid
         return &e
     }
     return nil
@@ -688,10 +692,9 @@ enemy_debug_spawn :: proc(gs: ^Game_State) {
     at := feet + camera_flat_forward(gs.camera) * 5 + {0, 0.5, 0}
     kind := debug_next_kind
     debug_next_kind = Enemy_Kind((int(kind) + 1) % len(Enemy_Kind))
-    if e := enemy_spawn(gs, kind, at); e != nil {
-        e.yaw = -math.to_radians(gs.camera.yaw) + math.PI
-        ui_toast(gs, fmt.tprintf("Spawned a %v", kind))
-    }
+    yaw := -math.to_radians(gs.camera.yaw) + math.PI
+    client_send(gs, .Spawn, Msg_Spawn{target = .Enemy, kind = u8(kind), pos = at, yaw = yaw})
+    ui_toast(gs, fmt.tprintf("Spawned a %v", kind))
 }
 
 enemies_clear :: proc(sim: ^Sim) {

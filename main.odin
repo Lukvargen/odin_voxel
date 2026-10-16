@@ -14,6 +14,8 @@ Game_State :: struct {
     // The voxels this client sees (world.odin). An in-process server shares
     // them: sim.world points here.
     using voxels: World,
+    server: Server,   // in-process: singleplayer, or hosting (server.odin)
+    loop:   Loopback, // this client's link to it (net.odin)
 
     // SDL3
     window:     ^SDL.Window,
@@ -136,6 +138,7 @@ Game_State :: struct {
 main :: proc() {
     gs: Game_State
     gs.sim.world = &gs.voxels // singleplayer: the simulation plays in the client's world
+    server_init(&gs.server, &gs.sim, &gs.loop)
     bench := len(os.args) > 1 && os.args[1] == "bench"
     if len(os.args) > 1 && os.args[1] == "sounds" {
         audio_export(len(os.args) > 2 ? os.args[2] : "sounds")
@@ -344,8 +347,7 @@ main :: proc() {
                 case SDL.K_F6:
                     slime_debug_spawn(&gs)
                 case SDL.K_F7:
-                    slimes_clear(&gs)
-                    enemies_clear(&gs)
+                    client_send_empty(&gs, .Clear)
                     ui_toast(&gs, "Slimes and enemies cleared")
                 case SDL.K_F8:
                     enemy_debug_spawn(&gs)
@@ -425,10 +427,10 @@ main :: proc() {
             fwd := camera_forward(gs.camera)
             gs.light_dir = fwd
             gs.sun_intensity = SUN_PEAK
-            gs.day.paused, gs.sky.manual = true, true // until the clock is set or restarted (options)
+            gs.sky.manual = true // until the clock is set or restarted (options)
+            client_send(&gs, .Set_Paused, true)
         }
-        day_tick(&gs, dt)
-        sky_update(&gs, dt)
+        sky_update(&gs, dt) // the clock ticks in the server (server_simulate)
 
         // The wheel walks the hotbar (down = next) or sizes the current
         // tool (up = bigger), by the modifiers held (build_tools.odin).
@@ -460,10 +462,13 @@ main :: proc() {
             }
         }
         combat_post_update(&gs, dt)
-        sim_sync_client(&gs)
-        slimes_update(&gs, dt)
-        enemies_update(&gs, dt)
-        client_after_sim(&gs)
+
+        // The world moves on: this client tells the server about its player
+        // (and its sword's hits, sent above), the server steps, and the
+        // client plays what happened.
+        client_send_input(&gs)
+        server_step(&gs.server, dt)
+        client_receive(&gs)
         fx_update(&gs, fx_dt)
         glider_view_update(&gs, dt)
         combat_view_update(&gs, dt)

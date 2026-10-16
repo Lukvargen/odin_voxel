@@ -508,10 +508,9 @@ hit_amount :: proc(gs: ^Game_State, kind: Attack_Kind, at: [3]f32) -> (damage: f
 }
 
 // What a landed hit does to the swing and the view: combo, hit stop,
-// slow-down, shake, and the lift of an air or rising slash. freeze is the
-// target's own hit-stop timer.
+// slow-down, shake, and the lift of an air or rising slash.
 @(private="file")
-hit_feedback :: proc(gs: ^Game_State, kind: Attack_Kind, killed: bool, freeze: ^f32) {
+hit_feedback :: proc(gs: ^Game_State, kind: Attack_Kind, killed: bool) {
     c := &gs.combat
     cam := &gs.camera
     a := ATTACKS[kind]
@@ -522,9 +521,8 @@ hit_feedback :: proc(gs: ^Game_State, kind: Attack_Kind, killed: bool, freeze: ^
     c.hitstop = max(c.hitstop, a.hitstop)
     if killed {
         slow_down(c, SLOWMO_KILL)
-    } else {
-        freeze^ = a.hitstop + 0.02 // shudders on the blade, then flies
-        if a.hitstop >= 0.08 { slow_down(c, SLOWMO_HEAVY) }
+    } else if a.hitstop >= 0.08 {
+        slow_down(c, SLOWMO_HEAVY)
     }
     gs.glider.shake = min(gs.glider.shake + a.shake + (killed ? 0.3 : 0), 1.5)
     if killed { c.kills += 1 }
@@ -549,6 +547,7 @@ Target :: struct {
     center: [3]f32,
     radius: f32,
     hit_id: ^u32,
+    index:  int, // in its list
     slime:  ^Slime,
     enemy:  ^Enemy,
 }
@@ -557,11 +556,11 @@ Target :: struct {
 @(private="file")
 combat_targets :: proc(gs: ^Game_State) -> []Target {
     out := make([dynamic]Target, 0, MAX_SLIMES + MAX_ENEMIES, context.temp_allocator)
-    for &sl in gs.slimes.list {
-        if sl.alive { append(&out, Target{center = slime_center(&sl), radius = slime_radius(sl.size), hit_id = &sl.hit_id, slime = &sl}) }
+    for &sl, i in gs.slimes.list {
+        if sl.alive { append(&out, Target{center = slime_center(&sl), radius = slime_radius(sl.size), hit_id = &sl.hit_id, index = i, slime = &sl}) }
     }
-    for &en in gs.enemies.list {
-        if en.alive && en.state != .Dead { append(&out, Target{center = enemy_center(&en), radius = enemy_hit_radius(&en), hit_id = &en.hit_id, enemy = &en}) }
+    for &en, i in gs.enemies.list {
+        if en.alive && en.state != .Dead { append(&out, Target{center = enemy_center(&en), radius = enemy_hit_radius(&en), hit_id = &en.hit_id, index = i, enemy = &en}) }
     }
     return out[:]
 }
@@ -570,14 +569,20 @@ combat_targets :: proc(gs: ^Game_State) -> []Target {
 hit_target :: proc(gs: ^Game_State, t: Target, kind: Attack_Kind) {
     t.hit_id^ = gs.combat.attack_id
     damage, knock, boosted := hit_amount(gs, kind, t.center)
+    // The server deals the blow (server_hit); whether it kills, this client
+    // judges for itself, since the swing's feel can't wait for the answer.
+    msg := Msg_Hit{damage = damage, knock = knock, boosted = boosted, index = u16(t.index)}
     killed: bool
-    freeze: ^f32
     if t.slime != nil {
-        killed, freeze = slime_damage(gs, t.slime, damage, knock, boosted), &t.slime.freeze
+        msg.target, msg.uid = .Slime, t.slime.uid
+        killed = t.slime.hp - damage <= 0
     } else {
-        killed, freeze = enemy_damage(gs, t.enemy, damage, knock, boosted), &t.enemy.freeze
+        msg.target, msg.uid = .Enemy, t.enemy.uid
+        killed = t.enemy.hp - damage <= 0
     }
-    hit_feedback(gs, kind, killed, freeze)
+    if !killed { msg.freeze = ATTACKS[kind].hitstop + 0.02 } // shudders on the blade, then flies
+    client_send(gs, .Hit, msg)
+    hit_feedback(gs, kind, killed)
 }
 
 Hurt_Result :: enum u8 { Missed, Hit, Blocked, Parried }
@@ -622,12 +627,10 @@ combat_take_hurt :: proc(gs: ^Game_State, result: Hurt_Result, damage: f32, knoc
     play(.Hurt, 0.9, vary(0.06))
     if c.hp <= 0 {
         // Knocked out: back on your feet at full health, everything about
-        // scattered and calmed down. (The scattering is the simulation's:
-        // over a network, a message to it.)
+        // scattered and calmed down.
         c.hp = PLAYER_MAX_HP
         c.invuln = 2
-        slimes_scatter(gs, cam.pos)
-        enemies_scatter(gs, cam.pos)
+        client_send(gs, .Scatter, cam.pos)
         ui_toast(gs, "Knocked out! Back on your feet...", 2.5)
     }
 }

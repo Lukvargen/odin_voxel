@@ -3,13 +3,13 @@ package main
 import "core:math"
 import la "core:math/linalg"
 
-// The simulation: what a server will own and run once there is one. It
-// plays in a World (world.odin) it borrows: in singleplayer the client's.
-// Slimes and enemies think about players, never about the camera: each
-// player is one of `players`, and slot LOCAL_PLAYER is the one at this
-// keyboard, which the client reports every frame (sim_sync_client). What
-// happens that the client should see or hear goes out as events
-// (events.odin), never as direct calls into effects, sound or the camera.
+// The simulation, which the server runs (server.odin). It plays in a World
+// (world.odin) it borrows: in singleplayer the client's. Slimes and enemies
+// think about players, never about the camera: each player is one of
+// `players`, as its client reports it every frame (client_send_input);
+// slot LOCAL_PLAYER is the one at this keyboard. What happens that clients
+// should see or hear goes out as events (events.odin), never as direct
+// calls into effects, sound or the camera.
 //
 // Game_State embeds it (`using sim`), so gs.enemies, gs.day... still read
 // as before, and a ^Game_State passes as a ^Sim.
@@ -83,20 +83,6 @@ player_feet :: proc(p: ^Player) -> [3]f32 { return p.pos - {0, PLAYER_EYE_HEIGHT
 player_flat_forward :: proc(p: ^Player) -> [3]f32 {
     y := math.to_radians(p.yaw)
     return la.normalize([3]f32{math.sin(y), 0, math.cos(y)})
-}
-
-// What this client tells the simulation each frame, before it runs: where
-// its player is and how it stands, and whether monsters are on. Over a
-// network this is the client's input message.
-sim_sync_client :: proc(gs: ^Game_State) {
-    cam := &gs.camera
-    c := &gs.combat
-    gs.players[LOCAL_PLAYER] = {
-        active = true, pos = cam.pos, velocity = cam.velocity, yaw = cam.yaw,
-        fly_mode = cam.fly_mode, sneaking = cam.sneaking, sprinting = cam.sprinting,
-        sword = c.sword, invuln = c.invuln, blocking = c.blocking, block_time = c.block_time,
-    }
-    gs.monsters = gs.entities_enabled
 }
 
 // The active player nearest `pos` (ground distance), or -1 if there are none.
