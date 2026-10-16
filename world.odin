@@ -165,6 +165,15 @@ block_is_leaves :: #force_inline proc(b: u8) -> bool {
     return b == u8(Block_Type.Leaves) || b == u8(Block_Type.Spruce_Leaves)
 }
 
+// The voxel world: the resident columns, and which have edits saved. Only
+// voxels, nothing of the GPU: a server keeps one, and the client binds its
+// columns to ring slots (gpu_chunk_owner). Game_State embeds the client's
+// (`using voxels`), so a ^Game_State passes as a ^World.
+World :: struct {
+    columns:       map[[2]int]^Column,
+    saved_columns: map[[2]int]bool, // columns with a save file (save.odin)
+}
+
 // One 8x8x8 chunk. Uniform chunks (all air, all stone) keep no voxel array.
 Chunk :: struct {
     voxels:     ^[VOXELS_PER_BRICK]u8, // nil = every voxel is `fill`
@@ -174,7 +183,7 @@ Chunk :: struct {
 }
 
 // All CHUNKS_H chunks of one 8x8 footprint: the unit of generation,
-// streaming and saving. gs.columns holds exactly the resident columns.
+// streaming and saving. World.columns holds exactly the resident columns.
 Column :: struct {
     chunks:   [CHUNKS_H]Chunk,
     modified: bool, // edited by the player: saved to disk when unloaded (save.odin)
@@ -219,10 +228,10 @@ column_free :: proc(col: ^Column) {
 }
 
 // The resident chunk at a world chunk coordinate, or nil.
-world_chunk :: proc(gs: ^Game_State, key: [3]int) -> ^Chunk {
+world_chunk :: proc(w: ^World, key: [3]int) -> ^Chunk {
     iy := chunk_y_index(key.y)
     if iy < 0 { return nil }
-    col := gs.columns[{key.x, key.z}]
+    col := w.columns[{key.x, key.z}]
     return col == nil ? nil : &col.chunks[iy]
 }
 
@@ -922,19 +931,19 @@ generate_cactus :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
 }
 
 // True if the voxel blocks movement (water does not).
-solid_at :: proc(gs: ^Game_State, wx, wy, wz: int) -> bool {
-    return block_solid(u8(get_voxel(gs, wx, wy, wz)))
+solid_at :: proc(w: ^World, wx, wy, wz: int) -> bool {
+    return block_solid(u8(get_voxel(w, wx, wy, wz)))
 }
 
-get_voxel :: proc(gs: ^Game_State, wx, wy, wz: int) -> u32 {
-    c := world_chunk(gs, {wx >> 3, wy >> 3, wz >> 3}) // CHUNK_VOXELS == 8
+get_voxel :: proc(w: ^World, wx, wy, wz: int) -> u32 {
+    c := world_chunk(w, {wx >> 3, wy >> 3, wz >> 3}) // CHUNK_VOXELS == 8
     if c == nil { return 0 }
     return u32(chunk_voxel(c, (wx & 7) + (wy & 7) * CHUNK_VOXELS + (wz & 7) * CHUNK_VOXELS * CHUNK_VOXELS))
 }
 
 // CPU-side DDA raycast — mirrors the shader's two-level traversal.
 // Returns the integer world position of the hit voxel and the surface normal.
-raycast_voxel :: proc(gs: ^Game_State, origin, dir: [3]f32, max_dist: f32) -> (hit_pos: [3]int, normal: [3]int, ok: bool) {
+raycast_voxel :: proc(w: ^World, origin, dir: [3]f32, max_dist: f32) -> (hit_pos: [3]int, normal: [3]int, ok: bool) {
     dx := dir[0]; dy := dir[1]; dz := dir[2]
     ox := f64(origin[0]); oy := f64(origin[1]); oz := f64(origin[2])
 
@@ -959,7 +968,7 @@ raycast_voxel :: proc(gs: ^Game_State, origin, dir: [3]f32, max_dist: f32) -> (h
     nx, ny, nz := 0, 0, 0
 
     for t := 0.0; t < f64(max_dist); {
-        if block_solid(u8(get_voxel(gs, xi, yi, zi))) {
+        if block_solid(u8(get_voxel(w, xi, yi, zi))) {
             return {xi, yi, zi}, {nx, ny, nz}, true
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {

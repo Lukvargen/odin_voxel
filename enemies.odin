@@ -166,8 +166,8 @@ enemy_hit_radius :: proc(e: ^Enemy) -> f32 {
     return max(sp.radius + 0.15, sp.height * 0.32)
 }
 
-enemy_spawn :: proc(gs: ^Game_State, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
-    s := &gs.enemies
+enemy_spawn :: proc(sim: ^Sim, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
+    s := &sim.enemies
     for &e in s.list {
         if e.alive { continue }
         tint: [3]f32 = {1, 1, 1}
@@ -188,17 +188,17 @@ enemy_spawn :: proc(gs: ^Game_State, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
 
 // ─── Update ─────────────────────────────────────────────────────────────────
 
-enemies_update :: proc(gs: ^Game_State, dt: f32) {
-    s := &gs.enemies
+enemies_update :: proc(sim: ^Sim, dt: f32) {
+    s := &sim.enemies
     if dt <= 0 { return }
     s.time += dt
     enemy_paths_frame()
-    night := gs.day.night
+    night := sim.day.night
 
     // Drop the ones far from every player.
     for &e in s.list {
         if !e.alive { continue }
-        _, d := nearest_player(&gs.sim, e.pos)
+        _, d := nearest_player(sim, e.pos)
         if d > ENEMY_DESPAWN || e.pos.y < -100 {
             e.alive = false
             if e.guard { site_forget(s, e.site) }
@@ -207,13 +207,13 @@ enemies_update :: proc(gs: ^Game_State, dt: f32) {
 
     // Each player on foot keeps a roaming population about them, and wakes
     // the guards of the landmarks they come near.
-    if gs.entities_enabled {
+    if sim.monsters {
         s.spawn_timer -= dt
         s.site_timer -= dt
         spawn, sites := s.spawn_timer <= 0, s.site_timer <= 0
         if spawn { s.spawn_timer = 6 }
         if sites { s.site_timer = 1 }
-        for &p in gs.players {
+        for &p in sim.players {
             if !p.active || p.fly_mode { continue }
             feet := player_feet(&p)
             if spawn {
@@ -223,10 +223,10 @@ enemies_update :: proc(gs: ^Game_State, dt: f32) {
                 }
                 if want := 3 + int(math.round(4 * night)); roaming < want {
                     s.spawn_timer = 2.5
-                    enemy_try_spawn(gs, feet, night)
+                    enemy_try_spawn(sim, feet, night)
                 }
             }
-            if sites { sites_update(gs, feet) }
+            if sites { sites_update(sim, feet) }
         }
     }
 
@@ -240,9 +240,9 @@ enemies_update :: proc(gs: ^Game_State, dt: f32) {
         e.age += dt
         e.timer -= dt
         e.rising = max(e.rising - dt * 0.9, 0)
-        enemy_think(gs, &e, dt)
+        enemy_think(sim, &e, dt)
         if !e.alive { continue }
-        for _ in 0 ..< steps { enemy_move(gs, &e, h) }
+        for _ in 0 ..< steps { enemy_move(sim, &e, h) }
         sp := la.length(e.vel.xz)
         e.speed += (sp - e.speed) * min(dt * 10, 1)
         e.walk_phase += e.speed * dt * 2.6 / ENEMY_SPECS[e.kind].scale
@@ -269,25 +269,25 @@ enemies_update :: proc(gs: ^Game_State, dt: f32) {
 }
 
 @(private="file")
-enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
+enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     sp := ENEMY_SPECS[e.kind]
     // Unbothered, it keeps an eye on whoever is nearest; once after
     // someone, it sticks with them.
-    if e.state == .Idle || e.state == .Wander || !gs.players[e.prey].active {
-        if i, _ := nearest_player(&gs.sim, e.pos); i >= 0 { e.prey = i }
+    if e.state == .Idle || e.state == .Wander || !sim.players[e.prey].active {
+        if i, _ := nearest_player(sim, e.pos); i >= 0 { e.prey = i }
     }
-    p := &gs.players[e.prey]
+    p := &sim.players[e.prey]
     feet := player_feet(p)
     to_player := feet - e.pos
     dist := la.length(to_player.xz)
     dir := dist > 0.01 ? to_player.xz / dist : [2]f32{-math.sin(e.yaw), math.cos(e.yaw)}
-    hunting := p.active && !p.fly_mode && gs.entities_enabled
+    hunting := p.active && !p.fly_mode && sim.monsters
     accel: [2]f32 // wanted ground velocity
     want_speed: f32
 
     // Day breaks: the night's dead crumble unless they're at your throat.
-    if e.nocturnal && gs.day.night < 0.15 && e.state != .Dead && (dist > 10 || e.state == .Idle || e.state == .Wander) {
-        enemy_crumble(gs, e)
+    if e.nocturnal && sim.day.night < 0.15 && e.state != .Dead && (dist > 10 || e.state == .Idle || e.state == .Wander) {
+        enemy_crumble(sim, e)
         return
     }
 
@@ -295,7 +295,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
     e.see_timer -= dt
     if e.see_timer <= 0 {
         e.see_timer = 0.25
-        e.sees = dist < 64 && enemy_sees_player(gs, e)
+        e.sees = dist < 64 && enemy_sees_player(sim, e)
     }
     sight := sp.aggro * (p.sneaking ? 0.55 : 1)
     hear: f32 = p.sneaking ? 1.5 : (p.sprinting ? 8 : 4)
@@ -307,7 +307,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
             e.state, e.timer = .Chase, 0
             e.last_seen, e.seen_ago = feet, 0
             e.repath = 0
-            enemy_voice(gs, e, 0.7)
+            enemy_voice(sim, e, 0.7)
             break
         }
         if e.state == .Idle {
@@ -327,7 +327,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
             } else {
                 // Guards heading home find their way round things.
                 goal := e.target
-                if e.guard && la.length((e.home - e.pos).xz) > 6 { goal = enemy_steer(gs, e, e.target, dt) }
+                if e.guard && la.length((e.home - e.pos).xz) > 6 { goal = enemy_steer(sim, e, e.target, dt) }
                 w := la.normalize0((goal - e.pos).xz)
                 if w != 0 {
                     turn_towards(&e.yaw, w, dt * 3)
@@ -347,11 +347,11 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
             turn_towards(&e.yaw, dir, dt * 7)
             e.state, e.timer, e.struck = .Windup, sp.windup, false
             e.swing = rand.float32() < OVERHEAD_CHANCE[e.kind] ? .Overhead : .Slash
-            enemy_voice(gs, e, 0.9)
+            enemy_voice(sim, e, 0.9)
         } else {
             // Where they last saw you, by a path round what's in the way.
             goal := e.sees ? feet : e.last_seen
-            wp := enemy_steer(gs, e, goal, dt)
+            wp := enemy_steer(sim, e, goal, dt)
             w := la.normalize0((wp - e.pos).xz)
             if !e.sees && la.length((e.last_seen - e.pos).xz) < 1 {
                 e.state, e.timer = .Idle, rand.float32_range(1, 3) // nobody here
@@ -363,7 +363,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
         }
     case .Windup:
         turn_towards(&e.yaw, dir, dt * 5)
-        if e.timer <= 0 { e.state, e.timer = .Strike, sp.strike; sim_emit(&gs.sim, {kind = .Enemy_Swing, enemy = e.kind, pos = enemy_center(e)}) }
+        if e.timer <= 0 { e.state, e.timer = .Strike, sp.strike; sim_emit(sim, {kind = .Enemy_Swing, enemy = e.kind, pos = enemy_center(e)}) }
     case .Strike:
         // Lunges a step into the swing; hurts once if the player is in front.
         fwd := [2]f32{-math.sin(e.yaw), math.cos(e.yaw)}
@@ -372,9 +372,9 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
            la.dot(dir, fwd) > (e.swing == .Slash ? -0.1 : 0.45) {
             e.struck = true
             knock := [3]f32{dir.x * sp.knock[0], sp.knock[1], dir.y * sp.knock[0]}
-            switch player_hurt(gs, e.prey, sp.damage, knock, enemy_center(e)) {
+            switch player_hurt(sim, e.prey, sp.damage, knock, enemy_center(e)) {
             case .Hit:
-                sim_emit(&gs.sim, {kind = .Enemy_Struck, enemy = e.kind, pos = feet + {0, 1, 0}})
+                sim_emit(sim, {kind = .Enemy_Struck, enemy = e.kind, pos = feet + {0, 1, 0}})
             case .Blocked:
                 e.vel.xz -= dir * (3 / sp.weight)
                 e.timer = sp.strike * 0.5 // the swing's spent
@@ -384,7 +384,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
                 e.vel = {-dir.x * 5 / sp.weight, 3, -dir.y * 5 / sp.weight}
                 e.on_ground = false
                 e.flash = 1
-                enemy_voice(gs, e, 1)
+                enemy_voice(sim, e, 1)
                 return
             case .Missed:
             }
@@ -408,29 +408,38 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
         e.vel.z += (goal.y - e.vel.z) * k
     }
 
-    // The player can't walk through them.
-    r := sp.radius + PLAYER_HALF_W
-    if dist < r && to_player.y > -sp.height && to_player.y < PLAYER_EYE_HEIGHT {
-        over := r - dist
+    // The player can't walk through them: it gives way a little (the
+    // player's client steps itself out: monsters_push_player).
+    if over, ok := enemy_overlap(e, p.pos); ok {
         e.vel.xz -= dir * over * 30 * dt / sp.weight
-        player_push(gs, e.prey, dir, over)
     }
+}
+
+// How far a player with the eye at `eye` stands inside enemy e's body, if
+// it does: along the ground, from the enemy to the player.
+enemy_overlap :: proc(e: ^Enemy, eye: [3]f32) -> (over: f32, ok: bool) {
+    sp := ENEMY_SPECS[e.kind]
+    to_player := eye - {0, PLAYER_EYE_HEIGHT, 0} - e.pos
+    r := sp.radius + PLAYER_HALF_W
+    dist := la.length(to_player.xz)
+    if dist < r && to_player.y > -sp.height && to_player.y < PLAYER_EYE_HEIGHT { return r - dist, true }
+    return 0, false
 }
 
 // Grunts and rattles: noticing the player, winding up.
 @(private="file")
-enemy_voice :: proc(gs: ^Game_State, e: ^Enemy, volume: f32) {
-    sim_emit(&gs.sim, {kind = .Enemy_Voice, enemy = e.kind, pos = enemy_center(e), amount = volume})
+enemy_voice :: proc(sim: ^Sim, e: ^Enemy, volume: f32) {
+    sim_emit(sim, {kind = .Enemy_Voice, enemy = e.kind, pos = enemy_center(e), amount = volume})
 }
 
 @(private="file")
-enemy_move :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
+enemy_move :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     sp := ENEMY_SPECS[e.kind]
     hw, h := sp.radius, sp.height * 0.92
     if e.rising > 0 { e.vel = {}; return }
 
     centre := e.pos + {0, h * 0.5, 0}
-    in_water := block_is_watery(u8(get_voxel(gs, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z)))))
+    in_water := block_is_watery(u8(get_voxel(sim.world, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z)))))
     if in_water {
         e.vel *= max(1 - 2.5 * dt, 0)
         e.vel.y += 9 * dt
@@ -445,9 +454,9 @@ enemy_move :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
         if d[axis] == 0 { continue }
         q := p
         q[axis] += d[axis]
-        if !box_solid(gs, q, hw, h) { p = q; continue }
+        if !box_solid(sim.world, q, hw, h) { p = q; continue }
         // A single block: step up onto it.
-        if e.on_ground && !box_solid(gs, q + {0, 1.01, 0}, hw, h) && e.state != .Dead {
+        if e.on_ground && !box_solid(sim.world, q + {0, 1.01, 0}, hw, h) && e.state != .Dead {
             p = q + {0, 1.01, 0}
             continue
         }
@@ -455,19 +464,19 @@ enemy_move :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
         e.vel[axis] = 0
     }
     if d.y != 0 {
-        if box_solid(gs, p + {0, d.y, 0}, hw, h) {
+        if box_solid(sim.world, p + {0, d.y, 0}, hw, h) {
             if d.y < 0 {
                 top := math.floor(p.y + d.y) + 1
-                if top <= p.y && !box_solid(gs, {p.x, top, p.z}, hw, h) { p.y = top }
+                if top <= p.y && !box_solid(sim.world, {p.x, top, p.z}, hw, h) { p.y = top }
             }
             e.vel.y = 0
         } else {
             p.y += d.y
         }
     }
-    if box_solid(gs, p, hw, h) { p.y = math.floor(p.y) + 1 }
+    if box_solid(sim.world, p, hw, h) { p.y = math.floor(p.y) + 1 }
     e.pos = p
-    e.on_ground = e.vel.y <= 0.01 && box_solid(gs, p - {0, 0.03, 0}, hw, h)
+    e.on_ground = e.vel.y <= 0.01 && box_solid(sim.world, p - {0, 0.03, 0}, hw, h)
     // Higher than a step in the way while chasing: jump it.
     if blocked && e.on_ground && (e.state == .Chase || e.state == .Wander) {
         e.vel.y = ENEMY_JUMP
@@ -477,7 +486,7 @@ enemy_move :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
 
 // Damage and knock it about; player `by` struck it, and has its attention.
 // True if it died.
-enemy_damage :: proc(gs: ^Game_State, e: ^Enemy, damage: f32, knock: [3]f32, boosted: bool, by := LOCAL_PLAYER) -> bool {
+enemy_damage :: proc(sim: ^Sim, e: ^Enemy, damage: f32, knock: [3]f32, boosted: bool, by := LOCAL_PLAYER) -> bool {
     sp := ENEMY_SPECS[e.kind]
     if e.state == .Dead { return false }
     e.hp -= damage
@@ -488,30 +497,30 @@ enemy_damage :: proc(gs: ^Game_State, e: ^Enemy, damage: f32, knock: [3]f32, boo
     e.on_ground = false
     e.rising = 0
     e.prey = by
-    e.last_seen, e.seen_ago = player_feet(&gs.players[by]), 0
+    e.last_seen, e.seen_ago = player_feet(&sim.players[by]), 0
     c := enemy_center(e)
-    sim_emit(&gs.sim, {kind = .Enemy_Hit, enemy = e.kind, pos = c, vec = knock, amount = damage, boosted = boosted})
+    sim_emit(sim, {kind = .Enemy_Hit, enemy = e.kind, pos = c, vec = knock, amount = damage, boosted = boosted})
     // Heavy ones shrug off the light hits mid-swing.
     if e.kind != .Orc || damage >= 20 || (e.state != .Windup && e.state != .Strike) {
         e.state, e.timer = .Stagger, 0.45 / math.sqrt(sp.weight)
     }
     if e.hp > 0 { return false }
-    enemy_die(gs, e, knock)
+    enemy_die(sim, e, knock)
     return true
 }
 
 @(private="file")
-enemy_die :: proc(gs: ^Game_State, e: ^Enemy, knock: [3]f32) {
+enemy_die :: proc(sim: ^Sim, e: ^Enemy, knock: [3]f32) {
     e.state, e.death = .Dead, 0
     e.bar = 0
-    sim_emit(&gs.sim, {kind = .Enemy_Die, enemy = e.kind, pos = enemy_center(e), vec = knock})
-    if e.guard { site_lost_one(&gs.enemies, e.site) }
+    sim_emit(sim, {kind = .Enemy_Die, enemy = e.kind, pos = enemy_center(e), vec = knock})
+    if e.guard { site_lost_one(&sim.enemies, e.site) }
 }
 
 // Skeletons of the night at dawn: a puff of bone dust, gone.
 @(private="file")
-enemy_crumble :: proc(gs: ^Game_State, e: ^Enemy) {
-    sim_emit(&gs.sim, {kind = .Enemy_Crumble, enemy = e.kind, pos = enemy_center(e)})
+enemy_crumble :: proc(sim: ^Sim, e: ^Enemy) {
+    sim_emit(sim, {kind = .Enemy_Crumble, enemy = e.kind, pos = enemy_center(e)})
     e.alive = false
 }
 
@@ -519,11 +528,11 @@ enemy_crumble :: proc(gs: ^Game_State, e: ^Enemy) {
 
 // Top of the loaded ground at (x, z) with room to stand, searched down from y.
 @(private="file")
-stand_y :: proc(gs: ^Game_State, x, z, from_y: int) -> (y: int, ok: bool) {
+stand_y :: proc(sim: ^Sim, x, z, from_y: int) -> (y: int, ok: bool) {
     for yy := from_y; yy > from_y - 40; yy -= 1 {
-        if solid_at(gs, x, yy, z) {
-            if !solid_at(gs, x, yy + 1, z) && !solid_at(gs, x, yy + 2, z) &&
-               !block_is_watery(u8(get_voxel(gs, x, yy + 1, z))) { return yy + 1, true }
+        if solid_at(sim.world, x, yy, z) {
+            if !solid_at(sim.world, x, yy + 1, z) && !solid_at(sim.world, x, yy + 2, z) &&
+               !block_is_watery(u8(get_voxel(sim.world, x, yy + 1, z))) { return yy + 1, true }
             return 0, false
         }
     }
@@ -543,7 +552,7 @@ roamer_for :: proc(b: Biome, night: f32) -> (kind: Enemy_Kind, pack: int, ok: bo
 }
 
 @(private="file")
-enemy_try_spawn :: proc(gs: ^Game_State, feet: [3]f32, night: f32) {
+enemy_try_spawn :: proc(sim: ^Sim, feet: [3]f32, night: f32) {
     for _ in 0 ..< 8 {
         a := rand.float32_range(0, 2 * math.PI)
         r := rand.float32_range(22, 40)
@@ -551,20 +560,20 @@ enemy_try_spawn :: proc(gs: ^Game_State, feet: [3]f32, night: f32) {
         z := int(math.floor(feet.z + math.sin(a) * r))
         g := surface_height_at(x, z)
         if g <= SEA_LEVEL { continue }
-        y, ok := stand_y(gs, x, z, g + 2)
+        y, ok := stand_y(sim, x, z, g + 2)
         if !ok { continue }
         kind, pack, any := roamer_for(terrain_at(x, z).biome, night)
         if !any { return }
         for i in 0 ..< pack {
             px, pz := x + rand.int_max(5) - 2, z + rand.int_max(5) - 2
-            py, ok2 := stand_y(gs, px, pz, y + 3)
+            py, ok2 := stand_y(sim, px, pz, y + 3)
             if !ok2 { continue }
-            e := enemy_spawn(gs, i == 0 ? kind : (kind == .Orc ? .Goblin : kind), {f32(px) + 0.5, f32(py), f32(pz) + 0.5})
+            e := enemy_spawn(sim, i == 0 ? kind : (kind == .Orc ? .Goblin : kind), {f32(px) + 0.5, f32(py), f32(pz) + 0.5})
             if e == nil { return }
             if kind == .Skeleton && night > 0.6 {
                 e.nocturnal = true
                 e.rising = 1 // claws up out of the ground
-                sim_emit(&gs.sim, {kind = .Enemy_Rise, enemy = e.kind, pos = e.pos})
+                sim_emit(sim, {kind = .Enemy_Rise, enemy = e.kind, pos = e.pos})
             }
         }
         return
@@ -573,8 +582,8 @@ enemy_try_spawn :: proc(gs: ^Game_State, feet: [3]f32, night: f32) {
 
 // Landmarks near the player get their guards; cleared ones refill after a while.
 @(private="file")
-sites_update :: proc(gs: ^Game_State, feet: [3]f32) {
-    s := &gs.enemies
+sites_update :: proc(sim: ^Sim, feet: [3]f32) {
+    s := &sim.enemies
     pcx := floor_div(int(feet.x), LANDMARK_CELL)
     pcz := floor_div(int(feet.z), LANDMARK_CELL)
     for cz in pcz - 1 ..= pcz + 1 {
@@ -591,7 +600,7 @@ sites_update :: proc(gs: ^Game_State, feet: [3]f32) {
             site := s.sites[key]
             if site.spawned { continue }
             if site.cleared_at > 0 && s.time - site.cleared_at < SITE_RESPAWN { continue }
-            n := site_spawn(gs, lm, key, gs.day.night)
+            n := site_spawn(sim, lm, key, sim.day.night)
             if n > 0 { s.sites[key] = {spawned = true, alive = n} }
         }
     }
@@ -599,7 +608,7 @@ sites_update :: proc(gs: ^Game_State, feet: [3]f32) {
 
 // The guards of a landmark; how many were placed.
 @(private="file")
-site_spawn :: proc(gs: ^Game_State, lm: Landmark, key: [2]int, night: f32) -> int {
+site_spawn :: proc(sim: ^Sim, lm: Landmark, key: [2]int, night: f32) -> int {
     kinds: [6]Enemy_Kind
     n := 0
     add :: proc(k: ^[6]Enemy_Kind, n: ^int, kind: Enemy_Kind, count: int) {
@@ -624,9 +633,9 @@ site_spawn :: proc(gs: ^Game_State, lm: Landmark, key: [2]int, night: f32) -> in
             r := rand.float32_range(ring * 0.5, ring * 1.3)
             x := lm.x + int(math.floor(math.cos(a) * r))
             z := lm.z + int(math.floor(math.sin(a) * r))
-            y, ok := stand_y(gs, x, z, lm.base + 6)
+            y, ok := stand_y(sim, x, z, lm.base + 6)
             if !ok { continue }
-            e := enemy_spawn(gs, kinds[i], {f32(x) + 0.5, f32(y), f32(z) + 0.5})
+            e := enemy_spawn(sim, kinds[i], {f32(x) + 0.5, f32(y), f32(z) + 0.5})
             if e == nil { return placed }
             e.guard, e.site = true, key
             placed += 1
@@ -656,8 +665,8 @@ site_lost_one :: proc(s: ^Enemies, key: [2]int) {
 }
 
 // Knocked out: everything close backs off and calms down.
-enemies_scatter :: proc(gs: ^Game_State, pos: [3]f32) {
-    for &e in gs.enemies.list {
+enemies_scatter :: proc(sim: ^Sim, pos: [3]f32) {
+    for &e in sim.enemies.list {
         if !e.alive || e.state == .Dead { continue }
         d := e.pos - pos
         d.y = 0
@@ -685,10 +694,10 @@ enemy_debug_spawn :: proc(gs: ^Game_State) {
     }
 }
 
-enemies_clear :: proc(gs: ^Game_State) {
-    for &e in gs.enemies.list { e.alive = false }
-    clear(&gs.enemies.sites)
-    gs.enemies.spawn_timer = 30
+enemies_clear :: proc(sim: ^Sim) {
+    for &e in sim.enemies.list { e.alive = false }
+    clear(&sim.enemies.sites)
+    sim.enemies.spawn_timer = 30
 }
 
 // ─── Drawing ────────────────────────────────────────────────────────────────

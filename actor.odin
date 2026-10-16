@@ -6,12 +6,12 @@ import "core:math"
 // (slimes, enemies).
 
 // Does a box (feet at pos, half width hw, height h) overlap a solid voxel?
-box_solid :: proc(gs: ^Game_State, pos: [3]f32, hw, h: f32) -> bool {
+box_solid :: proc(w: ^World, pos: [3]f32, hw, h: f32) -> bool {
     E :: f32(0.001)
     for iy in int(math.floor(pos.y + E)) ..= int(math.floor(pos.y + h - E)) {
         for ix in int(math.floor(pos.x - hw + E)) ..= int(math.floor(pos.x + hw - E)) {
             for iz in int(math.floor(pos.z - hw + E)) ..= int(math.floor(pos.z + hw - E)) {
-                if solid_at(gs, ix, iy, iz) { return true }
+                if solid_at(w, ix, iy, iz) { return true }
             }
         }
     }

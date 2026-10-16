@@ -1,36 +1,45 @@
 package main
 
+import "core:math"
 import la "core:math/linalg"
 
-// The simulation: what a server will own and run once there is one, apart
-// from the voxel world, which still lives in Game_State (world.odin).
+// The simulation: what a server will own and run once there is one. It
+// plays in a World (world.odin) it borrows: in singleplayer the client's.
 // Slimes and enemies think about players, never about the camera: each
 // player is one of `players`, and slot LOCAL_PLAYER is the one at this
-// keyboard, copied from the camera every frame (sim_sync_local_player).
+// keyboard, which the client reports every frame (sim_sync_client). What
+// happens that the client should see or hear goes out as events
+// (events.odin), never as direct calls into effects, sound or the camera.
 //
 // Game_State embeds it (`using sim`), so gs.enemies, gs.day... still read
-// as before.
+// as before, and a ^Game_State passes as a ^Sim.
 
 MAX_PLAYERS  :: 8
 LOCAL_PLAYER :: 0
 
 Player :: struct {
-    active:    bool,
-    pos:       [3]f32, // eye, as the camera's
-    velocity:  [3]f32,
-    yaw:       f32,    // degrees, camera convention
-    fly_mode:  bool,   // nothing hunts a flying player
-    sneaking:  bool,
-    sprinting: bool,
-    sword:     bool,   // drawn: slimes only come for an armed player
+    active:     bool,
+    pos:        [3]f32, // eye, as the camera's
+    velocity:   [3]f32,
+    yaw:        f32,    // degrees, camera convention
+    fly_mode:   bool,   // nothing hunts a flying player
+    sneaking:   bool,
+    sprinting:  bool,
+    sword:      bool,   // drawn: slimes only come for an armed player
+    // Defence, as its client last reported it (hurt_outcome).
+    invuln:     f32,    // dodging or just hurt: blows miss
+    blocking:   bool,
+    block_time: f32,    // since the guard went up
 }
 
 Sim :: struct {
-    players: [MAX_PLAYERS]Player,
-    slimes:  Slimes,    // (slime.odin)
-    enemies: Enemies,   // skeletons, goblins, orcs; landmark guards (enemies.odin)
-    day:     Day_Cycle, // time of day: sun, moon, night, mist (daycycle.odin)
-    events:  [dynamic]Sim_Event, // this frame's happenings, for the client (events.odin)
+    world:    ^World,    // the voxels it plays in (world.odin)
+    monsters: bool,      // slimes and enemies spawn and hunt (the options' entities toggle)
+    players:  [MAX_PLAYERS]Player,
+    slimes:   Slimes,    // (slime.odin)
+    enemies:  Enemies,   // skeletons, goblins, orcs; landmark guards (enemies.odin)
+    day:      Day_Cycle, // time of day: sun, moon, night, mist (daycycle.odin)
+    events:   [dynamic]Sim_Event, // this frame's happenings, for the client (events.odin)
 }
 
 // What the simulation tells the client about, which it can't see in the
@@ -47,6 +56,7 @@ Sim_Event_Kind :: enum u8 {
     Enemy_Die,     // pos: centre; vec: knock
     Enemy_Crumble, // pos: centre: a night skeleton gone at dawn
     Enemy_Rise,    // pos: feet: a skeleton clawing up out of the ground
+    Player_Hurt,   // player was struck: result; pos: from; vec: knock; amount: damage
 }
 
 Sim_Event :: struct {
@@ -54,6 +64,8 @@ Sim_Event :: struct {
     boosted: bool,       // a boosted hit (the number shows it)
     slime:   Slime_Size, // Slime_* events
     enemy:   Enemy_Kind, // Enemy_* events
+    player:  u8,         // Player_* events
+    result:  Hurt_Result,
     pos:     [3]f32,
     vec:     [3]f32,
     color:   [3]f32,     // the slime's
@@ -68,14 +80,23 @@ sim_emit :: proc(s: ^Sim, ev: Sim_Event) {
 
 player_feet :: proc(p: ^Player) -> [3]f32 { return p.pos - {0, PLAYER_EYE_HEIGHT, 0} }
 
-// The local player as the camera and sword have it this frame.
-sim_sync_local_player :: proc(gs: ^Game_State) {
+player_flat_forward :: proc(p: ^Player) -> [3]f32 {
+    y := math.to_radians(p.yaw)
+    return la.normalize([3]f32{math.sin(y), 0, math.cos(y)})
+}
+
+// What this client tells the simulation each frame, before it runs: where
+// its player is and how it stands, and whether monsters are on. Over a
+// network this is the client's input message.
+sim_sync_client :: proc(gs: ^Game_State) {
     cam := &gs.camera
+    c := &gs.combat
     gs.players[LOCAL_PLAYER] = {
         active = true, pos = cam.pos, velocity = cam.velocity, yaw = cam.yaw,
         fly_mode = cam.fly_mode, sneaking = cam.sneaking, sprinting = cam.sprinting,
-        sword = gs.combat.sword,
+        sword = c.sword, invuln = c.invuln, blocking = c.blocking, block_time = c.block_time,
     }
+    gs.monsters = gs.entities_enabled
 }
 
 // The active player nearest `pos` (ground distance), or -1 if there are none.
@@ -88,27 +109,36 @@ nearest_player :: proc(s: ^Sim, pos: [3]f32) -> (index: int, dist: f32) {
     return
 }
 
-// Something struck player `pi`. The player at this keyboard takes it
-// (guarding, parrying, dodging) through combat_hurt; another player's
-// client will decide for itself once there is a network.
-player_hurt :: proc(gs: ^Game_State, pi: int, damage: f32, knock: [3]f32, from: [3]f32) -> Hurt_Result {
-    if pi != LOCAL_PLAYER { return .Missed }
-    return combat_hurt(gs, damage, knock, from)
-}
-
-// A monster overlapping player `pi` by `over` along `dir` (ground plane,
-// monster to player) shoves the player out by half of it; stop_into also
-// cancels walking into the monster. The player at this keyboard moves its
-// own camera; a remote one will push itself.
-player_push :: proc(gs: ^Game_State, pi: int, dir: [2]f32, over: f32, stop_into := false) {
-    if pi != LOCAL_PLAYER { return }
-    cam := &gs.camera
-    if stop_into {
-        if into := -(cam.velocity.x * dir.x + cam.velocity.z * dir.y); into > 0 {
-            cam.velocity.x += dir.x * into
-            cam.velocity.z += dir.y * into
+// Whether a blow from `from` (zero: from nowhere in particular, which a
+// guard doesn't stop) lands on player p, by the defence its client last
+// reported: Missed if it didn't (dodging, just hurt); Blocked or Parried if
+// the guard took it. Notes the invulnerability that starts, so a second
+// blow in the same frame misses; the client's own count replaces it next
+// frame.
+hurt_outcome :: proc(p: ^Player, from: [3]f32) -> Hurt_Result {
+    if p.invuln > 0 { return .Missed }
+    if p.blocking && from != 0 {
+        to := la.normalize0((from - p.pos).xz)
+        if la.dot(to, player_flat_forward(p).xz) > BLOCK_ARC {
+            if p.block_time < PARRY_WINDOW {
+                p.invuln = PARRY_INVULN
+                return .Parried
+            }
+            p.invuln = HURT_INVULN * 0.6
+            return .Blocked
         }
     }
-    cam.pos, _ = move_axis(gs, cam.pos, {dir.x * over * 0.5, 0, 0})
-    cam.pos, _ = move_axis(gs, cam.pos, {0, 0, dir.y * over * 0.5})
+    p.invuln = HURT_INVULN
+    return .Hit
+}
+
+// Player `pi` is struck for `damage` from `from`. The outcome is decided
+// here, so the attacker can reel from a parry at once; the player's client
+// takes the hurt, knockback and clang from the event (combat_take_hurt).
+player_hurt :: proc(s: ^Sim, pi: int, damage: f32, knock: [3]f32, from: [3]f32) -> Hurt_Result {
+    r := hurt_outcome(&s.players[pi], from)
+    if r != .Missed {
+        sim_emit(s, {kind = .Player_Hurt, player = u8(pi), result = r, pos = from, vec = knock, amount = damage})
+    }
+    return r
 }

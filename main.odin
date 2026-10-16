@@ -11,6 +11,9 @@ DOUBLE_TAP_MS :: u64(300)
 
 Game_State :: struct {
     using sim: Sim, // players, slimes, enemies, the day (sim.odin)
+    // The voxels this client sees (world.odin). An in-process server shares
+    // them: sim.world points here.
+    using voxels: World,
 
     // SDL3
     window:     ^SDL.Window,
@@ -28,8 +31,6 @@ Game_State :: struct {
     sky_thermals_ok:   bool,
 
     // World
-    columns:         map[[2]int]^Column, // resident columns (world.odin)
-    saved_columns:   map[[2]int]bool,    // columns with a save file (save.odin)
     pool:            Worker_Pool,
     dirty_slots:     [dynamic]int,   // slots whose brick needs GPU upload
     index_dirty:     bool,           // gpu_index changed
@@ -133,6 +134,7 @@ Game_State :: struct {
 
 main :: proc() {
     gs: Game_State
+    gs.sim.world = &gs.voxels // singleplayer: the simulation plays in the client's world
     bench := len(os.args) > 1 && os.args[1] == "bench"
     if len(os.args) > 1 && os.args[1] == "sounds" {
         audio_export(len(os.args) > 2 ? os.args[2] : "sounds")
@@ -345,6 +347,7 @@ main :: proc() {
                 case SDL.K_F7:
                     slimes_clear(&gs)
                     enemies_clear(&gs)
+                    ui_toast(&gs, "Slimes and enemies cleared")
                 case SDL.K_F8:
                     enemy_debug_spawn(&gs)
                 case SDL.K_1 ..= SDL.K_9:
@@ -457,10 +460,10 @@ main :: proc() {
             }
         }
         combat_post_update(&gs, dt)
-        sim_sync_local_player(&gs)
+        sim_sync_client(&gs)
         slimes_update(&gs, dt)
         enemies_update(&gs, dt)
-        sim_events_play(&gs)
+        client_after_sim(&gs)
         fx_update(&gs, fx_dt)
         glider_view_update(&gs, dt)
         combat_view_update(&gs, dt)

@@ -1,10 +1,18 @@
 package main
 
 import "core:math"
+import la "core:math/linalg"
+
+// The client's turn after the simulation ran: play what it reported, and
+// step the player out of any monster it walked into.
+client_after_sim :: proc(gs: ^Game_State) {
+    sim_events_play(gs)
+    monsters_push_player(gs)
+}
 
 // Client side of the simulation's events (sim.odin): this frame's hops,
-// hits and deaths become goo, damage numbers and sounds. Once per frame,
-// after the simulation has run.
+// hits and deaths become goo, damage numbers and sounds; blows on the
+// local player hurt it.
 sim_events_play :: proc(gs: ^Game_State) {
     fx := &gs.fx
     for ev in gs.events {
@@ -58,7 +66,37 @@ sim_events_play :: proc(gs: ^Game_State) {
             play_at(.Bone_Break, c, 0.5, 0.8, 14)
         case .Enemy_Rise:
             splat(fx, c + {0, 0.2, 0}, {0.36, 0.27, 0.18}, {0, 1, 0}, 8, 0.4)
+
+        case .Player_Hurt:
+            if int(ev.player) == LOCAL_PLAYER { combat_take_hurt(gs, ev.result, ev.amount, ev.vec) }
         }
     }
     clear(&gs.events)
+}
+
+// The player can't walk through slimes and enemies: standing inside one, it
+// is shoved out by half the overlap (and stops walking into a slime). The
+// monster gives way on its own side, in the simulation.
+monsters_push_player :: proc(gs: ^Game_State) {
+    cam := &gs.camera
+    shove :: proc(gs: ^Game_State, cam: ^Camera, from: [3]f32, over: f32, stop_into: bool) {
+        dir := la.normalize0((cam.pos - from).xz)
+        if dir == 0 { return }
+        if stop_into {
+            if into := -(cam.velocity.x * dir.x + cam.velocity.z * dir.y); into > 0 {
+                cam.velocity.x += dir.x * into
+                cam.velocity.z += dir.y * into
+            }
+        }
+        cam.pos, _ = move_axis(gs, cam.pos, {dir.x * over * 0.5, 0, 0})
+        cam.pos, _ = move_axis(gs, cam.pos, {0, 0, dir.y * over * 0.5})
+    }
+    for &e in gs.enemies.list {
+        if !e.alive || e.state == .Dead || e.freeze > 0 { continue }
+        if over, ok := enemy_overlap(&e, cam.pos); ok { shove(gs, cam, e.pos, over, false) }
+    }
+    for &sl in gs.slimes.list {
+        if !sl.alive || sl.freeze > 0 { continue }
+        if over, ok := slime_overlap(&sl, cam.pos); ok { shove(gs, cam, sl.pos, over, true) }
+    }
 }

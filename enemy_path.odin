@@ -27,23 +27,23 @@ Path_Node :: struct {
 
 // Can something `clear` blocks tall stand with its feet in voxel (x, y, z)?
 @(private="file")
-standable :: proc(gs: ^Game_State, x, y, z, clear: int) -> bool {
-    if !solid_at(gs, x, y - 1, z) { return false }
-    for k in 0 ..< clear { if solid_at(gs, x, y + k, z) { return false } }
+standable :: proc(w: ^World, x, y, z, clear: int) -> bool {
+    if !solid_at(w, x, y - 1, z) { return false }
+    for k in 0 ..< clear { if solid_at(w, x, y + k, z) { return false } }
     return true
 }
 
 // The standing spot in column (x, z) reachable from feet height y: the same
 // level, one up, or a few down.
 @(private="file")
-stand_from :: proc(gs: ^Game_State, x, z, y, clear: int) -> (int, bool) {
-    if standable(gs, x, y, z, clear) { return y, true }
+stand_from :: proc(w: ^World, x, z, y, clear: int) -> (int, bool) {
+    if standable(w, x, y, z, clear) { return y, true }
     // Up a step needs head room above where it stands now.
-    if standable(gs, x, y + PATH_STEP_UP, z, clear) { return y + PATH_STEP_UP, true }
+    if standable(w, x, y + PATH_STEP_UP, z, clear) { return y + PATH_STEP_UP, true }
     // Over an edge: open at this height, then down to the first floor.
-    for k in 0 ..< clear { if solid_at(gs, x, y + k, z) { return 0, false } }
+    for k in 0 ..< clear { if solid_at(w, x, y + k, z) { return 0, false } }
     for d in 1 ..= PATH_DROP {
-        if standable(gs, x, y - d, z, clear) { return y - d, true }
+        if standable(w, x, y - d, z, clear) { return y - d, true }
     }
     return 0, false
 }
@@ -51,7 +51,7 @@ stand_from :: proc(gs: ^Game_State, x, z, y, clear: int) -> (int, bool) {
 // Waypoints (feet voxels) from `from` toward `to`, written to out; the
 // count, and whether it reaches the goal (else it ends at the reachable
 // spot nearest to it).
-find_path :: proc(gs: ^Game_State, from, to: [3]int, clear: int, out: ^[PATH_MAX][3]i32) -> (n: int, reached: bool) {
+find_path :: proc(w: ^World, from, to: [3]int, clear: int, out: ^[PATH_MAX][3]i32) -> (n: int, reached: bool) {
     nodes := make([dynamic]Path_Node, 0, 256, context.temp_allocator)
     index := make(map[[2]i32]i32, 256, context.temp_allocator)
     heap := make([dynamic]i32, 0, 256, context.temp_allocator)
@@ -109,17 +109,17 @@ find_path :: proc(gs: ^Game_State, from, to: [3]int, clear: int, out: ^[PATH_MAX
         for d, di in DIRS {
             nx, nz := cp.x + d.x, cp.z + d.y
             if abs(nx - from.x) > PATH_RADIUS || abs(nz - from.z) > PATH_RADIUS { continue }
-            ny, ok := stand_from(gs, nx, nz, cp.y, clear)
+            ny, ok := stand_from(w, nx, nz, cp.y, clear)
             if !ok { continue }
             if di >= 4 {
                 // Diagonals only where both sides are open: no corner cutting.
-                _, ok1 := stand_from(gs, cp.x + d.x, cp.z, cp.y, clear)
-                _, ok2 := stand_from(gs, cp.x, cp.z + d.y, cp.y, clear)
+                _, ok1 := stand_from(w, cp.x + d.x, cp.z, cp.y, clear)
+                _, ok2 := stand_from(w, cp.x, cp.z + d.y, cp.y, clear)
                 if !ok1 || !ok2 { continue }
             }
             cost: f32 = di >= 4 ? 1.414 : 1
             if ny > cp.y { cost += 0.6 }
-            if get_voxel(gs, nx, ny, nz) == u32(Block_Type.Water) { cost += 3 }
+            if get_voxel(w, nx, ny, nz) == u32(Block_Type.Water) { cost += 3 }
             g := nodes[ci].g + cost
             key := [2]i32{i32(nx), i32(nz)}
             if ni, seen := index[key]; seen {
@@ -148,15 +148,15 @@ find_path :: proc(gs: ^Game_State, from, to: [3]int, clear: int, out: ^[PATH_MAX
 }
 
 // A clear line from the enemy's eyes to its prey's head or chest.
-enemy_sees_player :: proc(gs: ^Game_State, e: ^Enemy) -> bool {
+enemy_sees_player :: proc(sim: ^Sim, e: ^Enemy) -> bool {
     eye := e.pos + {0, ENEMY_SPECS[e.kind].height * 0.9, 0}
-    head := gs.players[e.prey].pos
+    head := sim.players[e.prey].pos
     for target in ([2][3]f32{head, head - {0, 0.7, 0}}) {
         d := target - eye
         l := la.length(d)
         if l < 0.5 { return true }
         if l > 64 { return false }
-        _, _, hit := raycast_voxel(gs, eye, d / l, l - 0.3)
+        _, _, hit := raycast_voxel(sim.world, eye, d / l, l - 0.3)
         if !hit { return true }
     }
     return false
@@ -170,7 +170,7 @@ paths_left: int
 
 enemy_paths_frame :: proc() { paths_left = PATHS_PER_FRAME }
 
-enemy_steer :: proc(gs: ^Game_State, e: ^Enemy, goal: [3]f32, dt: f32) -> [3]f32 {
+enemy_steer :: proc(sim: ^Sim, e: ^Enemy, goal: [3]f32, dt: f32) -> [3]f32 {
     sp := ENEMY_SPECS[e.kind]
     e.repath -= dt
     // Stuck: hardly moved for a while while trying to — plan again now.
@@ -188,7 +188,7 @@ enemy_steer :: proc(gs: ^Game_State, e: ^Enemy, goal: [3]f32, dt: f32) -> [3]f32
         clear := int(math.ceil(sp.height * 0.92))
         from := [3]int{int(math.floor(e.pos.x)), int(math.floor(e.pos.y + 0.05)), int(math.floor(e.pos.z))}
         to := [3]int{int(math.floor(goal.x)), int(math.floor(goal.y + 0.05)), int(math.floor(goal.z))}
-        e.path_len, _ = find_path(gs, from, to, clear, &e.path)
+        e.path_len, _ = find_path(sim.world, from, to, clear, &e.path)
         e.path_i = 0
     }
     // Next waypoint not yet reached.

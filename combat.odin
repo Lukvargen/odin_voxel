@@ -79,6 +79,7 @@ BLOCK_KNOCK        :: f32(0.35) // knockback kept when blocked
 BLOCK_ARC          :: f32(0.3)  // cos of the half angle in front a guard covers (~73 deg)
 BLOCK_SPEED        :: f32(0.5)  // of walking speed, guarding
 PARRY_WINDOW       :: f32(0.22) // a guard this fresh parries
+PARRY_INVULN       :: f32(0.2)  // a parried blow's follow-up can't land this long
 
 SWING_PIVOT        :: [3]f32{0.06, -0.24, 0.45} // view space: swings circle around it...
 SWING_RADIUS       :: f32(0.36) // ...the grip this far out
@@ -581,36 +582,33 @@ hit_target :: proc(gs: ^Game_State, t: Target, kind: Attack_Kind) {
 
 Hurt_Result :: enum u8 { Missed, Hit, Blocked, Parried }
 
-// The player is hit by something at `from` (zero: from nowhere in
-// particular, which a guard doesn't stop). Missed if it didn't land
-// (dodging, just hurt); Blocked or Parried if the guard took it.
-combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32, from: [3]f32 = {}) -> Hurt_Result {
+// The local player takes a blow the simulation found landed (hurt_outcome):
+// a parry's clang and flash, a block's chip and shove, or the hurt itself.
+combat_take_hurt :: proc(gs: ^Game_State, result: Hurt_Result, damage: f32, knock: [3]f32) {
     c := &gs.combat
     cam := &gs.camera
-    if c.invuln > 0 { return .Missed }
-    if c.blocking && from != 0 {
-        to := la.normalize0((from - cam.pos).xz)
-        fwd := camera_flat_forward(cam^).xz
-        if la.dot(to, la.normalize0(fwd)) > BLOCK_ARC {
-            contact := cam.pos + camera_flat_forward(cam^) * 0.7 + {0, -0.3, 0}
-            if c.block_time < PARRY_WINDOW {
-                splat(&gs.fx, contact, {1.9, 1.6, 0.9}, -knock, 14, 0.9)
-                play(.Clang, 1, 1.25 * vary(0.04))
-                slow_down(c, SLOWMO_KILL)
-                gs.glider.shake = min(gs.glider.shake + 0.5, 1.5)
-                c.invuln = 0.2
-                return .Parried
-            }
-            chip := damage >= HEAVY_HIT ? BLOCK_CHIP_HEAVY : BLOCK_CHIP
-            c.hp = max(c.hp - damage * chip, 1)
-            c.since_hurt = 0
-            c.invuln = HURT_INVULN * 0.6
-            cam.velocity += knock * BLOCK_KNOCK
-            splat(&gs.fx, contact, {1.6, 1.3, 0.8}, -knock, 6, 0.6)
-            play(.Clang, 0.8, (damage >= HEAVY_HIT ? 0.8 : 1) * vary(0.06))
-            gs.glider.shake = min(gs.glider.shake + (damage >= HEAVY_HIT ? 0.6 : 0.3), 1.5)
-            return .Blocked
-        }
+    contact := cam.pos + camera_flat_forward(cam^) * 0.7 + {0, -0.3, 0}
+    switch result {
+    case .Missed:
+        return
+    case .Parried:
+        splat(&gs.fx, contact, {1.9, 1.6, 0.9}, -knock, 14, 0.9)
+        play(.Clang, 1, 1.25 * vary(0.04))
+        slow_down(c, SLOWMO_KILL)
+        gs.glider.shake = min(gs.glider.shake + 0.5, 1.5)
+        c.invuln = PARRY_INVULN
+        return
+    case .Blocked:
+        chip := damage >= HEAVY_HIT ? BLOCK_CHIP_HEAVY : BLOCK_CHIP
+        c.hp = max(c.hp - damage * chip, 1)
+        c.since_hurt = 0
+        c.invuln = HURT_INVULN * 0.6
+        cam.velocity += knock * BLOCK_KNOCK
+        splat(&gs.fx, contact, {1.6, 1.3, 0.8}, -knock, 6, 0.6)
+        play(.Clang, 0.8, (damage >= HEAVY_HIT ? 0.8 : 1) * vary(0.06))
+        gs.glider.shake = min(gs.glider.shake + (damage >= HEAVY_HIT ? 0.6 : 0.3), 1.5)
+        return
+    case .Hit:
     }
     c.hp -= damage
     c.since_hurt = 0
@@ -624,14 +622,14 @@ combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32, from: [3]f32 = 
     play(.Hurt, 0.9, vary(0.06))
     if c.hp <= 0 {
         // Knocked out: back on your feet at full health, everything about
-        // scattered and calmed down.
+        // scattered and calmed down. (The scattering is the simulation's:
+        // over a network, a message to it.)
         c.hp = PLAYER_MAX_HP
         c.invuln = 2
         slimes_scatter(gs, cam.pos)
         enemies_scatter(gs, cam.pos)
         ui_toast(gs, "Knocked out! Back on your feet...", 2.5)
     }
-    return .Hit
 }
 
 // Per frame in real time: feedback that keeps fading during hit stop, the

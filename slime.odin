@@ -131,21 +131,21 @@ slime_spawn :: proc(s: ^Slimes, size: Slime_Size, pos, vel: [3]f32, color: [3]f3
 
 // One frame of every slime: spawning, thinking, hopping, falling, hurting
 // the player. dt is 0 during hit stop.
-slimes_update :: proc(gs: ^Game_State, dt: f32) {
-    s := &gs.slimes
+slimes_update :: proc(sim: ^Sim, dt: f32) {
+    s := &sim.slimes
     if dt <= 0 { return }
 
     // Keep a few about each player on foot: drop the ones left behind by
     // everyone, spawn while short.
     for &sl in s.list {
         if !sl.alive { continue }
-        _, d := nearest_player(&gs.sim, sl.pos)
+        _, d := nearest_player(sim, sl.pos)
         if d > SLIME_DESPAWN || sl.pos.y < -100 { sl.alive = false }
     }
     s.spawn_timer -= dt
-    if s.spawn_timer <= 0 && gs.entities_enabled {
+    if s.spawn_timer <= 0 && sim.monsters {
         s.spawn_timer = SLIME_SPAWN_EVERY
-        for &p in gs.players {
+        for &p in sim.players {
             if !p.active || p.fly_mode { continue }
             feet := player_feet(&p)
             near := 0
@@ -153,7 +153,7 @@ slimes_update :: proc(gs: ^Game_State, dt: f32) {
                 if sl.alive && la.length((sl.pos - feet).xz) < SLIME_RANGE { near += 1 }
             }
             if near < SLIME_POPULATION / 2 { s.spawn_timer = 0.5 }
-            if near < SLIME_POPULATION { slime_try_spawn(gs, feet) }
+            if near < SLIME_POPULATION { slime_try_spawn(sim, feet) }
         }
     }
 
@@ -170,8 +170,8 @@ slimes_update :: proc(gs: ^Game_State, dt: f32) {
         sl.flash = max(sl.flash - dt * 7, 0)
         sl.bar = max(sl.bar - dt, 0)
         sl.timer -= dt
-        slime_think(gs, &sl, dt)
-        for _ in 0 ..< steps { slime_move(gs, &sl, h) }
+        slime_think(sim, &sl, dt)
+        for _ in 0 ..< steps { slime_move(sim, &sl, h) }
     }
 
     // Push overlapping slimes apart.
@@ -196,7 +196,7 @@ slimes_update :: proc(gs: ^Game_State, dt: f32) {
 
 // Somewhere on dry, loaded ground a little way off.
 @(private="file")
-slime_try_spawn :: proc(gs: ^Game_State, feet: [3]f32) {
+slime_try_spawn :: proc(sim: ^Sim, feet: [3]f32) {
     for _ in 0 ..< 8 {
         a := rand.float32_range(0, 2 * math.PI)
         r := rand.float32_range(16, 36)
@@ -205,23 +205,23 @@ slime_try_spawn :: proc(gs: ^Game_State, feet: [3]f32) {
         ix, iz := int(math.floor(x)), int(math.floor(z))
         ground := surface_height_at(ix, iz)
         if ground <= SEA_LEVEL { continue }
-        if !solid_at(gs, ix, ground, iz) || solid_at(gs, ix, ground + 1, iz) { continue } // not loaded, or built over
+        if !solid_at(sim.world, ix, ground, iz) || solid_at(sim.world, ix, ground + 1, iz) { continue } // not loaded, or built over
         roll := rand.float32()
         size := roll < 0.45 ? Slime_Size.Big : (roll < 0.85 ? .Medium : .Small)
-        slime_spawn(&gs.slimes, size, {x, f32(ground) + 1.5, z}, {}, slime_color_for(terrain_at(ix, iz).biome))
+        slime_spawn(&sim.slimes, size, {x, f32(ground) + 1.5, z}, {}, slime_color_for(terrain_at(ix, iz).biome))
         return
     }
 }
 
 @(private="file")
-slime_think :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
+slime_think :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
     kind := SLIME_KINDS[sl.size]
     // Idle, it turns to whoever is nearest; once after someone, it sticks
     // with them.
-    if sl.state == .Idle || !gs.players[sl.prey].active {
-        if i, _ := nearest_player(&gs.sim, sl.pos); i >= 0 { sl.prey = i }
+    if sl.state == .Idle || !sim.players[sl.prey].active {
+        if i, _ := nearest_player(sim, sl.pos); i >= 0 { sl.prey = i }
     }
-    p := &gs.players[sl.prey]
+    p := &sim.players[sl.prey]
     feet := player_feet(p)
     to_player := feet - sl.pos
     dist := la.length(to_player.xz)
@@ -239,7 +239,7 @@ slime_think :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
             sl.vel = {w.x * 2, kind.hop_up * 0.7, w.y * 2}
             turn_towards(&sl.yaw, w, 10)
             sl.timer = rand.float32_range(1.2, 3)
-            sim_emit(&gs.sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 0})
+            sim_emit(sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 0})
         }
         if sl.on_ground && sl.timer < 0.12 { squash_target = 0.2 }
     case .Chase:
@@ -254,7 +254,7 @@ slime_think :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
                 hop := [2]f32{dir.x * math.cos(j) - dir.y * math.sin(j), dir.x * math.sin(j) + dir.y * math.cos(j)}
                 sl.vel = {hop.x * kind.hop_speed, kind.hop_up, hop.y * kind.hop_speed}
                 sl.timer = rand.float32_range(kind.hop_every[0], kind.hop_every[1])
-                sim_emit(&gs.sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 1})
+                sim_emit(sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 1})
             }
         }
         if sl.on_ground && sl.timer < 0.12 { squash_target = 0.25 }
@@ -273,14 +273,14 @@ slime_think :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
             sl.vel = {v.x, SLIME_LEAP_UP, v.y}
             sl.state, sl.timer = .Leap, 0
             sl.squash_vel -= 8
-            sim_emit(&gs.sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 2})
+            sim_emit(sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 2})
         }
     case .Leap:
         if sl.on_ground && sl.timer < -0.1 {
             sl.state, sl.timer = .Chase, 0.9 // sitting a moment after: the opening
         } else if slime_touches_player(sl, p) {
             knock := [3]f32{dir.x * 9, 5, dir.y * 9}
-            if r := player_hurt(gs, sl.prey, kind.damage, knock, slime_center(sl)); r != .Missed {
+            if r := player_hurt(sim, sl.prey, kind.damage, knock, slime_center(sl)); r != .Missed {
                 if r == .Parried { sl.state, sl.timer = .Stunned, 1.2; sl.vel = {-dir.x * 7, 6, -dir.y * 7}; sl.flash = 1; return }
                 sl.vel = {-dir.x * 3, 4, -dir.y * 3}
                 sl.state, sl.timer = .Chase, 1
@@ -292,14 +292,10 @@ slime_think :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
         }
     }
 
-    // The player can't walk into a slime: the two push apart, the player less.
-    if sl.state != .Leap {
-        r := slime_radius(sl.size) * 0.85 + PLAYER_HALF_W
-        if dist < r && to_player.y > -SLIME_KINDS[sl.size].width * 0.75 && to_player.y < PLAYER_EYE_HEIGHT {
-            over := r - dist
-            sl.vel.xz -= dir * over * 40 * dt / kind.weight
-            player_push(gs, sl.prey, dir, over, stop_into = true)
-        }
+    // The player can't walk into a slime: the two push apart, the player
+    // less (its client steps itself out: monsters_push_player).
+    if over, ok := slime_overlap(sl, p.pos); ok {
+        sl.vel.xz -= dir * over * 40 * dt / kind.weight
     }
 
     // Jiggle on a loose spring.
@@ -310,13 +306,13 @@ slime_think :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
 }
 
 @(private="file")
-slime_move :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
+slime_move :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
     hw, h := slime_box(sl.size)
     was_on_ground := sl.on_ground
     falling := -sl.vel.y
 
     centre := slime_center(sl)
-    in_water := block_is_watery(u8(get_voxel(gs, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z)))))
+    in_water := block_is_watery(u8(get_voxel(sim.world, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z)))))
     if in_water {
         sl.vel *= max(1 - 2 * dt, 0)
         sl.vel.y += 6 * dt // they float
@@ -331,17 +327,17 @@ slime_move :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
     d := sl.vel * dt
     p := sl.pos
     if d.x != 0 {
-        if box_solid(gs, p + {d.x, 0, 0}, hw, h) { sl.vel.x *= -0.2 } else { p.x += d.x }
+        if box_solid(sim.world, p + {d.x, 0, 0}, hw, h) { sl.vel.x *= -0.2 } else { p.x += d.x }
     }
     if d.z != 0 {
-        if box_solid(gs, p + {0, 0, d.z}, hw, h) { sl.vel.z *= -0.2 } else { p.z += d.z }
+        if box_solid(sim.world, p + {0, 0, d.z}, hw, h) { sl.vel.z *= -0.2 } else { p.z += d.z }
     }
     if d.y != 0 {
-        if box_solid(gs, p + {0, d.y, 0}, hw, h) {
+        if box_solid(sim.world, p + {0, d.y, 0}, hw, h) {
             if d.y < 0 {
                 // Settle exactly onto the voxel top below.
                 top := math.floor(p.y + d.y) + 1
-                if top <= p.y && !box_solid(gs, {p.x, top, p.z}, hw, h) { p.y = top }
+                if top <= p.y && !box_solid(sim.world, {p.x, top, p.z}, hw, h) { p.y = top }
             }
             sl.vel.y = 0
         } else {
@@ -349,12 +345,24 @@ slime_move :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
         }
     }
     // Buried by a placed block: pop out on top.
-    if box_solid(gs, p, hw, h) { p.y = math.floor(p.y) + 1 }
+    if box_solid(sim.world, p, hw, h) { p.y = math.floor(p.y) + 1 }
     sl.pos = p
-    sl.on_ground = sl.vel.y <= 0.01 && box_solid(gs, p - {0, 0.03, 0}, hw, h)
+    sl.on_ground = sl.vel.y <= 0.01 && box_solid(sim.world, p - {0, 0.03, 0}, hw, h)
     if sl.on_ground && !was_on_ground && falling > 3 {
         sl.squash_vel += clamp(falling * 0.6, 0, 10) // splat
     }
+}
+
+// How far a player with the eye at `eye` stands inside the slime's body,
+// if it does: along the ground, from the slime to the player. A leaping
+// slime is going through you anyway.
+slime_overlap :: proc(sl: ^Slime, eye: [3]f32) -> (over: f32, ok: bool) {
+    if sl.state == .Leap { return 0, false }
+    to_player := eye - {0, PLAYER_EYE_HEIGHT, 0} - sl.pos
+    r := slime_radius(sl.size) * 0.85 + PLAYER_HALF_W
+    dist := la.length(to_player.xz)
+    if dist < r && to_player.y > -SLIME_KINDS[sl.size].width * 0.75 && to_player.y < PLAYER_EYE_HEIGHT { return r - dist, true }
+    return 0, false
 }
 
 // The slime's body (a ball a little smaller than it looks) against the
@@ -372,8 +380,8 @@ slime_touches_player :: proc(sl: ^Slime, p: ^Player) -> bool {
 // Damage a slime and knock it with velocity `knock` (divided by its
 // weight). At no health left it pops, splitting into two of the next size
 // down. Returns true if it died.
-slime_damage :: proc(gs: ^Game_State, sl: ^Slime, damage: f32, knock: [3]f32, boosted: bool) -> bool {
-    s := &gs.slimes
+slime_damage :: proc(sim: ^Sim, sl: ^Slime, damage: f32, knock: [3]f32, boosted: bool) -> bool {
+    s := &sim.slimes
     kind := SLIME_KINDS[sl.size]
     sl.hp -= damage
     sl.flash = 1
@@ -385,11 +393,11 @@ slime_damage :: proc(gs: ^Game_State, sl: ^Slime, damage: f32, knock: [3]f32, bo
     sl.state, sl.timer = .Stunned, 0.45
 
     c := slime_center(sl)
-    sim_emit(&gs.sim, {kind = .Slime_Hit, slime = sl.size, pos = c, vec = knock, color = sl.color, amount = damage, boosted = boosted})
+    sim_emit(sim, {kind = .Slime_Hit, slime = sl.size, pos = c, vec = knock, color = sl.color, amount = damage, boosted = boosted})
 
     if sl.hp > 0 { return false }
     sl.alive = false
-    sim_emit(&gs.sim, {kind = .Slime_Pop, slime = sl.size, pos = c, vec = knock, color = sl.color})
+    sim_emit(sim, {kind = .Slime_Pop, slime = sl.size, pos = c, vec = knock, color = sl.color})
     if sl.size > .Small {
         child := Slime_Size(int(sl.size) - 1)
         across := la.normalize0([3]f32{-knock.z, 0, knock.x})
@@ -426,15 +434,14 @@ slime_debug_spawn :: proc(gs: ^Game_State) {
 }
 
 // Debug (F7): every slime gone, and none spawning for a while.
-slimes_clear :: proc(gs: ^Game_State) {
-    for &sl in gs.slimes.list { sl.alive = false }
-    gs.slimes.spawn_timer = 30
-    ui_toast(gs, "Slimes cleared")
+slimes_clear :: proc(sim: ^Sim) {
+    for &sl in sim.slimes.list { sl.alive = false }
+    sim.slimes.spawn_timer = 30
 }
 
 // Knocked out: the slimes about are flung away and calm down.
-slimes_scatter :: proc(gs: ^Game_State, pos: [3]f32) {
-    for &sl in gs.slimes.list {
+slimes_scatter :: proc(sim: ^Sim, pos: [3]f32) {
+    for &sl in sim.slimes.list {
         if !sl.alive { continue }
         d := sl.pos - pos
         d.y = 0

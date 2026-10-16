@@ -94,7 +94,7 @@ camera_flat_right :: proc(cam: Camera) -> [3]f32 {
 }
 
 // Test if the player AABB at `pos` (eye position) overlaps any solid voxel.
-aabb_solid :: proc(gs: ^Game_State, pos: [3]f32) -> bool {
+aabb_solid :: proc(w: ^World, pos: [3]f32) -> bool {
     min_x := int(math.floor(pos.x - PLAYER_HALF_W))
     max_x := int(math.floor(pos.x + PLAYER_HALF_W))
     min_y := int(math.floor(pos.y - PLAYER_EYE_HEIGHT))
@@ -104,7 +104,7 @@ aabb_solid :: proc(gs: ^Game_State, pos: [3]f32) -> bool {
     for iy in min_y ..= max_y {
         for ix in min_x ..= max_x {
             for iz in min_z ..= max_z {
-                if solid_at(gs, ix, iy, iz) { return true }
+                if solid_at(w, ix, iy, iz) { return true }
             }
         }
     }
@@ -112,9 +112,9 @@ aabb_solid :: proc(gs: ^Game_State, pos: [3]f32) -> bool {
 }
 
 // Move along a single axis with collision. Returns new position and whether a collision occurred.
-move_axis :: proc(gs: ^Game_State, pos: [3]f32, delta: [3]f32) -> (new_pos: [3]f32, collided: bool) {
+move_axis :: proc(w: ^World, pos: [3]f32, delta: [3]f32) -> (new_pos: [3]f32, collided: bool) {
     new_pos = pos + delta
-    if aabb_solid(gs, new_pos) {
+    if aabb_solid(w, new_pos) {
         // Binary search toward the nearest free position along this axis.
         // Simple approach: step back to old position on this axis.
         new_pos = pos
