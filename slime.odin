@@ -27,11 +27,11 @@ SLIME_RANGE       :: f32(48)  // keep SLIME_POPULATION slimes within this...
 SLIME_POPULATION  :: 6
 SLIME_SPAWN_EVERY :: f32(3)   // ...spawning one this often while short
 SLIME_DESPAWN     :: f32(90)  // and forget the ones left this far behind
-SLIME_GRAVITY     :: f32(26)
-SLIME_AGGRO       :: f32(18)  // notices the player this close...
-SLIME_FORGET      :: f32(32)  // ...and loses interest this far
-SLIME_LEAP_UP     :: f32(8)   // upward speed of the attack leap
-SLIME_LEAP_MAX    :: f32(16)  // horizontal speed of the leap, at most
+SLIME_GRAVITY     : f32 = f32(26)
+SLIME_AGGRO       : f32 = f32(18)  // notices the player this close...
+SLIME_FORGET      : f32 = f32(32)  // ...and loses interest this far
+SLIME_LEAP_UP     : f32 = f32(8)   // upward speed of the attack leap
+SLIME_LEAP_MAX    : f32 = f32(16)  // horizontal speed of the leap, at most
 
 Slime_Size :: enum u8 { Small, Medium, Big }
 

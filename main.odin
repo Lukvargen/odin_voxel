@@ -211,6 +211,11 @@ main :: proc() {
         // [join=<address>[:<port>]]: play on someone's server instead.
         // [at=<x>,<z>] [yaw=<degrees>]: start there, facing that way. [hour=<h>]: at that time.
         // [name=<name>]: what other players see you called (else your user name).
+        // The player's size first: what follows (at=) places the player by it.
+        for a in os.args[1:] {
+            if !strings.has_prefix(a, "scale=") { continue }
+            if v, ok := strconv.parse_f32(a[6:]); ok { world_scale_apply(clamp(v, 0.5, 3)) } // prototype (scale.odin)
+        }
         for a in os.args[1:] {
             switch {
             case strings.has_prefix(a, "at="):
@@ -226,6 +231,7 @@ main :: proc() {
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
                 day_set_hour(&gs, clamp(h, 0, 23.99), settle = true)
+            case strings.has_prefix(a, "scale="): // done first, below
             case strings.has_prefix(a, "name="):
                 t := text_set(a[5:], NAME_MAX)
                 gs.ui.name_field.len = copy(gs.ui.name_field.buf[:], t.text[:t.len])

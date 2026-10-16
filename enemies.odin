@@ -29,8 +29,8 @@ import la "core:math/linalg"
 MAX_ENEMIES      :: 24
 ENEMY_RANGE      :: f32(52)  // roaming population counted within this...
 ENEMY_DESPAWN    :: f32(110) // ...and forgotten this far behind (guards: their site's spawn is undone)
-ENEMY_GRAVITY    :: f32(26)
-ENEMY_JUMP       :: f32(8.5)
+ENEMY_GRAVITY    : f32 = f32(26)
+ENEMY_JUMP       : f32 = f32(8.5)
 SITE_NOTICE      :: f32(80)  // a site's guards appear when the player is this close
 SITE_RESPAWN     :: f32(600) // seconds before a cleared site fills again
 GUARD_LEASH      :: f32(20)  // guards give up a chase this far from home

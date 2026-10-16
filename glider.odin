@@ -17,8 +17,8 @@ import "core:time"
 // grid, with sinking air around their edge) and ridge lift where the wind
 // blows up a slope. Units are voxels ~ metres, seconds.
 
-GLIDER_GRAVITY   :: f32(16.0)  // lighter than walking (36) so flight is floaty
-GLIDER_LIFT_K    :: f32(0.14)  // 1/2 rho S / m, folded into one constant
+GLIDER_GRAVITY   : f32 = f32(16.0)  // lighter than walking (36) so flight is floaty
+GLIDER_LIFT_K    : f32 = f32(0.14)  // 1/2 rho S / m, folded into one constant
 GLIDER_CL_SLOPE  :: f32(5.5)   // lift per radian of angle of attack
 GLIDER_CD0       :: f32(0.035) // parasitic drag
 GLIDER_CD_INDUCED :: f32(0.11) // induced drag factor (Cd += k Cl^2); best glide ~8:1 at ~14 m/s
@@ -29,7 +29,7 @@ GLIDER_MIN_AOA   :: f32(-0.07)
 GLIDER_MAX_G     :: f32(3.5)   // pilot won't pull more than this many g (in glider gravity)
 GLIDER_MAX_BANK  :: f32(1.10)  // ~63 degrees
 GLIDER_SUBSTEP   :: f32(1.0 / 240.0)
-GLIDER_CRASH_SPEED :: f32(14.0) // wall hit faster than this throws you off the glider
+GLIDER_CRASH_SPEED : f32 = f32(14.0) // wall hit faster than this throws you off the glider
 
 THERMAL_CELL :: 112 // one possible thermal per CELL x CELL voxels
 

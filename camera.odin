@@ -3,28 +3,28 @@ package main
 import "core:math"
 import la "core:math/linalg"
 
-PLAYER_EYE_HEIGHT :: f32(1.7)
-PLAYER_HALF_W     :: f32(0.3)
-PLAYER_HEAD_ABOVE :: f32(0.15) // distance from eye to top of head: 1.85 tall, fits a 2-block gap
+PLAYER_EYE_HEIGHT : f32 = f32(1.7)
+PLAYER_HALF_W     : f32 = f32(0.3)
+PLAYER_HEAD_ABOVE : f32 = f32(0.15) // distance from eye to top of head: 1.85 tall, fits a 2-block gap
 
-GRAVITY        :: f32(36.0)
-JUMP_SPEED     :: f32(9.0)
-WALK_SPEED     :: f32(5.0)
+GRAVITY        : f32 = f32(36.0)
+JUMP_SPEED     : f32 = f32(9.0)
+WALK_SPEED     : f32 = f32(5.0)
 SPRINT_FACTOR  :: f32(1.6)   // Ctrl or double-tapped W
 SNEAK_FACTOR   :: f32(0.3)   // Shift: slow, and never walks off an edge
-FLY_SPEED      :: f32(11.0)
+FLY_SPEED      : f32 = f32(11.0)
 WALK_ACCEL     :: f32(14.0)
 WALK_FRICTION  :: f32(12.0)
 AIR_ACCEL      :: f32(2.5)
-TERMINAL_VEL   :: f32(60.0)
+TERMINAL_VEL   : f32 = f32(60.0)
 SWIM_DRAG      :: f32(3.0)   // velocity lost per second in water (fraction)
-SWIM_ACCEL     :: f32(18.0)  // top speed SWIM_ACCEL / SWIM_DRAG
+SWIM_ACCEL     : f32 = f32(18.0)  // top speed SWIM_ACCEL / SWIM_DRAG
 SWIM_SPRINT    :: f32(1.6)   // sprint factor under water
-SWIM_UP_ACCEL  :: f32(26.0)  // holding jump in water
-SWIM_FLOAT_EYE :: f32(0.35)  // floating: eye this far above the water surface
-SWIM_HOP_SPEED :: f32(6.5)   // Space at the surface: hop up out of the water
-CLIMB_SPEED    :: f32(5.5)   // pulling up onto a ledge out of the water
-CLIMB_REACH    :: f32(3.5)   // highest ledge top above the feet you can pull up onto
+SWIM_UP_ACCEL  : f32 = f32(26.0)  // holding jump in water
+SWIM_FLOAT_EYE : f32 = f32(0.35)  // floating: eye this far above the water surface
+SWIM_HOP_SPEED : f32 = f32(6.5)   // Space at the surface: hop up out of the water
+CLIMB_SPEED    : f32 = f32(5.5)   // pulling up onto a ledge out of the water
+CLIMB_REACH    : f32 = f32(3.5)   // highest ledge top above the feet you can pull up onto
                              // (floating: a lip two blocks over the water)
 
 STEP_SMOOTH_SPEED :: f32(10.0) // how fast the visual offset catches up (units/sec)

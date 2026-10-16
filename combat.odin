@@ -49,25 +49,25 @@ HURT_INVULN        :: f32(0.5)
 COMBO_TIMEOUT      :: f32(2.5)  // the counter resets this long after the last hit
 COMBO_DAMAGE_STEP  :: f32(0.02) // damage bonus per hit in the counter...
 COMBO_DAMAGE_MAX   :: f32(1.0)  // ...up to double at 50
-SPEED_DAMAGE_FROM  :: WALK_SPEED * SPRINT_FACTOR // horizontal speed where the speed bonus starts...
+SPEED_DAMAGE_FROM  := f32(5.0 * SPRINT_FACTOR) // = WALK_SPEED * SPRINT_FACTOR (world_scale_apply) // horizontal speed where the speed bonus starts...
 SPEED_DAMAGE_MAX   :: f32(0.6)  // ...reaching this at twice that
 CHAIN_WINDOW       :: f32(0.35) // after a swing ends, a press this soon still continues the chain
 
-LUNGE_SPEED        :: f32(6)    // voxels/s toward the slime in front when a ground swing starts...
-LUNGE_RANGE        :: f32(5)    // ...if one is this close...
-LUNGE_STOP         :: f32(1.3)  // ...to end up about this far from its side
-AIR_HIT_HOVER      :: f32(3.5)  // a hit in the air: upward speed, at least
+LUNGE_SPEED        : f32 = f32(6)    // voxels/s toward the slime in front when a ground swing starts...
+LUNGE_RANGE        : f32 = f32(5)    // ...if one is this close...
+LUNGE_STOP         : f32 = f32(1.3)  // ...to end up about this far from its side
+AIR_HIT_HOVER      : f32 = f32(3.5)  // a hit in the air: upward speed, at least
 AIR_ATTACKS_MAX    :: 3         // air slashes per jump: then you have to come down
 COMBO_COOLDOWN     :: f32(0.15) // a breath after a finisher or an air string (clicks wait it out)
-RISE_SPEED         :: f32(13)   // the rising slash takes you up with what it launches
+RISE_SPEED         : f32 = f32(13)   // the rising slash takes you up with what it launches
 
 PLUNGE_MIN_PITCH   :: f32(-40)  // degrees: looking down further than this...
-PLUNGE_MIN_HEIGHT  :: f32(2.5)  // ...this high up, an air attack is a plunge
-PLUNGE_SPEED       :: f32(42)
+PLUNGE_MIN_HEIGHT  : f32 = f32(2.5)  // ...this high up, an air attack is a plunge
+PLUNGE_SPEED       : f32 = f32(42)
 PLUNGE_RADIUS      :: f32(5)    // the landing's shockwave
-PLUNGE_BOUNCE      :: f32(14)   // bouncing off a slime hit on the way down
+PLUNGE_BOUNCE      : f32 = f32(14)   // bouncing off a slime hit on the way down
 
-DODGE_SPEED        :: f32(16)   // at least this fast the dodge's way...
+DODGE_SPEED        : f32 = f32(16)   // at least this fast the dodge's way...
 DODGE_TIME         :: f32(0.24) // ...for this long
 DODGE_INVULN       :: f32(0.32)
 DODGE_COOLDOWN     :: f32(0.45)
@@ -376,7 +376,7 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
             fx_shockwave(&gs.fx, feet)
             play(.Slam, 1, vary(0.06))
             for t in combat_targets(gs) {
-                if la.length(t.center - feet) < PLUNGE_RADIUS + t.radius { hit_target(gs, t, .Plunge_Land) }
+                if la.length(t.center - feet) < ATTACKS[.Plunge_Land].reach + t.radius { hit_target(gs, t, .Plunge_Land) }
             }
             slow_down(c, SLOWMO_HEAVY)
             gs.glider.shake = min(gs.glider.shake + ATTACKS[.Plunge_Land].shake, 1.5)
