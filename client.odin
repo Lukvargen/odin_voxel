@@ -25,6 +25,9 @@ Client_Net :: struct {
     peer:     ^enet.Peer,
     slot:     int,        // our player slot
     welcomed: bool,       // the server took us in (until then nothing is sent)
+    dropped:  bool,       // the connection ended this frame: back to our own world
+    waiting:  f32,        // seconds since we asked to join, until welcomed (JOIN_TIMEOUT)
+    refused:  string,     // why the server turned us away, if it did
     others:   [MAX_PLAYERS]Other_Player, // the other players, as the server last said
     address:  [64]u8,     // joined to (for the menu)
     address_len: int,
@@ -80,6 +83,7 @@ Other_Player :: struct {
 }
 
 OTHER_TIMEOUT :: 3 // seconds without word before another player is no longer drawn
+JOIN_TIMEOUT  :: 10 // seconds to wait for a server's welcome before giving up
 
 client_joined :: proc(gs: ^Game_State) -> bool { return gs.net.remote }
 
@@ -103,6 +107,7 @@ client_join :: proc(gs: ^Game_State, address: string) -> bool {
         return false
     }
     gs.net.remote = true
+    gs.net.waiting = 0
     gs.net.address_len = copy(gs.net.address[:], address)
     fmt.println("Join: connecting to", address)
     return true
@@ -115,6 +120,21 @@ client_leave :: proc(gs: ^Game_State) {
     enet.host_flush(n.host)
     enet.host_destroy(n.host)
     n.host, n.peer = nil, nil
+}
+
+// The server let us go, or never answered: back to our own world, saying why.
+@(private="file")
+client_dropped :: proc(gs: ^Game_State) {
+    n := &gs.net
+    address := string(n.address[:n.address_len])
+    why := n.refused
+    if why == "" {
+        why = n.welcomed ? fmt.tprintf("Lost the connection to %s", address) : fmt.tprintf("Couldn't reach %s", address)
+    }
+    n.dropped, n.refused = false, ""
+    session_leave(gs)
+    ui_toast(gs, why, 5)
+    chat_add(gs, fmt.tprintf("%s. Back in your own world.", why), SERVER_SLOT)
 }
 
 // What this player is called: the Multiplayer tab's name box.
@@ -242,7 +262,7 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             ui_toast(gs, fmt.tprintf("Joined as player %d", w.slot), 3)
         case .Refuse:
             why := msg_get(&r, Refuse_Reason) or_break
-            ui_toast(gs, why == .Full ? "The server is full" : "The server runs a different version", 5)
+            gs.net.refused = why == .Full ? "The server is full" : "The server runs a different version of the game"
         case .Voxels:
             m := msg_get(&r, Msg_Voxels) or_break
             changed := make([dynamic][3]int, 0, VOXEL_BATCH, context.temp_allocator)
@@ -288,6 +308,14 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
         }
     }
     clear(&gs.loop.to_client)
+    if n := &gs.net; n.remote && !n.welcomed && !n.dropped {
+        n.waiting += dt
+        if n.waiting > JOIN_TIMEOUT {
+            client_leave(gs)
+            n.dropped = true
+        }
+    }
+    if gs.net.dropped { client_dropped(gs) }
     others_update(gs, dt)
     if client_joined(gs) { replicas_update(gs, dt) }
     for &e in gs.net.chat { e.t = max(e.t - dt, 0) }
@@ -481,10 +509,10 @@ client_poll :: proc(gs: ^Game_State) {
             append(&gs.loop.to_client, ..ev.packet.data[:ev.packet.dataLength])
             enet.packet_destroy(ev.packet)
         case .DISCONNECT:
-            ui_toast(gs, n.welcomed ? "Lost the connection to the server" : "Couldn't reach the server", 5)
-            n.welcomed = false
+            // What it said before going (a refusal) is still to be read:
+            // client_receive takes us home after.
+            n.dropped = true
             n.peer = nil
-            for &o in n.others { o.active = false }
             enet.host_destroy(n.host)
             n.host = nil
             return
