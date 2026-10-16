@@ -193,7 +193,7 @@ vary :: proc(amount: f32 = 0.08) -> f32 {
 
 block_material :: proc(b: Block_Type) -> Material {
     #partial switch b {
-    case .Grass, .Dry_Grass:             return .Grass
+    case .Grass, .Dry_Grass, .Moss:      return .Grass
     case .Dirt:                          return .Dirt
     case .Sand, .Red_Sand:               return .Sand
     case .Snow:                          return .Snow

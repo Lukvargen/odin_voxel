@@ -90,6 +90,11 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_WILLOW_LEAVES 37u
 #define BLOCK_DRY_GRASS     38u // savanna ground
 #define BLOCK_MUSHROOM      39u // a land plant
+#define BLOCK_MOSS          40u // caves
+#define BLOCK_DRIPSTONE     41u
+#define BLOCK_ROOTS         42u // hanging plant
+#define BLOCK_GLOW_MUSHROOM 43u // plant, emissive
+#define BLOCK_GLOW_MOSS     44u // emissive
 
 // World blocks per design block (terrain.odin TERRAIN_SCALE): textures laid
 // out over the world in design sizes use it.
@@ -98,7 +103,7 @@ int region_of(int rx, int ry, int rz) {
 #define SEA_LEVEL_Y 24.0 // top of the sea (terrain.odin SEA_LEVEL)
 
 bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES || id == BLOCK_BIRCH_LEAVES || id == BLOCK_AUTUMN_LEAVES || id == BLOCK_ACACIA_LEAVES || id == BLOCK_WILLOW_LEAVES; }
-bool block_is_land_plant(uint id) { return id >= BLOCK_TALL_GRASS && id <= BLOCK_DRY_BUSH || id == BLOCK_MUSHROOM; }
+bool block_is_land_plant(uint id) { return (id >= BLOCK_TALL_GRASS && id <= BLOCK_DRY_BUSH) || id == BLOCK_MUSHROOM || id == BLOCK_ROOTS || id == BLOCK_GLOW_MUSHROOM; }
 bool block_is_water_plant(uint id) { return id == BLOCK_KELP || id == BLOCK_SEAGRASS || id == BLOCK_SEA_PICKLE; }
 // Water, or a plant standing in it (the camera is "in water" in either).
 bool block_is_watery(uint id) { return id == BLOCK_WATER || block_is_water_plant(id); }
@@ -114,6 +119,8 @@ float3 block_emission(uint id) {
     if (id == BLOCK_TORCH) return float3(1.0, 0.62, 0.40) * 7.0; // times albedo^2 in shading
     if (id == BLOCK_CRYSTAL) return float3(1.0, 0.85, 0.60) * 5.0;
     if (id == BLOCK_SEA_PICKLE) return float3(0.75, 1.0, 0.55) * 5.0;
+    if (id == BLOCK_GLOW_MUSHROOM) return float3(0.45, 0.95, 1.0) * 9.0;
+    if (id == BLOCK_GLOW_MOSS) return float3(0.40, 1.0, 0.75) * 6.0;
     return float3(0.0, 0.0, 0.0);
 }
 
@@ -258,7 +265,7 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float m
         int lvi = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
         if (voxel_solid(chunk_i, lvi)) {
             uint bid = load_voxel(base + lvi);
-            if (block_emission(bid).x > 0.0 || bid == BLOCK_WATER) {
+            if ((block_emission(bid).x > 0.0 && bid != BLOCK_GLOW_MOSS) || bid == BLOCK_WATER) {
                 // emissive / water: transparent to shadow rays (water
                 // darkens what's under it through absorption instead)
             } else if (block_is_leaves(bid)) {
@@ -576,6 +583,21 @@ bool plant_texel(uint id, int3 vkey, int cu, int cv, int pl) {
         if (cv == 7) return cu == 3 || cu == 4;
         if (cv == 2) return pl == 0 ? (cu == 2 || cu == 3) : (cu == 4 || cu == 5);
         return (cu == 3 || cu == 4) && pl == 0;
+    }
+    if (id == BLOCK_ROOTS) {
+        // Thin strands hanging from the top, of random lengths.
+        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 5 + 1));
+        if (hb > 0.45) return false;
+        return float(7 - cv) < 2.0 + hb * 14.0;
+    }
+    if (id == BLOCK_GLOW_MUSHROOM) {
+        // A cluster: two or three small caps on thin stems.
+        int c0 = 1 + int(h * 2.0), c1 = 5;
+        if (cv < 2) return cu == c0 || cu == c1;
+        if (cv == 2) return (cu >= c0 - 1 && cu <= c0 + 1) || (cu >= c1 - 1 && cu <= c1 + 1);
+        if (cv < 4) return cu == 3 && pl == 1;
+        if (cv == 4) return cu >= 2 && cu <= 4 && pl == 1;
+        return false;
     }
     if (id == BLOCK_MUSHROOM) {
         // A short stem under a domed cap.

@@ -483,6 +483,25 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         return saturate(c * (1.0 + vj * 0.20));
     }
 
+    if (block_id == BLOCK_MOSS || block_id == BLOCK_GLOW_MOSS) {
+        // Soft cushions: lumpy green; glowing moss is darker, with bright specks.
+        float cl = tex_noise(fuv, 2.0, 61.0);
+        float3 c = lerp(float3(0.10, 0.22, 0.05), float3(0.24, 0.42, 0.10), saturate(cl * 1.2 + (hd - 0.5) * 0.4));
+        if (block_id == BLOCK_GLOW_MOSS) {
+            // Glowing tips all over the cushion.
+            c = lerp(c * 0.6, float3(0.45, 0.95, 0.75), smoothstep(0.55, 0.75, h));
+        }
+        return saturate(c * (1.0 + vj * 0.1));
+    }
+
+    if (block_id == BLOCK_DRIPSTONE) {
+        // Tan rock streaked top to bottom by what dripped down it.
+        float streak = hash31i(int3(tkey.x, 77, tkey.z));
+        float n = tex_noise(fuv, 3.0, 63.0);
+        float3 c = float3(0.52, 0.43, 0.33) * (0.80 + 0.25 * streak + 0.12 * n + (hd - 0.5) * 0.1);
+        return saturate(c * (1.0 + vj * 0.06));
+    }
+
     if (block_id == BLOCK_DIRT) {
         float3 c = dirt_texture(h, tex_noise(fuv, 2.5, 3.1), hash31i((tkey >> 1) + 57), detail);
         return saturate(c * (1.0 + vj * 0.08));
@@ -585,6 +604,14 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         }
         if (block_id == BLOCK_DRY_BUSH) {
             return float3(0.36, 0.26, 0.15) * (0.8 + 0.4 * th);
+        }
+        if (block_id == BLOCK_ROOTS) {
+            return float3(0.40, 0.30, 0.19) * (0.75 + 0.4 * th) * lerp(0.8, 1.1, float(cv) / 7.0);
+        }
+        if (block_id == BLOCK_GLOW_MUSHROOM) {
+            // Pale stems, caps that glow (block_emission does the glow).
+            bool cap = cv == 2 || cv == 4;
+            return cap ? float3(0.55, 0.95, 1.0) : float3(0.70, 0.75, 0.72) * (0.85 + 0.2 * th);
         }
         if (block_id == BLOCK_MUSHROOM) {
             if (cv < 3) return float3(0.78, 0.75, 0.66) * (0.9 + 0.1 * th);
@@ -1099,6 +1126,8 @@ float3 far_block_color(uint id, int2 cell, float3 n, float y) {
     if (id == BLOCK_ACACIA_LEAVES) return float3(0.110, 0.150, 0.040);
     if (id == BLOCK_WILLOW_LEAVES) return float3(0.150, 0.230, 0.070);
     if (id == BLOCK_DRY_GRASS)     return n.y > 0.5 ? float3(0.36, 0.32, 0.13) : DIRT_COLOR * 0.95;
+    if (id == BLOCK_MOSS)          return float3(0.15, 0.30, 0.07);
+    if (id == BLOCK_DRIPSTONE)     return float3(0.48, 0.40, 0.31);
     if (id == BLOCK_LOG)           return float3(0.30, 0.20, 0.10);
     if (id == BLOCK_SPRUCE_LOG)    return float3(0.20, 0.13, 0.07);
     if (id == BLOCK_DIRT)          return dirt;

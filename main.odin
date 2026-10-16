@@ -147,6 +147,12 @@ main :: proc() {
     start_at: bool // at= given: start there, not where we were last
     server_init(&gs.server, &gs.sim, &gs.loop)
     bench := len(os.args) > 1 && os.args[1] == "bench"
+    if len(os.args) > 1 && os.args[1] == "caves" { // the ground cut open (cave_map.odin)
+        x, z := 0, 0
+        if len(os.args) > 4 { x, _ = strconv.parse_int(os.args[3]); z, _ = strconv.parse_int(os.args[4]) }
+        cave_map_export(len(os.args) > 2 ? os.args[2] : ".", x, z)
+        return
+    }
     if len(os.args) > 1 && os.args[1] == "map" { // terrain from above (terrain_map.odin)
         size, step := 1024, 8
         if len(os.args) > 3 { size, _ = strconv.parse_int(os.args[3]) }
@@ -193,6 +199,7 @@ main :: proc() {
             case a == "ui": bench_ui = true
             case a == "landmarks": bench_landmarks = true
             case a == "trees": bench_trees = true
+            case a == "caves": bench_caves = true
             case a == "players": bench_players = true
             case a == "slimes": bench_slimes = true
             case a == "enemies": bench_enemies = true

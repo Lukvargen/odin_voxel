@@ -59,7 +59,7 @@ set_slot_index :: proc(gs: ^Game_State, slot: int, idx: i32) {
 // mostly the terrain surface, tree canopies, cave mouths and around torches.
 // gpu_light_index[slot] is a light pool id, or light_index_uniform(v) for a
 // chunk whose every voxel has light v.
-MAX_LIGHT_BRICKS :: 1 << 17
+MAX_LIGHT_BRICKS :: 3 << 16 // 196k: caves full of glows need their share
 
 light_index_uniform :: #force_inline proc(v: u8) -> i32 { return -1 - i32(v) }
 
@@ -159,6 +159,12 @@ Block_Type :: enum u8 {
     Willow_Leaves = 37,
     Dry_Grass     = 38,  // savanna ground: grass gone yellow
     Mushroom      = 39,  // a land plant too: red with white spots, or brown
+    // Caves (caves.odin).
+    Moss          = 40,
+    Dripstone     = 41,
+    Roots         = 42,  // hanging from cave ceilings: a plant (cutout)
+    Glow_Mushroom = 43,  // a plant, and a dim light
+    Glow_Moss     = 44,  // on cave ceilings: a dim light
 }
 
 // Plants that live in water and count as water for everything but drawing.
@@ -168,7 +174,8 @@ block_is_water_plant :: #force_inline proc(b: u8) -> bool {
 
 // Grass tufts, flowers, ferns, dry bushes.
 block_is_land_plant :: #force_inline proc(b: u8) -> bool {
-    return b >= u8(Block_Type.Tall_Grass) && b <= u8(Block_Type.Dry_Bush) || b == u8(Block_Type.Mushroom)
+    return b >= u8(Block_Type.Tall_Grass) && b <= u8(Block_Type.Dry_Bush) || b == u8(Block_Type.Mushroom) ||
+           b == u8(Block_Type.Roots) || b == u8(Block_Type.Glow_Mushroom)
 }
 
 // Water, or a plant standing in it: swimming, buoyancy, underwater sound.
@@ -303,7 +310,6 @@ LOAD_RADIUS_Y   :: 7
 CAVE_FLOOR_Y    :: -104         // = world_h(-61)
 CAVE_CEIL_Y     :: 153          // = world_h(110): mountains are solid above this (ravines still cut in)
 CAVE_TOP_MARGIN :: 9            // keep caves this far below the surface
-CAVE_THRESHOLD  :: 0.32         // higher = fewer/smaller caves
 
 // Floor division — rounds toward -inf, unlike Odin's / which truncates toward zero.
 floor_div :: proc(a, b: int) -> int {
@@ -566,6 +572,19 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
         }
     }
     top_max := (surf_min < SEA_LEVEL ? max(surf_max, SEA_LEVEL) : surf_max) + 1 // and the plants on top
+    // Caves: where tunnels may come up to the surface, and the noise over
+    // the column's cave band (caves.odin).
+    entrance: [N]bool
+    cave_hi := CAVE_FLOOR_Y
+    any_entrance := false
+    for i in 0 ..< N {
+        h := height[i]
+        entrance[i] = cave_entrance(gx + i % CHUNK_VOXELS, gz + i / CHUNK_VOXELS, h)
+        any_entrance ||= entrance[i]
+        cave_hi = max(cave_hi, entrance[i] ? h : min(h - CAVE_TOP_MARGIN, CAVE_CEIL_Y))
+    }
+    caves := new(Cave_Field, context.temp_allocator)
+    cave_field_make(caves, gx, gz, CAVE_FLOOR_Y, cave_hi)
     profile_add(.Terrain_Noise, t_noise)
 
     t_fill := time.tick_now()
@@ -582,11 +601,12 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
             chunk.fill = u8(Block_Type.Water)
             continue
         }
-        if gy1 <= deep_min && (gy1 <= CAVE_FLOOR_Y || gy >= CAVE_CEIL_Y) {
+        if gy1 <= deep_min && (gy1 <= CAVE_FLOOR_Y || gy >= CAVE_CEIL_Y && !any_entrance) {
             chunk.fill = u8(Block_Type.Stone)
             continue
         }
         chunk.voxels = new([VOXELS_PER_BRICK]u8)
+        hollow := !cave_chunk_closed(caves, gy) // else no cave reaches into this chunk
 
         for z in 0 ..< CHUNK_VOXELS {
             for x in 0 ..< CHUNK_VOXELS {
@@ -594,6 +614,7 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
                 h  := height[ci]
                 l  := layers[ci]
                 cave_top := min(h - CAVE_TOP_MARGIN, CAVE_CEIL_Y)
+                open_to := entrance[ci] ? h : cave_top // tunnels up to here
                 for y in 0 ..< CHUNK_VOXELS {
                     wy := gy + y
                     b: Block_Type
@@ -601,11 +622,10 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
                     case wy >= h:
                         if wy < SEA_LEVEL {
                             b = l.frozen && wy == SEA_LEVEL - 1 ? .Ice : .Water
-                        } else if wy == h {
+                        } else if wy == h && !(entrance[ci] && cave_open(caves, x, h - 1, z, true)) {
                             b = plants[ci]
                         }
-                    case wy > CAVE_FLOOR_Y && wy < cave_top &&
-                         noise.noise_3d_improve_xy(7, {f64(gx + x) * (0.04 / TERRAIN_SCALE), f64(wy) * (0.05 / TERRAIN_SCALE), f64(gz + z) * (0.04 / TERRAIN_SCALE)}) > CAVE_THRESHOLD:
+                    case hollow && wy > CAVE_FLOOR_Y && wy < open_to && cave_open(caves, x, wy, z, wy >= cave_top):
                         // cave: air
                     case wy == h - 1:
                         b = l.top
@@ -639,6 +659,7 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
     }
     profile_add(.Tree_Scan, t_scan)
     decorate_caves(column, gx, gz, height[:])
+    decorate_cave_life(column, gx, gz, height[:])
     decorate_ocean(column, gx, gz, height[:], seas[:])
     generate_landmarks(&tgt)
     for &c in column.chunks { chunk_compact(&c) }

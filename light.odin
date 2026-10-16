@@ -22,6 +22,8 @@ LIGHT_MAX   :: 15
 TORCH_LIGHT :: 14
 CRYSTAL_LIGHT :: 9
 SEA_PICKLE_LIGHT :: 7
+GLOW_MUSHROOM_LIGHT :: 8
+GLOW_MOSS_LIGHT :: 6
 LIGHT_SKY   :: u8(LIGHT_MAX << 4) // full sky, no block light
 
 Light_Channel :: enum { Sky, Block }
@@ -34,6 +36,8 @@ block_emission :: #force_inline proc(b: u8) -> u8 {
     if b == u8(Block_Type.Torch)   { return TORCH_LIGHT }
     if b == u8(Block_Type.Crystal) { return CRYSTAL_LIGHT }
     if b == u8(Block_Type.Sea_Pickle) { return SEA_PICKLE_LIGHT }
+    if b == u8(Block_Type.Glow_Mushroom) { return GLOW_MUSHROOM_LIGHT }
+    if b == u8(Block_Type.Glow_Moss) { return GLOW_MOSS_LIGHT }
     return 0
 }
 

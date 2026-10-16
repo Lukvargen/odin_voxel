@@ -499,12 +499,15 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
         delete(rec.changes)
         return 0
     }
-    // Plants on ground that's gone go with it.
+    // Plants on ground that's gone go with it (roots with their ceiling).
     for i in 0 ..< len(changed) {
         p := changed[i]
         if block_solid(u8(get_voxel(gs, p.x, p.y, p.z))) { continue }
         q := p + {0, 1, 0}
         v := u8(get_voxel(gs, q.x, q.y, q.z))
+        if v != u8(Block_Type.Roots) && u8(get_voxel(gs, p.x, p.y - 1, p.z)) == u8(Block_Type.Roots) {
+            q, v = p - {0, 1, 0}, u8(Block_Type.Roots)
+        }
         col := gs.columns[{q.x >> 3, q.z >> 3}]
         if !block_is_land_plant(v) || col == nil || q.y >= WORLD_Y_MAX { continue }
         c := &col.chunks[chunk_y_index(q.y >> 3)]

@@ -120,6 +120,10 @@ bench_run :: proc(gs: ^Game_State) {
         bench_trees_run(gs)
         return
     }
+    if bench_caves {
+        bench_caves_run(gs)
+        return
+    }
     if bench_fight {
         bench_fight_run(gs)
         return
