@@ -28,6 +28,7 @@ Player :: struct {
     sneaking:   bool,
     sprinting:  bool,
     sword:      bool,   // drawn: slimes only come for an armed player
+    ignored:    bool,   // monsters leave it be (server.odin: a remote player can't see them yet)
     // Defence, as its client last reported it (hurt_outcome).
     invuln:     f32,    // dodging or just hurt: blows miss
     blocking:   bool,
@@ -87,11 +88,14 @@ player_flat_forward :: proc(p: ^Player) -> [3]f32 {
     return la.normalize([3]f32{math.sin(y), 0, math.cos(y)})
 }
 
-// The active player nearest `pos` (ground distance), or -1 if there are none.
+// Whether slimes and enemies are about this player: around it, after it.
+player_hunted :: proc(p: ^Player) -> bool { return p.active && !p.ignored }
+
+// The hunted player nearest `pos` (ground distance), or -1 if there are none.
 nearest_player :: proc(s: ^Sim, pos: [3]f32) -> (index: int, dist: f32) {
     index, dist = -1, max(f32)
     for &p, i in s.players {
-        if !p.active { continue }
+        if !player_hunted(&p) { continue }
         if d := la.length((player_feet(&p) - pos).xz); d < dist { index, dist = i, d }
     }
     return

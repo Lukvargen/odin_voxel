@@ -31,7 +31,14 @@ TOAST_SECONDS        :: 1.8
 BLOCK_NAME_SECONDS   :: 1.6
 
 Ui_Screen :: enum u8 { None, Pause, Inventory }
-Menu_Tab  :: enum u8 { Graphics, Sound, Controls }
+Menu_Tab  :: enum u8 { Graphics, Sound, Controls, Multiplayer }
+
+// A one-line text box's contents (text_field).
+Text_Field :: struct {
+    buf:    [64]u8,
+    len:    int,
+    submit: bool, // Enter was pressed in it
+}
 
 UI_State :: struct {
     renderer_data: Clay_SDL3RendererData,
@@ -42,6 +49,10 @@ UI_State :: struct {
     screen:         Ui_Screen,
     menu_tab:       Menu_Tab,
     quit_requested: bool, // "Save and quit" in the menu
+    typing:         ^Text_Field, // the text box keys go to, nil if none
+    field_hovered:  bool,        // a text box is under the pointer this frame
+    join_field:     Text_Field,  // Multiplayer tab: address to join...
+    port_field:     Text_Field,  // ...and port to host on
     debug_open:     bool, // F3
     hud_hidden:     bool, // F1
     help_open:      bool, // H
@@ -203,11 +214,52 @@ ui_toast :: proc(gs: ^Game_State, text: string, seconds: f32 = TOAST_SECONDS) {
 
 // Shows a screen (.None = back to playing); the mouse is free on screens.
 ui_open :: proc(gs: ^Game_State, screen: Ui_Screen) {
+    ui_type_into(gs, nil)
     gs.ui.screen = screen
     gs.ui.dragging = 0
     gs.mouse_locked = screen == .None
     gs.left_held, gs.right_held = false, false
     _ = SDL.SetWindowRelativeMouseMode(gs.window, gs.mouse_locked)
+}
+
+// Typing goes to text box f (nil: back to keys doing their usual things).
+ui_type_into :: proc(gs: ^Game_State, f: ^Text_Field) {
+    if gs.ui.typing == f { return }
+    gs.ui.typing = f
+    if f != nil { _ = SDL.StartTextInput(gs.window) } else { _ = SDL.StopTextInput(gs.window) }
+}
+
+// Typed text for the text box being typed in: printable ASCII only (it's
+// for addresses and numbers), as much as fits.
+ui_type_text :: proc(gs: ^Game_State, s: string) {
+    f := gs.ui.typing
+    if f == nil { return }
+    for c in transmute([]u8)s {
+        if c < 0x20 || c > 0x7e || f.len >= len(f.buf) { continue }
+        f.buf[f.len] = c
+        f.len += 1
+    }
+}
+
+// A key while typing: Backspace, Enter (submit), Esc (stop typing), Ctrl+V.
+// Every other key is the text box's too, so none reaches the game.
+ui_type_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) {
+    f := gs.ui.typing
+    switch key {
+    case SDL.K_BACKSPACE:
+        if .Ctrl in mods { f.len = 0 } else { f.len = max(f.len - 1, 0) }
+    case SDL.K_RETURN, SDL.K_KP_ENTER:
+        f.submit = true
+    case SDL.K_ESCAPE:
+        ui_type_into(gs, nil)
+    case SDL.K_V:
+        if .Ctrl in mods {
+            if clip := SDL.GetClipboardText(); clip != nil {
+                ui_type_text(gs, string(cstring(clip)))
+                SDL.free(clip)
+            }
+        }
+    }
 }
 
 // Esc: open the pause menu, or close whatever screen is open.
@@ -1342,6 +1394,36 @@ toggle :: proc(id: string, value: ^bool) {
     if i := segmented(id, {"On", "Off"}, value^ ? 0 : 1); i >= 0 { value^ = i == 0 }
 }
 
+// A one-line text box: click it to type; true when Enter is pressed in it.
+@(private="file")
+text_field :: proc(gs: ^Game_State, id: clay.ElementId, f: ^Text_Field, placeholder: string, width: f32 = 0) -> (submitted: bool) {
+    ui := &gs.ui
+    hovered := clay.PointerOver(id)
+    if hovered { ui.field_hovered = true }
+    if hovered && ui.mouse_left_pressed { ui_type_into(gs, f) }
+    focused := ui.typing == f
+    d: Ui_Deco = focused ? .Button_On : (hovered ? .Button_Hover : .Button)
+    if clay.UI(id)({
+        layout = {
+            sizing = {width > 0 ? clay.SizingFixed(width) : clay.SizingGrow(), clay.SizingFixed(32)},
+            padding = {10, 10, 0, 0},
+            childAlignment = {y = .Center},
+        },
+        custom = deco(d, radius = 7),
+    }) {
+        s := string(f.buf[:f.len])
+        caret := focused && (SDL.GetTicks() / 500) % 2 == 0
+        if f.len == 0 && !focused {
+            text(placeholder, COLOR_TEXT_FAINT, 14)
+        } else {
+            text(caret ? fmt.tprintf("%s|", s) : fmt.tprintf("%s ", s), COLOR_TEXT, 14)
+        }
+    }
+    submitted = f.submit
+    f.submit = false
+    return
+}
+
 // A draggable slider; t is value's 0..1 position. Returns whether it changed.
 @(private="file")
 slider :: proc(gs: ^Game_State, id: clay.ElementId, t: ^f32, label: string) -> (changed: bool) {
@@ -1393,6 +1475,10 @@ shade :: proc(id: string, a: f32 = 130) {
 
 menu_layout :: proc(gs: ^Game_State) {
     ui := &gs.ui
+    // A click anywhere but a text box stops typing (last frame's layout
+    // says what was under the pointer).
+    if ui.mouse_left_pressed && !ui.field_hovered { ui_type_into(gs, nil) }
+    ui.field_hovered = false
     shade("MenuShade")
     if clay.UI(clay.ID("Menu"))({
         layout = {layoutDirection = .TopToBottom, padding = clay.PaddingAll(22), childGap = 12, sizing = {clay.SizingFixed(menu_width(gs)), clay.SizingFit()}},
@@ -1405,7 +1491,7 @@ menu_layout :: proc(gs: ^Game_State) {
             p := gs.camera.pos
             text(fmt.tprintf("%s   %d m", biome_name(ui.biome), int(p.y - PLAYER_EYE_HEIGHT)), COLOR_TEXT_DIM, 14)
         }
-        if i := segmented("Tab", {"Graphics", "Sound", "Controls"}, int(ui.menu_tab)); i >= 0 {
+        if i := segmented("Tab", {"Graphics", "Sound", "Controls", "Multiplayer"}, int(ui.menu_tab)); i >= 0 {
             ui.menu_tab = Menu_Tab(i)
         }
         divider()
@@ -1414,6 +1500,7 @@ menu_layout :: proc(gs: ^Game_State) {
         case .Graphics: menu_graphics(gs)
         case .Sound:    menu_sound(gs)
         case .Controls: menu_controls(gs)
+        case .Multiplayer: menu_multiplayer(gs)
         }
 
         divider()
@@ -1524,6 +1611,82 @@ menu_sound :: proc(gs: ^Game_State) {
     }
     if !audio.ok { text("No audio device found.", COLOR_BAD, 13) }
     text("M mutes at any time.", COLOR_TEXT_FAINT, 12)
+}
+
+// Open this game to others, or join someone else's (session.odin).
+@(private="file")
+menu_multiplayer :: proc(gs: ^Game_State) {
+    ui := &gs.ui
+    n := &gs.net
+    if client_joined(gs) {
+        address := string(n.address[:n.address_len])
+        if n.welcomed {
+            text(fmt.tprintf("Playing on %s as player %d", address, n.slot), COLOR_TEXT, 15)
+            others := 0
+            for o in n.others { if o.active { others += 1 } }
+            text(others == 0 ? "Nobody else here right now." : fmt.tprintf("%d other player%s here.", others, others == 1 ? "" : "s"), COLOR_TEXT_DIM, 13)
+        } else if n.host != nil {
+            text(fmt.tprintf("Connecting to %s...", address), COLOR_TEXT, 15)
+        } else {
+            text(fmt.tprintf("Not connected to %s.", address), COLOR_BAD, 15)
+        }
+        if button(clay.ID("Leave"), "Leave: back to your own world") { session_leave(gs) }
+        text("Building and slimes don't reach other players yet.", COLOR_TEXT_FAINT, 12)
+        return
+    }
+
+    // Host.
+    hosting := session_hosting(gs)
+    heading("Host")
+    if clay.UI()(setting_row()) {
+        row_label("Port")
+        if hosting {
+            text(fmt.tprintf("%d", int(gs.server.host.address.port)), COLOR_TEXT, 15)
+            spacer()
+            if button(clay.ID("Close"), "Close to others", width = 160) { session_stop_hosting(gs) }
+        } else {
+            text_field(gs, clay.ID("Port"), &ui.port_field, "47100", width = 90)
+            if button(clay.ID("Open"), "Open to others", width = 160) {
+                port := ui.port_field.len == 0 ? NET_PORT : 0
+                for c in ui.port_field.buf[:ui.port_field.len] {
+                    if c < '0' || c > '9' || port > 65535 { port = -1; break }
+                    port = port * 10 + int(c - '0')
+                }
+                if port <= 0 || port > 65535 {
+                    ui_toast(gs, "The port is a number from 1 to 65535", 3)
+                } else if !session_host(gs, port) {
+                    ui_toast(gs, fmt.tprintf("Couldn't open port %d", port), 3)
+                }
+            }
+        }
+    }
+    if hosting {
+        joined := 0
+        for p, slot in gs.players { if p.active && slot != gs.server.local_player { joined += 1 } }
+        text(joined == 0 ? "Open. Nobody has joined yet." : fmt.tprintf("Open. %d player%s joined.", joined, joined == 1 ? "" : "s"), COLOR_ACCENT, 13)
+        text(fmt.tprintf("Friends join with your public IP address: forward UDP port %d on your router to this PC.", int(gs.server.host.address.port)), COLOR_TEXT_FAINT, 12)
+    } else {
+        text("Lets friends join this world.", COLOR_TEXT_FAINT, 12)
+    }
+
+    divider()
+    // Join.
+    heading("Join")
+    if clay.UI()(setting_row()) {
+        row_label("Address")
+        submit := text_field(gs, clay.ID("Address"), &ui.join_field, "203.0.113.7 or host:47100")
+        if button(clay.ID("Join"), "Join", width = 90) || submit {
+            address := string(ui.join_field.buf[:ui.join_field.len])
+            if len(address) == 0 {
+                ui_toast(gs, "Type the address to join first", 3)
+            } else if session_join(gs, address) {
+                ui_open(gs, .None)
+            } else {
+                ui_toast(gs, fmt.tprintf("Couldn't join %s", address), 3)
+            }
+        }
+    }
+    text("Plays on their world; yours stays saved as it is.", COLOR_TEXT_FAINT, 12)
 }
 
 // The menu is wider on the controls tab: its key lists sit in columns.

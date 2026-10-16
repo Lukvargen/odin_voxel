@@ -25,6 +25,15 @@ Client_Net :: struct {
     slot:     int,        // our player slot
     welcomed: bool,       // the server took us in (until then nothing is sent)
     others:   [MAX_PLAYERS]Other_Player, // the other players, as the server last said
+    address:  [64]u8,     // joined to (for the menu)
+    address_len: int,
+    home_pos: [3]f32,     // where we were in our own world before joining
+    home_yaw: f32,
+    // Teleported (joining, coming home): held in place until the ground
+    // there has streamed in, rather than falling through.
+    arriving:   bool,
+    arrive_pos: [3]f32,
+    arrive_yaw: f32,
 }
 
 // Another player, drawn where its client last said it was.
@@ -60,6 +69,7 @@ client_join :: proc(gs: ^Game_State, address: string) -> bool {
         return false
     }
     gs.net.remote = true
+    gs.net.address_len = copy(gs.net.address[:], address)
     fmt.println("Join: connecting to", address)
     return true
 }
@@ -137,9 +147,7 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
         case .Welcome:
             w := msg_get(&r, Msg_Welcome) or_break
             gs.net.slot, gs.net.welcomed = int(w.slot), true
-            if w.pos != 0 {
-                gs.camera.pos, gs.camera.yaw, gs.camera.velocity = w.pos, w.yaw, {}
-            }
+            if w.pos != 0 { client_arrive(gs, w.pos, w.yaw) }
             ui_toast(gs, fmt.tprintf("Joined as player %d", w.slot), 3)
         case .Refuse:
             why := msg_get(&r, Refuse_Reason) or_break
@@ -151,6 +159,27 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
     clear(&gs.loop.to_client)
     others_update(gs, dt)
     monsters_push_player(gs)
+    client_hold_arrival(gs)
+}
+
+// Go to `pos` (eye) facing `yaw`, held there until the ground has loaded.
+client_arrive :: proc(gs: ^Game_State, pos: [3]f32, yaw: f32) {
+    n := &gs.net
+    n.arriving, n.arrive_pos, n.arrive_yaw = true, pos, yaw
+    gs.camera.pos, gs.camera.yaw, gs.camera.velocity = pos, yaw, {}
+}
+
+@(private="file")
+client_hold_arrival :: proc(gs: ^Game_State) {
+    n := &gs.net
+    if !n.arriving { return }
+    p := n.arrive_pos
+    key := [2]int{floor_div(int(math.floor(p.x)), CHUNK_VOXELS), floor_div(int(math.floor(p.z)), CHUNK_VOXELS)}
+    if key in gs.columns {
+        n.arriving = false
+        return
+    }
+    gs.camera.pos, gs.camera.velocity = p, {}
 }
 
 // The network's news for a joined client: connected (say Hello), packets

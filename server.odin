@@ -177,6 +177,9 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
         case .Player_State:
             p := msg_get(&r, Player) or_break
             p.active = true
+            // Until clients see the server's slimes and enemies, those
+            // leave remote players alone: no blows out of nowhere.
+            p.ignored = player != srv.local_player
             sim.players[player] = p
         case .Hit:
             h := msg_get(&r, Msg_Hit) or_break

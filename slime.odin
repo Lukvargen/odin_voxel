@@ -150,7 +150,7 @@ slimes_update :: proc(sim: ^Sim, dt: f32) {
     if s.spawn_timer <= 0 && sim.monsters {
         s.spawn_timer = SLIME_SPAWN_EVERY
         for &p in sim.players {
-            if !p.active || p.fly_mode { continue }
+            if !player_hunted(&p) || p.fly_mode { continue }
             feet := player_feet(&p)
             near := 0
             for &sl in s.list {
@@ -222,7 +222,7 @@ slime_think :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
     kind := SLIME_KINDS[sl.size]
     // Idle, it turns to whoever is nearest; once after someone, it sticks
     // with them.
-    if sl.state == .Idle || !sim.players[sl.prey].active {
+    if sl.state == .Idle || !player_hunted(&sim.players[sl.prey]) {
         if i, _ := nearest_player(sim, sl.pos); i >= 0 { sl.prey = i }
     }
     p := &sim.players[sl.prey]
@@ -231,7 +231,7 @@ slime_think :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
     dist := la.length(to_player.xz)
     dir := dist > 0.01 ? to_player.xz / dist : [2]f32{-math.sin(sl.yaw), math.cos(sl.yaw)}
     squash_target: f32
-    hunting := p.active && p.sword && !p.fly_mode // sheathed, they leave you to build
+    hunting := player_hunted(p) && p.sword && !p.fly_mode // sheathed, they leave you to build
 
     switch sl.state {
     case .Idle:

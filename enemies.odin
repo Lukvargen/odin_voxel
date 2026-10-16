@@ -218,7 +218,7 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
         if spawn { s.spawn_timer = 6 }
         if sites { s.site_timer = 1 }
         for &p in sim.players {
-            if !p.active || p.fly_mode { continue }
+            if !player_hunted(&p) || p.fly_mode { continue }
             feet := player_feet(&p)
             if spawn {
                 roaming := 0
@@ -277,7 +277,7 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     sp := ENEMY_SPECS[e.kind]
     // Unbothered, it keeps an eye on whoever is nearest; once after
     // someone, it sticks with them.
-    if e.state == .Idle || e.state == .Wander || !sim.players[e.prey].active {
+    if e.state == .Idle || e.state == .Wander || !player_hunted(&sim.players[e.prey]) {
         if i, _ := nearest_player(sim, e.pos); i >= 0 { e.prey = i }
     }
     p := &sim.players[e.prey]
@@ -285,7 +285,7 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     to_player := feet - e.pos
     dist := la.length(to_player.xz)
     dir := dist > 0.01 ? to_player.xz / dist : [2]f32{-math.sin(e.yaw), math.cos(e.yaw)}
-    hunting := p.active && !p.fly_mode && sim.monsters
+    hunting := player_hunted(p) && !p.fly_mode && sim.monsters
     accel: [2]f32 // wanted ground velocity
     want_speed: f32
 

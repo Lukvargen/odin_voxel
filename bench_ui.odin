@@ -39,6 +39,7 @@ bench_ui_run :: proc(gs: ^Game_State) {
         }},
         {"menu_sound", proc(gs: ^Game_State) { gs.ui.menu_tab = .Sound }},
         {"menu_controls", proc(gs: ^Game_State) { gs.ui.menu_tab = .Controls }},
+        {"menu_multiplayer", proc(gs: ^Game_State) { gs.ui.menu_tab = .Multiplayer }},
         {"inventory", proc(gs: ^Game_State) {
             ui_open(gs, .Inventory)
             gs.ui.mouse_pos = {640 - 30, 360 - 60} // over a block (the tooltip) at 1280x720

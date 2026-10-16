@@ -15,8 +15,9 @@ Chunk_Job :: struct {
 }
 
 Chunk_Result :: struct {
-    key:    [2]int, // world column coord (wcx, wcz)
-    column: ^Column,
+    key:       [2]int, // world column coord (wcx, wcz)
+    column:    ^Column,
+    from_disk: bool,   // asked for from the save (generated anyway if that was unreadable)
 }
 
 Worker_Pool :: struct {
@@ -267,7 +268,7 @@ worker_proc :: proc(data: rawptr) {
         t_light := time.tick_now()
         light_column_compute(column)
         profile_add(.Light_Column, t_light)
-        res := Chunk_Result{key = job.key, column = column}
+        res := Chunk_Result{key = job.key, column = column, from_disk = job.from_disk}
 
         sync.mutex_lock(&pool.mu_ready)
         append(&pool.ready, res)

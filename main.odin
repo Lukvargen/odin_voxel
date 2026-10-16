@@ -5,7 +5,6 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
-import enet "vendor:ENet"
 import SDL "vendor:sdl3"
 
 DOUBLE_TAP_MS :: u64(300)
@@ -263,7 +262,7 @@ main :: proc() {
     gs.light_dirty = make([dynamic]int)
     defer delete(gs.light_dirty)
     defer delete(gs.stitch_queue)
-    if !bench && join_to == "" { save_init(&gs) } // joined: the world (and its saves) is the server's
+    if !bench { save_init(&gs) }
     generate_world(&gs)
     gpu_init(&gs)
     defer gpu_destroy(&gs)
@@ -280,20 +279,14 @@ main :: proc() {
     audio_init() // after the bench return: bench runs stay silent
     defer audio_shutdown()
 
-    // Multiplayer: open our server to others, or join someone else's.
-    networked := net_host || join_to != ""
-    if networked && enet.initialize() != 0 {
-        fmt.eprintln("Network: ENet failed to start")
-        return
-    }
-    defer if networked { enet.deinitialize() }
+    // Multiplayer from the command line: join someone's game, or open ours
+    // (the pause menu's Multiplayer tab does the same). Failing, play alone.
+    defer session_shutdown(&gs)
     if join_to != "" {
-        if !client_join(&gs, join_to) { return }
+        session_join(&gs, join_to)
     } else if net_host {
-        server_host(&gs.server, net_port) // can't open the port: play on alone
+        session_host(&gs, net_port)
     }
-    defer client_leave(&gs)
-    defer server_shutdown(&gs.server)
     gs_ui_left_pressed_state = &gs.ui
 
     // Lock mouse at start
@@ -326,10 +319,17 @@ main :: proc() {
             case .QUIT:
                 quit = true
 
+            case .TEXT_INPUT:
+                ui_type_text(&gs, string(event.text.text))
+
             case .KEY_DOWN:
                 key := event.key.key
-                if event.key.repeat { break }
                 mods := key_mods(event.key.mod)
+                if gs.ui.typing != nil { // a text box has the keys (repeats too)
+                    ui_type_key(&gs, key, mods)
+                    break
+                }
+                if event.key.repeat { break }
                 // Ctrl and Alt combos do only what they're bound to, never the
                 // plain key's action (Ctrl+3 isn't 3). Shift is sneak, so keys
                 // with no Shift binding ignore it (build_tools.odin).

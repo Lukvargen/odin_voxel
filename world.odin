@@ -432,6 +432,13 @@ integrate_ready_chunks :: proc(gs: ^Game_State) {
             column_free(r.column) // already resident: discard the duplicate
             continue
         }
+        if r.from_disk != (r.key in gs.saved_columns) {
+            // Saved, or no longer counted as saved (joining or leaving a
+            // server), while it was on its way: fetch it again the right way.
+            column_free(r.column)
+            worker_pool_enqueue(&gs.pool, r.key, r.key in gs.saved_columns)
+            continue
+        }
         integrate_column(gs, r.key, r.column)
     }
     profile_add(.Integrate, t_int)
