@@ -27,7 +27,7 @@ import la "core:math/linalg"
 // the player comes close, and the site stays empty for a while once cleared.
 
 MAX_ENEMIES      :: 24
-ENEMY_RANGE      :: f32(52)  // roaming population counted within this...
+ENEMY_RANGE      :: f32(64)  // roaming population counted within this...
 ENEMY_DESPAWN    :: f32(110) // ...and forgotten this far behind (guards: their site's spawn is undone)
 ENEMY_GRAVITY    : f32 = f32(26)
 ENEMY_JUMP       : f32 = f32(8.5)
@@ -261,8 +261,8 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
             if !b.alive || b.state == .Dead { continue }
             d := (b.pos - a.pos).xz
             l := la.length(d)
-            min_d := ENEMY_SPECS[a.kind].radius + ENEMY_SPECS[b.kind].radius + 0.2
-            if l < min_d && abs(b.pos.y - a.pos.y) < 1.5 {
+            min_d := ENEMY_SPECS[a.kind].radius + ENEMY_SPECS[b.kind].radius + 0.2 * world_scale
+            if l < min_d && abs(b.pos.y - a.pos.y) < 1.5 * world_scale {
                 n := l > 0.001 ? d / l : [2]f32{1, 0}
                 push := (min_d - l) * 20 * dt
                 a.vel.xz -= n * push
@@ -290,7 +290,7 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     want_speed: f32
 
     // Day breaks: the night's dead crumble unless they're at your throat.
-    if e.nocturnal && sim.day.night < 0.15 && e.state != .Dead && (dist > 10 || e.state == .Idle || e.state == .Wander) {
+    if e.nocturnal && sim.day.night < 0.15 && e.state != .Dead && (dist > 10 * world_scale || e.state == .Idle || e.state == .Wander) {
         enemy_crumble(sim, e)
         return
     }
@@ -299,15 +299,15 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     e.see_timer -= dt
     if e.see_timer <= 0 {
         e.see_timer = 0.25
-        e.sees = dist < 64 && enemy_sees_player(sim, e)
+        e.sees = dist < 64 * world_scale && enemy_sees_player(sim, e)
     }
     sight := sp.aggro * (p.sneaking ? 0.55 : 1)
-    hear: f32 = p.sneaking ? 1.5 : (p.sprinting ? 8 : 4)
+    hear := (p.sneaking ? 1.5 : (p.sprinting ? 8 : 4)) * world_scale
 
     switch e.state {
     case .Idle, .Wander:
         if e.rising > 0 { break }
-        if hunting && abs(to_player.y) < 8 && ((e.sees && dist < sight) || dist < hear) {
+        if hunting && abs(to_player.y) < 8 * world_scale && ((e.sees && dist < sight) || dist < hear) {
             e.state, e.timer = .Chase, 0
             e.last_seen, e.seen_ago = feet, 0
             e.repath = 0
@@ -318,7 +318,7 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
             if e.timer <= 0 {
                 // Wander about home (guards) or where it stands.
                 a := rand.float32_range(0, 2 * math.PI)
-                r := rand.float32_range(2, e.guard ? 7 : 10)
+                r := rand.float32_range(2, e.guard ? 7 : 10) * world_scale
                 c := e.guard ? e.home : e.pos
                 e.target = c + {math.cos(a) * r, 0, math.sin(a) * r}
                 e.state, e.timer = .Wander, rand.float32_range(3, 6)
@@ -326,12 +326,12 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
         } else {
             d := (e.target - e.pos).xz
             l := la.length(d)
-            if l < 0.6 || e.timer <= 0 {
+            if l < 0.6 * world_scale || e.timer <= 0 {
                 e.state, e.timer = .Idle, rand.float32_range(1.5, 5)
             } else {
                 // Guards heading home find their way round things.
                 goal := e.target
-                if e.guard && la.length((e.home - e.pos).xz) > 6 { goal = enemy_steer(sim, e, e.target, dt) }
+                if e.guard && la.length((e.home - e.pos).xz) > 6 * world_scale { goal = enemy_steer(sim, e, e.target, dt) }
                 w := la.normalize0((goal - e.pos).xz)
                 if w != 0 {
                     turn_towards(&e.yaw, w, dt * 3)
@@ -342,12 +342,12 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
         }
     case .Chase:
         // Keep track of where the player is, or was last seen.
-        if e.sees || dist < 2.5 { e.last_seen, e.seen_ago = feet, 0 } else { e.seen_ago += dt }
-        lost := e.seen_ago > 5 || dist > sp.aggro * 1.8 || !hunting || (e.guard && la.length((e.pos - e.home).xz) > GUARD_LEASH && dist > 4)
+        if e.sees || dist < 2.5 * world_scale { e.last_seen, e.seen_ago = feet, 0 } else { e.seen_ago += dt }
+        lost := e.seen_ago > 5 || dist > sp.aggro * 1.8 || !hunting || (e.guard && la.length((e.pos - e.home).xz) > GUARD_LEASH * world_scale && dist > 4 * world_scale)
         if lost {
             e.state, e.timer = .Wander, 6
             e.target = e.guard ? e.home : e.last_seen
-        } else if dist < sp.reach && abs(to_player.y) < 2 && e.on_ground && e.sees {
+        } else if dist < sp.reach && abs(to_player.y) < 2 * world_scale && e.on_ground && e.sees {
             turn_towards(&e.yaw, dir, dt * 7)
             e.state, e.timer, e.struck = .Windup, sp.windup, false
             e.swing = rand.float32() < OVERHEAD_CHANCE[e.kind] ? .Overhead : .Slash
@@ -357,10 +357,10 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
             goal := e.sees ? feet : e.last_seen
             wp := enemy_steer(sim, e, goal, dt)
             w := la.normalize0((wp - e.pos).xz)
-            if !e.sees && la.length((e.last_seen - e.pos).xz) < 1 {
+            if !e.sees && la.length((e.last_seen - e.pos).xz) < 1 * world_scale {
                 e.state, e.timer = .Idle, rand.float32_range(1, 3) // nobody here
             } else if w != 0 {
-                turn_towards(&e.yaw, dist < 4 && e.sees ? dir : w, dt * 7)
+                turn_towards(&e.yaw, dist < 4 * world_scale && e.sees ? dir : w, dt * 7)
                 want_speed = sp.run
                 accel = w
             }
@@ -372,20 +372,20 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
         // Lunges a step into the swing; hurts once if the player is in front.
         fwd := [2]f32{-math.sin(e.yaw), math.cos(e.yaw)}
         want_speed, accel = sp.run * 0.8, fwd
-        if !e.struck && dist < sp.reach + 0.5 && to_player.y > -1.2 && to_player.y < sp.height &&
+        if !e.struck && dist < sp.reach + 0.5 * world_scale && to_player.y > -1.2 * world_scale && to_player.y < sp.height &&
            la.dot(dir, fwd) > (e.swing == .Slash ? -0.1 : 0.45) {
             e.struck = true
             knock := [3]f32{dir.x * sp.knock[0], sp.knock[1], dir.y * sp.knock[0]}
             switch player_hurt(sim, e.prey, sp.damage, knock, enemy_center(e)) {
             case .Hit:
-                sim_emit(sim, {kind = .Enemy_Struck, enemy = e.kind, pos = feet + {0, 1, 0}})
+                sim_emit(sim, {kind = .Enemy_Struck, enemy = e.kind, pos = feet + {0, world_scale, 0}})
             case .Blocked:
-                e.vel.xz -= dir * (3 / sp.weight)
+                e.vel.xz -= dir * (3 * world_scale / sp.weight)
                 e.timer = sp.strike * 0.5 // the swing's spent
             case .Parried:
                 // Thrown off balance: reeling, wide open.
                 e.state, e.timer = .Stagger, 1.3
-                e.vel = {-dir.x * 5 / sp.weight, 3, -dir.y * 5 / sp.weight}
+                e.vel = {-dir.x * 5 / sp.weight, 3, -dir.y * 5 / sp.weight} * world_scale
                 e.on_ground = false
                 e.flash = 1
                 enemy_voice(sim, e, 1)
@@ -446,9 +446,9 @@ enemy_move :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     in_water := block_is_watery(u8(get_voxel(sim.world, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z)))))
     if in_water {
         e.vel *= max(1 - 2.5 * dt, 0)
-        e.vel.y += 9 * dt
+        e.vel.y += 9 * world_scale * dt
     }
-    if !e.on_ground { e.vel.y = max(e.vel.y - ENEMY_GRAVITY * dt, -40) }
+    if !e.on_ground { e.vel.y = max(e.vel.y - ENEMY_GRAVITY * dt, -40 * world_scale) }
     if e.state == .Dead { e.vel.xz *= math.exp(-6 * dt) }
 
     d := e.vel * dt
@@ -535,7 +535,7 @@ enemy_crumble :: proc(sim: ^Sim, e: ^Enemy) {
 stand_y :: proc(sim: ^Sim, x, z, from_y: int) -> (y: int, ok: bool) {
     for yy := from_y; yy > from_y - 40; yy -= 1 {
         if solid_at(sim.world, x, yy, z) {
-            if !solid_at(sim.world, x, yy + 1, z) && !solid_at(sim.world, x, yy + 2, z) &&
+            if !solid_at(sim.world, x, yy + 1, z) && !solid_at(sim.world, x, yy + 2, z) && !solid_at(sim.world, x, yy + 3, z) &&
                !block_is_watery(u8(get_voxel(sim.world, x, yy + 1, z))) { return yy + 1, true }
             return 0, false
         }
@@ -559,7 +559,7 @@ roamer_for :: proc(b: Biome, night: f32) -> (kind: Enemy_Kind, pack: int, ok: bo
 enemy_try_spawn :: proc(sim: ^Sim, feet: [3]f32, night: f32) {
     for _ in 0 ..< 8 {
         a := rand.float32_range(0, 2 * math.PI)
-        r := rand.float32_range(22, 40)
+        r := rand.float32_range(22, 40) * world_scale
         x := int(math.floor(feet.x + math.cos(a) * r))
         z := int(math.floor(feet.z + math.sin(a) * r))
         g := surface_height_at(x, z)
@@ -600,7 +600,7 @@ sites_update :: proc(sim: ^Sim, feet: [3]f32) {
             }
             if lm.kind == .None { continue }
             centre := [3]f32{f32(lm.x) + 0.5, f32(lm.base), f32(lm.z) + 0.5}
-            if la.length((centre - feet).xz) > SITE_NOTICE { continue }
+            if la.length((centre - feet).xz) > SITE_NOTICE * world_scale { continue }
             site := s.sites[key]
             if site.spawned { continue }
             if site.cleared_at > 0 && s.time - site.cleared_at < SITE_RESPAWN { continue }
@@ -674,11 +674,11 @@ enemies_scatter :: proc(sim: ^Sim, pos: [3]f32) {
         if !e.alive || e.state == .Dead { continue }
         d := e.pos - pos
         d.y = 0
-        if la.length(d) < 16 {
-            e.vel = la.normalize0(d) * 9 + {0, 5, 0}
+        if la.length(d) < 16 * world_scale {
+            e.vel = (la.normalize0(d) * 9 + {0, 5, 0}) * world_scale
             e.on_ground = false
             e.state, e.timer = .Wander, 8
-            e.target = e.guard ? e.home : e.pos + la.normalize0(d) * 12
+            e.target = e.guard ? e.home : e.pos + la.normalize0(d) * 12 * world_scale
         }
     }
 }
@@ -689,7 +689,7 @@ debug_next_kind: Enemy_Kind
 
 enemy_debug_spawn :: proc(gs: ^Game_State) {
     feet := gs.camera.pos - {0, PLAYER_EYE_HEIGHT, 0}
-    at := feet + camera_flat_forward(gs.camera) * 5 + {0, 0.5, 0}
+    at := feet + camera_flat_forward(gs.camera) * 5 * world_scale + {0, 0.5, 0}
     kind := debug_next_kind
     debug_next_kind = Enemy_Kind((int(kind) + 1) % len(Enemy_Kind))
     yaw := -math.to_radians(gs.camera.yaw) + math.PI

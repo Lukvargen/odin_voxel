@@ -361,8 +361,8 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
         feet := cam.pos - {0, PLAYER_EYE_HEIGHT, 0}
         for t in combat_targets(gs) {
             if t.hit_id^ == c.attack_id { continue }
-            d := t.center - (feet + {0, 0.3, 0})
-            if la.length(d.xz) < t.radius + PLAYER_HALF_W + 0.4 && d.y > -t.radius - 1.6 && d.y < t.radius + 0.8 {
+            d := t.center - (feet + {0, 0.3 * world_scale, 0})
+            if la.length(d.xz) < t.radius + PLAYER_HALF_W + 0.4 * world_scale && d.y > -t.radius - 1.6 * world_scale && d.y < t.radius + 0.8 * world_scale {
                 hit_target(gs, t, .Plunge)
                 cam.velocity.y = PLUNGE_BOUNCE
                 cam.on_ground = false
@@ -444,8 +444,8 @@ start_attack :: proc(gs: ^Game_State, kind: Attack_Kind) {
 @(private="file")
 height_above_ground :: proc(gs: ^Game_State) -> f32 {
     feet := gs.camera.pos - {0, PLAYER_EYE_HEIGHT - 0.05, 0}
-    hit, _, ok := raycast_voxel(gs, feet, {0, -1, 0}, 60)
-    if !ok { return 60 }
+    hit, _, ok := raycast_voxel(gs, feet, {0, -1, 0}, 60 * world_scale)
+    if !ok { return 60 * world_scale }
     return feet.y - f32(hit.y + 1)
 }
 
@@ -479,7 +479,7 @@ sword_reaches :: proc(c: [3]f32, r: f32, eye, fwd: [3]f32, pitch: f32, a: Attack
     d := c - eye
     dist := la.length(d)
     if dist - r > a.reach { return false }
-    if dist < r + 0.6 { return true }
+    if dist < r + 0.6 * world_scale { return true }
     flat := la.length(d.xz)
     widen := math.atan2(r, max(flat, 0.01)) // its width widens the angle it's hit in
     if flat > 0.01 && (d.x * fwd.x + d.z * fwd.z) / flat < math.cos(min(a.arc + widen, math.PI)) { return false }
@@ -803,6 +803,7 @@ combat_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     fwd, right, up := camera_view_basis(cam)
     right, up = la.normalize(right), la.normalize(up)
     eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+    ent_scale_about(f, eye, world_scale)
     shoulder := eye + right * SWORD_SHOULDER.x + up * SWORD_SHOULDER.y + fwd * SWORD_SHOULDER.z
     grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
     // The elbow hangs down and out to the side.

@@ -31,7 +31,7 @@ GLIDER_MAX_BANK  :: f32(1.10)  // ~63 degrees
 GLIDER_SUBSTEP   :: f32(1.0 / 240.0)
 GLIDER_CRASH_SPEED : f32 = f32(14.0) // wall hit faster than this throws you off the glider
 
-THERMAL_CELL :: 112 // one possible thermal per CELL x CELL voxels
+THERMAL_CELL :: 168 // one possible thermal per CELL x CELL voxels (112 design)
 
 Glider :: struct {
     equipped:  bool,
@@ -94,14 +94,14 @@ thermal_cell :: proc(gx, gz: int) -> (th: Thermal, ok: bool) {
         (f32(gx) + 0.2 + 0.6 * thermal_hash(gx, gz, 2)) * THERMAL_CELL,
         (f32(gz) + 0.2 + 0.6 * thermal_hash(gx, gz, 3)) * THERMAL_CELL,
     }
-    th.radius   = 12 + 16 * thermal_hash(gx, gz, 4)
-    th.strength = 3.0 + 4.5 * thermal_hash(gx, gz, 5)
-    th.top      = 90 + 110 * thermal_hash(gx, gz, 6)
+    th.radius   = (12 + 16 * thermal_hash(gx, gz, 4)) * TERRAIN_SCALE
+    th.strength = (3.0 + 4.5 * thermal_hash(gx, gz, 5)) * TERRAIN_SCALE
+    th.top      = (90 + 110 * thermal_hash(gx, gz, 6)) * TERRAIN_SCALE
     return th, true
 }
 
 // Cumulus clouds mark strong thermals (the same ones the eagles circle).
-CUMULUS_BASE     :: f32(240) // cloud base height; above the highest mountains (~225)
+CUMULUS_BASE     :: f32(348) // cloud base height (240 design): the highest peaks rise through
 MAX_SKY_THERMALS :: 16
 
 Sky_Thermal :: struct {
@@ -123,19 +123,19 @@ sky_thermals_update :: proc(gs: ^Game_State) {
     for dz in -2 ..= 2 {
         for dx in -2 ..= 2 {
             th := thermal_cell(cell.x + dx, cell.y + dz) or_continue
-            if th.strength < 4.5 || gs.sky_thermal_count >= MAX_SKY_THERMALS { continue }
+            if th.strength < 4.5 * TERRAIN_SCALE || gs.sky_thermal_count >= MAX_SKY_THERMALS { continue }
             ground := max(f32(surface_height_at(int(th.centre.x), int(th.centre.y))), SEA_LEVEL)
             st := Sky_Thermal{
                 centre   = th.centre,
                 ground   = ground,
-                cloud_r  = 26 + th.radius * 1.2 + th.strength * 4,
+                cloud_r  = 26 * TERRAIN_SCALE + th.radius * 1.2 + th.strength * 4,
                 strength = th.strength,
             }
             // Cauliflower towers on top of the base, taller for stronger lift.
             gx, gz := cell.x + dx, cell.y + dz
             for k in 0 ..< 4 {
                 h := proc(gx, gz, k, j: int) -> f32 { return thermal_hash(gx, gz, u32(20 + k * 4 + j)) }
-                rise := 0.35 + 0.55 * h(gx, gz, k, 1) * (th.strength / 7.5)
+                rise := 0.35 + 0.55 * h(gx, gz, k, 1) * (th.strength / (7.5 * TERRAIN_SCALE))
                 st.puffs[k] = {(h(gx, gz, k, 0) - 0.5) * 0.9, rise, (h(gx, gz, k, 2) - 0.5) * 0.9, 0.42 + 0.22 * h(gx, gz, k, 3)}
             }
             gs.sky_thermals[gs.sky_thermal_count] = st
@@ -149,7 +149,7 @@ sky_thermals_update :: proc(gs: ^Game_State) {
 // `ground` is the terrain height under p; thermals weaken toward their top.
 thermal_lift :: proc(p: [3]f32, ground: f32, wind: [3]f32) -> f32 {
     height := p.y - ground
-    if height < 2 { return 0 }
+    if height < 3 { return 0 }
     // Lean: the column drifts with the wind as it rises.
     q := p - wind * (height * 0.08)
     cx := int(math.floor(q.x / THERMAL_CELL))
@@ -159,13 +159,13 @@ thermal_lift :: proc(p: [3]f32, ground: f32, wind: [3]f32) -> f32 {
         for dx in -1 ..= 1 {
             th := thermal_cell(cx + dx, cz + dz) or_continue
             d := la.length([2]f32{q.x, q.z} - th.centre) / th.radius
-            fade := clamp((th.top - height) / 30, 0, 1) * clamp(height / 12, 0, 1)
+            fade := clamp((th.top - height) / (30 * TERRAIN_SCALE), 0, 1) * clamp(height / (12 * TERRAIN_SCALE), 0, 1)
             if d < 1 {
                 k := 1 - d * d
                 lift += th.strength * k * k * fade
             } else if d < 1.8 {
                 s := math.sin((d - 1) / 0.8 * math.PI)
-                lift -= 0.9 * s * fade
+                lift -= 0.9 * TERRAIN_SCALE * s * fade
             }
         }
     }
@@ -178,14 +178,14 @@ thermal_lift :: proc(p: [3]f32, ground: f32, wind: [3]f32) -> f32 {
 ridge_lift :: proc(p: [3]f32, wind: [3]f32) -> (lift, ground: f32) {
     ix, iz := int(math.floor(p.x)), int(math.floor(p.z))
     h0 := f32(surface_height_at(ix, iz))
-    hx := f32(surface_height_at(ix + 6, iz))
-    hz := f32(surface_height_at(ix, iz + 6))
-    grad := [2]f32{(hx - h0) / 6, (hz - h0) / 6}
+    hx := f32(surface_height_at(ix + 9, iz))
+    hz := f32(surface_height_at(ix, iz + 9))
+    grad := [2]f32{(hx - h0) / 9, (hz - h0) / 9}
     ground = max(h0, SEA_LEVEL)
     upslope := wind.x * grad.x + wind.z * grad.y
     height := p.y - ground
-    if upslope <= 0 || height > 60 { return 0, ground }
-    return min(upslope * 1.6, 6) * clamp(1 - height / 60, 0, 1), ground
+    if upslope <= 0 || height > 90 { return 0, ground }
+    return min(upslope * 1.6, 6) * TERRAIN_SCALE * clamp(1 - height / 90, 0, 1), ground
 }
 
 // ─── Aerodynamics ─────────────────────────────────────────────────────────
@@ -489,6 +489,7 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
 glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     g := &gs.glider
     if !g.deployed || !ent_begin(f) { return }
+    ent_scale_about(f, gs.camera.pos, world_scale)
     // The whole pilot in the chase view; from the eyes, just the arms.
     glider_wing_parts(f, gs.camera.pos, g.heading, g.path_angle + g.aoa, g.bank, g.deploy_t, PLAYER_TINT, pilot = g.chase_dist > 1.5)
     ent_end(f)

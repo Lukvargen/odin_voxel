@@ -15,12 +15,12 @@ import SDL "vendor:sdl3"
 
 MAX_ENTITIES        :: 128 // one bit each in the 128-bit culling masks (voxel_models.odin)
 ENTITY_CULL_RADIUS  :: f32(96.0)  // gather range around camera (birds: BIRD_CULL_RADIUS)
-FOX_WALK_SPEED      :: f32(1.6)   // voxels/s
-FOX_FLEE_SPEED      :: f32(5.5)
-FOX_FLEE_DIST       :: f32(7.0)   // the player closer than this sends a fox running
+FOX_WALK_SPEED      : f32 = f32(1.6)   // voxels/s
+FOX_FLEE_SPEED      : f32 = f32(5.5)
+FOX_FLEE_DIST       : f32 = f32(7.0)   // the player closer than this sends a fox running
 ENTITY_TURN_RATE    :: f32(3.0)   // rad/s toward wander_yaw
-ENTITY_GRAVITY      :: f32(24.0)  // voxels/s^2
-ENTITY_MAX_FALL     :: f32(30.0)  // terminal fall speed, voxels/s
+ENTITY_GRAVITY      : f32 = f32(24.0)  // voxels/s^2
+ENTITY_MAX_FALL     : f32 = f32(30.0)  // terminal fall speed, voxels/s
 
 Entity_Kind :: enum u8 {
     Fox,
@@ -207,7 +207,7 @@ fox_update :: proc(gs: ^Game_State, e: ^Entity, dt, t: f32) {
             e.pos = np // drops (ledges, mined ground) are gravity's job
         }
         if moved {
-            e.walk_phase += step * 5.5
+            e.walk_phase += step * 5.5 / world_scale
         } else {
             e.wander_yaw = e.yaw + math.PI * rand.float32_range(0.6, 1.4)
             e.next_think = t + rand.float32_range(0.5, 1.5)
@@ -255,6 +255,7 @@ entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
         // their spread-out boxes would cost every terrain shadow ray.
         // Fish are small and under water: not worth a shadow either.
         if !ent_begin(frame, e.kind != .Bird && e.kind != .Fish) { break }
+        ent_scale_about(frame, e.pos, world_scale)
         switch e.kind {
         case .Fox:  fox_add(frame, e, t)
         case .Bird: bird_add(frame, e, t)

@@ -374,6 +374,10 @@ Ent_Frame :: struct {
     // CPU only below
     n_ents, n_parts: int,
     no_shadow: [MAX_ENTITIES]bool,
+    // The open entity drawn `scale` times its size about `anchor`
+    // (ent_scale_about; 0: as given). Bodies are posed at their design size.
+    anchor:    [3]f32,
+    scale:     f32,
     corners: [MAX_ENT_PARTS][8][3]f32, // oriented part boxes, for the screen masks
 }
 
@@ -515,7 +519,14 @@ ent_begin :: proc(f: ^Ent_Frame, casts_shadow := true) -> bool {
     return true
 }
 
+// The rest of the open entity's parts, given at their design size about
+// `anchor` (its feet, its eye), drawn `s` times as big.
+ent_scale_about :: proc(f: ^Ent_Frame, anchor: [3]f32, s: f32) {
+    f.anchor, f.scale = anchor, s
+}
+
 ent_end :: proc(f: ^Ent_Frame) {
+    f.scale = 0
     e := &f.ents[f.n_ents]
     e.part_count = u32(f.n_parts) - e.first_part
     if e.part_count > 0 { f.n_ents += 1 }
@@ -525,6 +536,11 @@ ent_end :: proc(f: ^Ent_Frame) {
 // rotated by `rot` and scaled per axis by `scale`.
 ent_part :: proc(f: ^Ent_Frame, model: Model_Id, pos: [3]f32, rot: Basis, scale: [3]f32 = {1, 1, 1}, tint: [3]f32 = {1, 1, 1}) {
     if f.n_parts >= MAX_ENT_PARTS { return }
+    pos, scale := pos, scale
+    if f.scale > 0 {
+        pos = f.anchor + (pos - f.anchor) * f.scale
+        scale *= f.scale
+    }
     m := &ent_models[model]
     // world = pos + rot * (scale * local); grid = (local - lo) / voxel.
     // So grid_i = (dot(col_i, world - pos) / scale_i - lo_i) / voxel.

@@ -123,7 +123,7 @@ bench_open_ground :: proc(gs: ^Game_State, x, z: int) -> (int, int) {
     open :: proc(gs: ^Game_State, x, z: int) -> bool {
         g := bench_ground(gs, x, z)
         if g <= SEA_LEVEL { return false }
-        for dz in -3 ..= 14 { for dx in -5 ..= 5 {
+        for dz in -6 ..= 21 { for dx in -8 ..= 8 { // -3..14, -5..5 design blocks
             gg := bench_ground(gs, x + dx, z + dz)
             if abs(gg - g) > 1 { return false }
         }}
@@ -161,8 +161,9 @@ bench_fight_run :: proc(gs: ^Game_State) {
         cam.fly_mode, cam.velocity, cam.yaw, cam.pitch = false, {}, 0, -5
         combat_init(&gs.combat)
         combat_toggle_sword(gs)
-        g := bench_ground(gs, x, z + 7) + 1
-        e := enemy_spawn(gs, kind, {f32(x) + 0.5, f32(g), f32(z) + 7.5})
+        ahead := 7 * world_scale // design blocks away
+        g := bench_ground(gs, x, z + int(math.floor(0.5 + ahead))) + 1
+        e := enemy_spawn(gs, kind, {f32(x) + 0.5, f32(g), f32(z) + 0.5 + ahead})
         if e == nil { continue }
         e.yaw = math.PI
         last := Enemy_State(255)
@@ -204,7 +205,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
         for &e in gs.enemies.list { e.alive = false }
         clear(&gs.enemies.sites)
         gs.enemies.spawn_timer, gs.enemies.site_timer = 1e9, 0
-        bench_teleport(gs, {f32(lm.x) + 30, f32(surface_height_at(lm.x + 30, lm.z)) + 1 + PLAYER_EYE_HEIGHT, f32(lm.z) + 0.5})
+        bench_teleport(gs, {f32(lm.x) + 45, f32(surface_height_at(lm.x + 45, lm.z)) + 1 + PLAYER_EYE_HEIGHT, f32(lm.z) + 0.5})
         cam.fly_mode = true // hold still (the AI ignores a flying player)
         for _ in 0 ..< 30 {
             gs.enemies.site_timer = 0

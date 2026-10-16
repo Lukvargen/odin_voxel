@@ -182,6 +182,7 @@ main :: proc() {
     day_init(&gs)
     if bench {
         // bench [quick] [at=x,z] [shot_dir]
+        world_scale_apply(TERRAIN_SCALE) // the player's size (scale.odin)
         for a in os.args[2:] {
             switch {
             case a == "quick": bench_quick = true
@@ -221,8 +222,9 @@ main :: proc() {
         // The player's size first: what follows (at=) places the player by it.
         for a in os.args[1:] {
             if !strings.has_prefix(a, "scale=") { continue }
-            if v, ok := strconv.parse_f32(a[6:]); ok { world_scale_apply(clamp(v, 0.5, 3)) } // prototype (scale.odin)
+            if v, ok := strconv.parse_f32(a[6:]); ok { world_scale_apply(clamp(v, 0.5, 3)) } // trying another (scale.odin)
         }
+        world_scale_apply(TERRAIN_SCALE) // unless scale= did
         for a in os.args[1:] {
             switch {
             case strings.has_prefix(a, "at="):

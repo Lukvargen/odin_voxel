@@ -650,9 +650,11 @@ others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         p := &o.latest
         tint := la.lerp(player_tint(slot), [3]f32{1, 0.25, 0.2}, o.hurt * 0.75) // struck: a red flash
         if p.gliding {
+            ent_scale_about(f, o.pos, world_scale)
             glider_wing_parts(f, o.pos, p.glide_heading, p.glide_pitch, p.glide_bank, p.glide_unfold, tint, pilot = true)
         } else {
             feet := o.pos - {0, PLAYER_EYE_HEIGHT, 0}
+            ent_scale_about(f, feet, world_scale)
             hips := humanoid_add_parts(f, feet, &o.anim, p.yaw, p.pitch, tint, right_arm = !p.sword)
             if p.sword {
                 // As the player's own sword arm (creatures.odin), from its view.

@@ -25,7 +25,7 @@ sea_kind :: proc(s: Terrain_Sample) -> Sea_Kind {
 }
 
 PLANT_TOP :: SEA_LEVEL - 2 // highest voxel a plant or reef may fill
-KELP_MAX  :: 14             // tallest kelp stalk
+KELP_MAX  :: 21             // tallest kelp stalk
 
 // Floor life for one generated column. height: surface height per voxel
 // column (the first water voxel), kinds: its sea kind.
@@ -132,12 +132,12 @@ sea_coral_head :: proc(tgt: ^Tree_Target, col: ^Column, lx, lz, wx, h, wz: int) 
 // few big grey-brown fish in the cold.
 
 MAX_FISH_SCHOOLS :: 6
-FISH_SPAWN_MIN   :: f32(6)
-FISH_SPAWN_MAX   :: f32(24)  // about how far you can see under water
+FISH_SPAWN_MIN   : f32 = f32(6)
+FISH_SPAWN_MAX   : f32 = f32(24)  // about how far you can see under water
 FISH_DROP_DIST   :: f32(48)
-FISH_FLEE_DIST   :: f32(5)
-FISH_CRUISE      :: f32(1.4) // m/s
-FISH_BOLT        :: f32(5.0) // m/s, fleeing
+FISH_FLEE_DIST   : f32 = f32(5)
+FISH_CRUISE      : f32 = f32(1.4) // m/s
+FISH_BOLT        : f32 = f32(5.0) // m/s, fleeing
 
 Fish_School :: struct {
     alive:     bool,

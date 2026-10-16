@@ -219,7 +219,7 @@ fox_add :: proc(f: ^Ent_Frame, e: Entity, t: f32) {
 
 // ─── Eagles in thermals ─────────────────────────────────────────────────────
 
-BIRD_SPEED       :: f32(10.0)
+BIRD_SPEED       : f32 = f32(10.0)
 BIRD_CULL_RADIUS :: f32(420.0)
 
 // Pose an eagle: soaring with a slight dihedral, the odd burst of flaps.
@@ -319,11 +319,12 @@ anim_step :: proc(a: ^Player_Anim, v: [3]f32, look_yaw: f32, sword, grounded: bo
         target := -math.to_radians(look_yaw)
         d := math.mod(target - a.body_yaw + 3 * math.PI, 2 * math.PI) - math.PI
         a.body_yaw += d * min(dt * 14, 1)
-    } else if sp > 0.6 {
+    } else if sp > 0.6 * world_scale {
         target := math.atan2(-v.x, v.z)
         d := math.mod(target - a.body_yaw + 3 * math.PI, 2 * math.PI) - math.PI
         a.body_yaw += d * min(dt * 10, 1)
     }
+    sp /= world_scale // strides as long as the legs
     a.walk_phase += sp * dt * 2.4
     a.amp += (clamp(sp / 5, 0, 1.3) - a.amp) * min(dt * 8, 1)
     air: f32 = grounded ? 0 : 1
@@ -336,6 +337,7 @@ player_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     if gs.glider.deployed || gs.glider.chase_dist < 1.0 || !ent_begin(f) { return }
     feet := gs.camera.pos - [3]f32{0, PLAYER_EYE_HEIGHT, 0}
     feet.y += gs.camera.step_visual_offset
+    ent_scale_about(f, feet, world_scale)
     sword := gs.combat.sword
     hips := humanoid_add_parts(f, feet, a, gs.camera.yaw, gs.camera.pitch, PLAYER_TINT, right_arm = !sword)
     if sword {

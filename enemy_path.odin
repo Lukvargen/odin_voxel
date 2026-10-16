@@ -14,7 +14,7 @@ PATH_MAX        :: 48   // waypoints kept
 PATH_EXPAND_MAX :: 700  // search effort per path
 PATH_RADIUS     :: 30   // the search stays this close to the enemy
 PATH_STEP_UP    :: 1
-PATH_DROP       :: 3
+PATH_DROP       :: 4
 PATHS_PER_FRAME :: 2    // all enemies together
 
 @(private="file")
@@ -151,12 +151,12 @@ find_path :: proc(w: ^World, from, to: [3]int, clear: int, out: ^[PATH_MAX][3]i3
 enemy_sees_player :: proc(sim: ^Sim, e: ^Enemy) -> bool {
     eye := e.pos + {0, ENEMY_SPECS[e.kind].height * 0.9, 0}
     head := sim.players[e.prey].pos
-    for target in ([2][3]f32{head, head - {0, 0.7, 0}}) {
+    for target in ([2][3]f32{head, head - {0, 0.7 * world_scale, 0}}) {
         d := target - eye
         l := la.length(d)
-        if l < 0.5 { return true }
-        if l > 64 { return false }
-        _, _, hit := raycast_voxel(sim.world, eye, d / l, l - 0.3)
+        if l < 0.5 * world_scale { return true }
+        if l > 64 * world_scale { return false }
+        _, _, hit := raycast_voxel(sim.world, eye, d / l, l - 0.3 * world_scale)
         if !hit { return true }
     }
     return false
@@ -174,14 +174,14 @@ enemy_steer :: proc(sim: ^Sim, e: ^Enemy, goal: [3]f32, dt: f32) -> [3]f32 {
     sp := ENEMY_SPECS[e.kind]
     e.repath -= dt
     // Stuck: hardly moved for a while while trying to — plan again now.
-    if la.length((e.pos - e.stuck_pos).xz) > 0.6 {
+    if la.length((e.pos - e.stuck_pos).xz) > 0.6 * world_scale {
         e.stuck_pos, e.stuck_t = e.pos, 0
     } else {
         e.stuck_t += dt
         if e.stuck_t > 1.2 { e.repath, e.stuck_t = 0, 0 }
     }
     to_goal := goal - e.pos
-    if la.length(to_goal.xz) < 2.5 && abs(to_goal.y) < 1.2 && e.stuck_t < 0.5 { return goal }
+    if la.length(to_goal.xz) < 2.5 * world_scale && abs(to_goal.y) < 1.2 * world_scale && e.stuck_t < 0.5 { return goal }
     if e.repath <= 0 && paths_left > 0 {
         paths_left -= 1
         e.repath = 0.6 + 0.3 * f32(e.age - math.floor(e.age)) // spread them out

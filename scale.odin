@@ -1,17 +1,17 @@
 package main
 
-// Prototype (scale=S on the command line): the player and the monsters S
-// times their size against the same voxels, as if the world were built
-// from blocks 1/S as big. Lengths, speeds and accelerations all scale by S
-// and times stay, so everything moves the same, just bigger: a jump is S
-// times as high and takes as long. The terrain doesn't change, so hills,
-// trees and caves look 1/S as big too; only for trying how a player some
-// three blocks tall feels. Playing alone only: the network doesn't carry it.
+// The player, the monsters and the wildlife are designed in metres
+// (design blocks) and live in a world built TERRAIN_SCALE blocks to the
+// metre (terrain.odin): world_scale_apply turns every length, speed and
+// acceleration that moves them into world blocks, at startup. Times stay,
+// so everything moves as designed, just bigger: the player is some three
+// blocks tall. Bodies are posed at their design size and drawn scaled
+// (ent_scale_about). `scale=S` on the command line tries another size.
 
-world_scale: f32 = 1
+world_scale: f32 = 1 // world blocks per design block, once applied
 
 world_scale_apply :: proc(s: f32) {
-    if s <= 0 || s == 1 { return }
+    if s <= 0 || world_scale != 1 { return } // once
     world_scale = s
     // Moving about (camera.odin).
     PLAYER_EYE_HEIGHT *= s
@@ -66,6 +66,18 @@ world_scale_apply :: proc(s: f32) {
     SLIME_FORGET *= s
     SLIME_LEAP_UP *= s
     SLIME_LEAP_MAX *= s
+    // Wildlife (entities.odin, creatures.odin, sea.odin).
+    FOX_WALK_SPEED *= s
+    FOX_FLEE_SPEED *= s
+    FOX_FLEE_DIST *= s
+    ENTITY_GRAVITY *= s
+    ENTITY_MAX_FALL *= s
+    BIRD_SPEED *= s
+    FISH_SPAWN_MIN *= s
+    FISH_SPAWN_MAX *= s
+    FISH_FLEE_DIST *= s
+    FISH_CRUISE *= s
+    FISH_BOLT *= s
     for &k in SLIME_KINDS {
         k.width *= s
         k.hop_speed *= s

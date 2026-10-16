@@ -23,7 +23,7 @@ import la "core:math/linalg"
 
 MAX_SLIMES        :: 40
 
-SLIME_RANGE       :: f32(48)  // keep SLIME_POPULATION slimes within this...
+SLIME_RANGE       :: f32(64)  // keep SLIME_POPULATION slimes within this...
 SLIME_POPULATION  :: 6
 SLIME_SPAWN_EVERY :: f32(3)   // ...spawning one this often while short
 SLIME_DESPAWN     :: f32(90)  // and forget the ones left this far behind
@@ -188,7 +188,7 @@ slimes_update :: proc(sim: ^Sim, dt: f32) {
             d := (b.pos - a.pos).xz
             l := la.length(d)
             min_d := (slime_radius(a.size) + slime_radius(b.size)) * 0.85
-            if l < min_d && abs(b.pos.y - a.pos.y) < 1.2 {
+            if l < min_d && abs(b.pos.y - a.pos.y) < 1.2 * world_scale {
                 n := l > 0.001 ? d / l : [2]f32{1, 0}
                 push := (min_d - l) * 30 * dt
                 a.vel.xz -= n * push
@@ -203,7 +203,7 @@ slimes_update :: proc(sim: ^Sim, dt: f32) {
 slime_try_spawn :: proc(sim: ^Sim, feet: [3]f32) {
     for _ in 0 ..< 8 {
         a := rand.float32_range(0, 2 * math.PI)
-        r := rand.float32_range(16, 36)
+        r := rand.float32_range(16, 36) * world_scale
         x := feet.x + math.cos(a) * r
         z := feet.z + math.sin(a) * r
         ix, iz := int(math.floor(x)), int(math.floor(z))
@@ -212,7 +212,7 @@ slime_try_spawn :: proc(sim: ^Sim, feet: [3]f32) {
         if !solid_at(sim.world, ix, ground, iz) || solid_at(sim.world, ix, ground + 1, iz) { continue } // not loaded, or built over
         roll := rand.float32()
         size := roll < 0.45 ? Slime_Size.Big : (roll < 0.85 ? .Medium : .Small)
-        slime_spawn(&sim.slimes, size, {x, f32(ground) + 1.5, z}, {}, slime_color_for(terrain_at(ix, iz).biome))
+        slime_spawn(&sim.slimes, size, {x, f32(ground) + 1.5 * world_scale, z}, {}, slime_color_for(terrain_at(ix, iz).biome))
         return
     }
 }
@@ -240,7 +240,7 @@ slime_think :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
         } else if sl.on_ground && sl.timer <= 0 {
             a := rand.float32_range(0, 2 * math.PI)
             w := [2]f32{math.cos(a), math.sin(a)}
-            sl.vel = {w.x * 2, kind.hop_up * 0.7, w.y * 2}
+            sl.vel = {w.x * 2 * world_scale, kind.hop_up * 0.7, w.y * 2 * world_scale}
             turn_towards(&sl.yaw, w, 10)
             sl.timer = rand.float32_range(1.2, 3)
             sim_emit(sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 0})
@@ -251,7 +251,7 @@ slime_think :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
         if dist > SLIME_FORGET || !hunting {
             sl.state = .Idle
         } else if sl.on_ground && sl.timer <= 0 {
-            if dist < kind.leap_range && abs(to_player.y) < 3 {
+            if dist < kind.leap_range && abs(to_player.y) < 3 * world_scale {
                 sl.state, sl.timer = .Windup, kind.windup
             } else {
                 j := rand.float32_range(-0.35, 0.35)
@@ -283,10 +283,10 @@ slime_think :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
         if sl.on_ground && sl.timer < -0.1 {
             sl.state, sl.timer = .Chase, 0.9 // sitting a moment after: the opening
         } else if slime_touches_player(sl, p) {
-            knock := [3]f32{dir.x * 9, 5, dir.y * 9}
+            knock := [3]f32{dir.x * 9, 5, dir.y * 9} * world_scale
             if r := player_hurt(sim, sl.prey, kind.damage, knock, slime_center(sl)); r != .Missed {
-                if r == .Parried { sl.state, sl.timer = .Stunned, 1.2; sl.vel = {-dir.x * 7, 6, -dir.y * 7}; sl.flash = 1; return }
-                sl.vel = {-dir.x * 3, 4, -dir.y * 3}
+                if r == .Parried { sl.state, sl.timer = .Stunned, 1.2; sl.vel = [3]f32{-dir.x * 7, 6, -dir.y * 7} * world_scale; sl.flash = 1; return }
+                sl.vel = [3]f32{-dir.x * 3, 4, -dir.y * 3} * world_scale
                 sl.state, sl.timer = .Chase, 1
             }
         }
@@ -319,9 +319,9 @@ slime_move :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
     in_water := block_is_watery(u8(get_voxel(sim.world, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z)))))
     if in_water {
         sl.vel *= max(1 - 2 * dt, 0)
-        sl.vel.y += 6 * dt // they float
+        sl.vel.y += 6 * world_scale * dt // they float
     } else if !sl.on_ground {
-        sl.vel.y = max(sl.vel.y - SLIME_GRAVITY * dt, -40)
+        sl.vel.y = max(sl.vel.y - SLIME_GRAVITY * dt, -40 * world_scale)
     }
     if sl.on_ground {
         sl.vel.xz *= math.exp(-10 * dt)
@@ -352,8 +352,8 @@ slime_move :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
     if box_solid(sim.world, p, hw, h) { p.y = math.floor(p.y) + 1 }
     sl.pos = p
     sl.on_ground = sl.vel.y <= 0.01 && box_solid(sim.world, p - {0, 0.03, 0}, hw, h)
-    if sl.on_ground && !was_on_ground && falling > 3 {
-        sl.squash_vel += clamp(falling * 0.6, 0, 10) // splat
+    if sl.on_ground && !was_on_ground && falling > 3 * world_scale {
+        sl.squash_vel += clamp(falling / world_scale * 0.6, 0, 10) // splat
     }
 }
 

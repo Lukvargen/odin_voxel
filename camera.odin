@@ -361,14 +361,14 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
 // rise along the wall and, once the feet clear the top, step onto it.
 swim_climb :: proc(gs: ^Game_State, cam: ^Camera, facing: [3]f32) -> bool {
     f := la.normalize([3]f32{facing.x, 0, facing.z})
-    ahead := cam.pos + f * (PLAYER_HALF_W + 0.4)
+    ahead := cam.pos + f * (PLAYER_HALF_W + 0.4 * world_scale)
     ax, az := int(math.floor(ahead.x)), int(math.floor(ahead.z))
     feet := cam.pos.y - PLAYER_EYE_HEIGHT
     y0 := int(math.floor(feet + 0.05))
     top := 0
     found := false
     for y in y0 ..= int(math.floor(feet + CLIMB_REACH)) {
-        if solid_at(gs, ax, y, az) && !solid_at(gs, ax, y + 1, az) && !solid_at(gs, ax, y + 2, az) {
+        if solid_at(gs, ax, y, az) && !solid_at(gs, ax, y + 1, az) && !solid_at(gs, ax, y + 2, az) && !solid_at(gs, ax, y + 3, az) {
             top, found = y + 1, true
             break
         }
@@ -376,10 +376,10 @@ swim_climb :: proc(gs: ^Game_State, cam: ^Camera, facing: [3]f32) -> bool {
     if !found || f32(top) - feet > CLIMB_REACH { return false }
     if feet < f32(top) + 0.05 {
         cam.velocity.y = CLIMB_SPEED
-        cam.velocity.x, cam.velocity.z = f.x * 1.5, f.z * 1.5
+        cam.velocity.x, cam.velocity.z = f.x * 1.5 * world_scale, f.z * 1.5 * world_scale
     } else {
-        cam.velocity.y = max(cam.velocity.y, 1)
-        cam.velocity.x, cam.velocity.z = f.x * 3, f.z * 3
+        cam.velocity.y = max(cam.velocity.y, world_scale)
+        cam.velocity.x, cam.velocity.z = f.x * 3 * world_scale, f.z * 3 * world_scale
     }
     return true
 }
