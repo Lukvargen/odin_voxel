@@ -159,21 +159,42 @@ server_greet :: proc(srv: ^Server, peer: ^enet.Peer, data: []u8) {
 }
 
 // Where a new player appears: a few steps in front of the host, facing it,
-// so friends arrive together; zero (the client's own start) if there is no
-// open ground there.
+// so friends arrive together; on the ground below a player in the air; at
+// the world's spawn if nobody's about.
 @(private="file")
 arrival_point :: proc(srv: ^Server) -> (pos: [3]f32, yaw: f32) {
-    host := &srv.sim.players[srv.local_player]
-    if !host.active { return }
-    at := player_feet(host) + player_flat_forward(host) * 4
-    x, z := int(math.floor(at.x)), int(math.floor(at.z))
-    // The ground near the host's height, with room to stand.
-    for y := int(at.y) + 3; y > int(at.y) - 6; y -= 1 {
-        if solid_at(srv.sim.world, x, y - 1, z) && !solid_at(srv.sim.world, x, y, z) && !solid_at(srv.sim.world, x, y + 1, z) {
-            return {f32(x) + 0.5, f32(y) + PLAYER_EYE_HEIGHT, f32(z) + 0.5}, host.yaw + 180
+    w := srv.sim.world
+    // Room to stand at (x, z), dry, searching down from y to y_lo: the eye there.
+    stand :: proc(w: ^World, x, z, y, y_lo: int) -> (eye: [3]f32, ok: bool) {
+        for yy := y; yy > y_lo; yy -= 1 {
+            if solid_at(w, x, yy - 1, z) && !solid_at(w, x, yy, z) && !solid_at(w, x, yy + 1, z) && !block_is_watery(u8(get_voxel(w, x, yy, z))) {
+                return {f32(x) + 0.5, f32(yy) + PLAYER_EYE_HEIGHT, f32(z) + 0.5}, true
+            }
+        }
+        return
+    }
+    // Near whoever's here: the host first (it's their world), else anyone.
+    for i in 0 ..< MAX_PLAYERS {
+        p := &srv.sim.players[(srv.local_player + i) % MAX_PLAYERS]
+        if !p.active { continue }
+        feet := player_feet(p)
+        // A few steps in front, near its height, facing it...
+        at := feet + player_flat_forward(p) * 4
+        if eye, ok := stand(w, int(math.floor(at.x)), int(math.floor(at.z)), int(at.y) + 3, int(at.y) - 6); ok {
+            return eye, p.yaw + 180
+        }
+        // ...or, flying or gliding, on the ground below if it's dry land
+        // (the first thing under it: not a cave further down).
+        bx, bz := int(math.floor(feet.x)) + 1, int(math.floor(feet.z))
+        for y := int(feet.y); y > int(feet.y) - 128; y -= 1 {
+            b := u8(get_voxel(w, bx, y - 1, bz))
+            if !block_solid(b) && !block_is_watery(b) { continue }
+            if eye, ok := stand(w, bx, bz, y, y - 1); ok { return eye, p.yaw }
+            break // water, or no room: not here
         }
     }
-    return
+    // Nobody about: the world's spawn.
+    return find_spawn(), 0
 }
 
 // A remote player left (or timed out): its slot empties.
