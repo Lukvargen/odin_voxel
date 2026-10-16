@@ -8,7 +8,7 @@ import "core:strings"
 import "core:time"
 
 // Player edits are kept by saving every edited column to its own file under
-// SAVE_DIR. Unedited columns are never saved: generation is deterministic, so
+// save_dir. Unedited columns are never saved: generation is deterministic, so
 // they are simply regenerated. A column with a save file is loaded from it
 // instead (worker side), so edits survive both unloading and restarts.
 //
@@ -16,20 +16,21 @@ import "core:time"
 // little endian) covering all CHUNKS_H chunks in order, 512 voxels each.
 // Light is not saved; it is recomputed on load.
 
-SAVE_DIR          :: "saves/world"
+// saves/<world name> (the world= argument); set before the first load.
+save_dir          := "saves/world"
 SAVE_MAGIC        :: "VXC2" // VXC1 saves predate biome terrain and are ignored
 AUTOSAVE_INTERVAL :: 30 * time.Second
 COLUMN_VOXELS     :: CHUNKS_H * VOXELS_PER_BRICK
 
 @(private="file")
 column_path :: proc(buf: []u8, key: [2]int) -> string {
-    return fmt.bprintf(buf, "%s/c.%d.%d.bin", SAVE_DIR, key.x, key.y)
+    return fmt.bprintf(buf, "%s/c.%d.%d.bin", save_dir, key.x, key.y)
 }
 
 // Note which columns have save files. Call before the first enqueue.
 save_init :: proc(gs: ^Game_State) {
     gs.save_enabled = true
-    files, err := os.read_all_directory_by_path(SAVE_DIR, context.temp_allocator)
+    files, err := os.read_all_directory_by_path(save_dir, context.temp_allocator)
     if err != nil { return } // no saves yet
     for f in files {
         // c.<x>.<z>.bin
@@ -40,7 +41,7 @@ save_init :: proc(gs: ^Game_State) {
         if okx && okz { gs.saved_columns[{x, z}] = true }
     }
     if len(gs.saved_columns) > 0 {
-        fmt.printf("Save: %d edited columns in %s\n", len(gs.saved_columns), SAVE_DIR)
+        fmt.printf("Save: %d edited columns in %s\n", len(gs.saved_columns), save_dir)
     }
 }
 
@@ -71,7 +72,7 @@ save_column :: proc(gs: ^Game_State, key: [2]int, col: ^Column) {
     }
     flush(&out, run_v, run_n)
 
-    _ = os.make_directory_all(SAVE_DIR)
+    _ = os.make_directory_all(save_dir)
     buf: [256]u8
     if err := os.write_entire_file(column_path(buf[:], key), out[:]); err != nil {
         fmt.eprintln("Save: failed to write column", key, err)

@@ -197,6 +197,16 @@ main :: proc() {
             case: bench_shot_dir = a
             }
         }
+    } else {
+        // [world=<name>]: play the world saved in saves/<name> (default "world").
+        for a in os.args[1:] {
+            switch {
+            case strings.has_prefix(a, "world="):
+                save_dir = strings.concatenate({"saves/", a[6:]})
+            case:
+                fmt.eprintln("Unknown argument:", a)
+            }
+        }
     }
     gs.camera.yaw     = 0
     gs.camera.pitch   = -20
