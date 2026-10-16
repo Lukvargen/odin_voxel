@@ -437,14 +437,14 @@ main :: proc() {
 
         // A solid hit freezes the world for a few frames (hit stop); the
         // mouse still looks around.
-        world_dt := combat_world_dt(&gs, dt)
+        fx_dt := combat_fx_dt(&gs, dt)
         combat_in := Combat_Input{
             attack = gs.left_pressed, attack_held = gs.left_held, special = gs.right_pressed, dodge = dodge_pressed,
             block = bool(kb[SDL.Scancode.F]),
             move = {f32(int(move_right)) - f32(int(move_left)), f32(int(move_fwd)) - f32(int(move_back))},
         }
         if !gs.mouse_locked { combat_in = {} }
-        combat_pre_update(&gs, combat_in, world_dt)
+        combat_pre_update(&gs, combat_in, dt)
 
         if gs.mouse_locked {
             if gs.glider.deployed {
@@ -452,17 +452,17 @@ main :: proc() {
                 glider_update(&gs, -mouse_dx, mouse_dy, dt,
                     move_fwd, move_back, move_left, move_right, ctrl_held)
             } else {
-                camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, world_dt,
+                camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, dt,
                     move_fwd, move_back, move_left, move_right, gs.jump_pressed,
                     sprint, sneak, ultra)
             }
         }
-        combat_post_update(&gs, world_dt)
-        slimes_update(&gs, world_dt)
-        enemies_update(&gs, world_dt)
-        fx_update(&gs, world_dt)
+        combat_post_update(&gs, dt)
+        slimes_update(&gs, dt)
+        enemies_update(&gs, dt)
+        fx_update(&gs, fx_dt)
         glider_view_update(&gs, dt)
-        combat_view_update(&gs, dt, world_dt)
+        combat_view_update(&gs, dt)
 
         // Underground-ness (0 surface .. 1 deep below): drives cave darkness
         // and cave fog in the shaders. Smoothed ~0.5 s so moving through a
@@ -493,7 +493,7 @@ main :: proc() {
         build_update(&gs, dt)
 
         flush_gpu_uploads(&gs)
-        entities_update(&gs, world_dt)
+        entities_update(&gs, fx_dt)
         audio_update(&gs, dt)
         gpu_render(&gs)
         ui_build_and_render(&gs, dt)

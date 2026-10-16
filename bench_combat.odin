@@ -74,16 +74,16 @@ bench_combat_run :: proc(gs: ^Game_State) {
         }
         if f >= 80 && f < 86 { move_left = true }
 
-        world_dt := combat_world_dt(gs, dt)
-        combat_pre_update(gs, in_, world_dt)
-        camera_update(cam, gs, 0, 0, world_dt, false, false, move_left, false, jump, false, false, false)
-        combat_post_update(gs, world_dt)
-        slimes_update(gs, world_dt)
-        fx_update(gs, world_dt)
+        fx_dt := combat_fx_dt(gs, dt)
+        combat_pre_update(gs, in_, dt)
+        camera_update(cam, gs, 0, 0, dt, false, false, move_left, false, jump, false, false, false)
+        combat_post_update(gs, dt)
+        slimes_update(gs, dt)
+        fx_update(gs, fx_dt)
         glider_view_update(gs, dt)
-        combat_view_update(gs, dt, world_dt)
+        combat_view_update(gs, dt)
         flush_gpu_uploads(gs)
-        entities_update(gs, world_dt)
+        entities_update(gs, fx_dt)
         if fence := gpu_render(gs, want_fence = true); fence != nil {
             _ = SDL.WaitForGPUFences(gs.gpu_device, true, &fence, 1)
             SDL.ReleaseGPUFence(gs.gpu_device, fence)
@@ -177,13 +177,13 @@ bench_fight_run :: proc(gs: ^Game_State) {
                 cam.yaw = math.to_degrees(math.atan2(to.x, to.z))
                 in_.attack = f % 18 == 0
             }
-            world_dt := combat_world_dt(gs, dt)
-            combat_pre_update(gs, in_, world_dt)
-            camera_update(cam, gs, 0, 0, world_dt, false, false, false, false, false, false, false, false)
-            combat_post_update(gs, world_dt)
-            enemies_update(gs, world_dt)
-            fx_update(gs, world_dt)
-            combat_view_update(gs, dt, world_dt)
+            fx_dt := combat_fx_dt(gs, dt)
+            combat_pre_update(gs, in_, dt)
+            camera_update(cam, gs, 0, 0, dt, false, false, false, false, false, false, false, false)
+            combat_post_update(gs, dt)
+            enemies_update(gs, dt)
+            fx_update(gs, fx_dt)
+            combat_view_update(gs, dt)
             if e.state != last {
                 fmt.printf("  %5.2fs %v  dist %.1f  player hp %.0f  enemy hp %.0f\n", t, e.state, la.length((e.pos - cam.pos).xz), gs.combat.hp, e.hp)
                 last = e.state

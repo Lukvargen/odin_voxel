@@ -186,9 +186,9 @@ bench_enemies_run :: proc(gs: ^Game_State) {
     gs.combat.blocking, gs.combat.guard = true, 1
     for view in 0 ..< 2 {
         gs.glider.third_person = view == 1
-        for _ in 0 ..< 30 { glider_view_update(gs, 1.0 / 60.0); combat_view_update(gs, 1.0 / 60.0, 0) }
+        for _ in 0 ..< 30 { glider_view_update(gs, 1.0 / 60.0); combat_view_update(gs, 1.0 / 60.0) }
         gs.combat.guard = 1
-        combat_view_update(gs, 0, 0)
+        combat_view_update(gs, 0)
         bench_measure(gs)
         bench_screenshot(gs, fmt.tprintf("%s/guard_%d.bmp", bench_shot_dir, view))
     }

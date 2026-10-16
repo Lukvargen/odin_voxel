@@ -27,7 +27,7 @@ import la "core:math/linalg"
 // A hit stops the sword in what it hit for a few hundredths of a second
 // while the slime shudders in place (hit stop), and the rest of the world
 // carries on, so it reads as weight, not lag; kills and heavy hits also slow
-// the world a moment, easing back (combat_world_dt). Hits shake
+// the world a moment, easing back (combat_dt). Hits shake
 // the view, knock slimes about, flash and squash them, splatter goo and pop a
 // damage number. Every hit adds to a counter that raises damage, as does
 // hitting while moving fast.
@@ -208,7 +208,7 @@ combat_toggle_sword :: proc(gs: ^Game_State) {
 // The world's dt this frame: slowed for a moment after a kill or a heavy
 // hit, easing back to full speed. Never stopped: a full stop with the view
 // still turning reads as the game hitching.
-combat_world_dt :: proc(gs: ^Game_State, dt: f32) -> f32 {
+combat_fx_dt :: proc(gs: ^Game_State, dt: f32) -> f32 {
     c := &gs.combat
     c.hitstop = max(c.hitstop - dt, 0)
     if c.slowmo <= 0 { return dt }
@@ -636,7 +636,7 @@ combat_hurt :: proc(gs: ^Game_State, damage: f32, knock: [3]f32, from: [3]f32 = 
 
 // Per frame in real time: feedback that keeps fading during hit stop, the
 // dodge's dip, and this frame's sword pose. After glider_view_update.
-combat_view_update :: proc(gs: ^Game_State, dt, world_dt: f32) {
+combat_view_update :: proc(gs: ^Game_State, dt: f32) {
     c := &gs.combat
     cam := &gs.camera
     c.hurt_flash = max(c.hurt_flash - 2.5 * dt, 0)
