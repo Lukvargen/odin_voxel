@@ -38,9 +38,6 @@ session_host :: proc(gs: ^Game_State, port: int) -> bool {
 // Close our server to others; whoever joined is let go.
 session_stop_hosting :: proc(gs: ^Game_State) {
     if !session_hosting(gs) { return }
-    for slot in 0 ..< MAX_PLAYERS {
-        if slot != gs.server.local_player { gs.players[slot].active = false }
-    }
     server_shutdown(&gs.server)
     for &o in gs.net.others { o.active = false }
 }
@@ -61,6 +58,7 @@ session_join :: proc(gs: ^Game_State, address: string) -> bool {
     gs.net.sent_name = {}
     gs.net.names = {}
     gs.net.restored, gs.net.sent_kept = false, {}
+    gs.net.no_build = false
     if !client_join(gs, address) {
         server_greet_local(&gs.server, client_name(gs), resume = false) // still ours, then
         return false
@@ -79,6 +77,7 @@ session_leave :: proc(gs: ^Game_State) {
     n.sent_name = {}
     n.names = {}
     n.restored, n.sent_kept = false, {}
+    n.no_build = false
     for &o in n.others { o.active = false }
     clear(&n.out.reliable)
     clear(&n.out.unreliable)

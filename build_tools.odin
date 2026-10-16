@@ -446,6 +446,10 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
     r := r
     b := &gs.build
     if !merge { b.stroke = false }
+    if !client_may_build(gs) {
+        ui_toast(gs, "The host has turned off building for visitors", 1.5)
+        return 0
+    }
     if region_volume(r) > MAX_EDIT_VOXELS {
         ui_toast(gs, "Too big: make it smaller")
         return 0
@@ -564,6 +568,10 @@ trim_undo :: proc(b: ^Build) {
 @(private="file")
 build_undo :: proc(gs: ^Game_State, from, to: ^[dynamic]Edit_Record, verb: string) {
     b := &gs.build
+    if !client_may_build(gs) {
+        ui_toast(gs, "The host has turned off building for visitors", 1.5)
+        return
+    }
     if len(from) == 0 {
         ui_toast(gs, fmt.tprintf("Nothing to %s", verb == "Undo" ? "undo" : "redo"), 0.8)
         return

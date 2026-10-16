@@ -54,6 +54,7 @@ Client_Net :: struct {
     // What we carry (Player_Kept), as last told the server: only once it
     // told us our character here (Restore), so it's never the last world's.
     restored:     bool,
+    no_build:     bool, // the host doesn't let visitors change blocks (Msg_Rules)
     sent_kept:    Player_Kept,
     kept_sent_at: time.Tick,
     names:      [MAX_PLAYERS]Msg_Text,    // what the players are called, as the server says
@@ -88,6 +89,10 @@ OTHER_TIMEOUT :: 3 // seconds without word before another player is no longer dr
 JOIN_TIMEOUT  :: 10 // seconds to wait for a server's welcome before giving up
 
 client_joined :: proc(gs: ^Game_State) -> bool { return gs.net.remote }
+
+// Whether we may change blocks: always in our own world; on someone
+// else's unless the host turned that off.
+client_may_build :: proc(gs: ^Game_State) -> bool { return !client_joined(gs) || !gs.net.no_build }
 
 // Connect to a server elsewhere ("host[:port]"). ENet must be initialized.
 client_join :: proc(gs: ^Game_State, address: string) -> bool {
@@ -309,7 +314,14 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             ui_toast(gs, fmt.tprintf("Joined as player %d", w.slot), 3)
         case .Refuse:
             why := msg_get(&r, Refuse_Reason) or_break
-            gs.net.refused = why == .Full ? "The server is full" : "The server runs a different version of the game"
+            switch why {
+            case .Full:    gs.net.refused = "The server is full"
+            case .Version: gs.net.refused = "The server runs a different version of the game"
+            case .Kicked:  gs.net.refused = "The host removed you from the game"
+            }
+        case .Rules:
+            m := msg_get(&r, Msg_Rules) or_break
+            if client_joined(gs) { gs.net.no_build = !m.guests_build }
         case .Voxels:
             m := msg_get(&r, Msg_Voxels) or_break
             changed := make([dynamic][3]int, 0, VOXEL_BATCH, context.temp_allocator)

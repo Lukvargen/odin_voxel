@@ -1768,8 +1768,8 @@ menu_multiplayer :: proc(gs: ^Game_State) {
         } else {
             text(fmt.tprintf("Not connected to %s.", address), COLOR_BAD, 15)
         }
+        if n.no_build { text("The host has turned off building for visitors.", COLOR_TEXT_DIM, 13) }
         if button(clay.ID("Leave"), "Leave: back to your own world") { session_leave(gs) }
-        text("Slimes and enemies don't reach other players yet.", COLOR_TEXT_FAINT, 12)
         return
     }
 
@@ -1798,11 +1798,32 @@ menu_multiplayer :: proc(gs: ^Game_State) {
             }
         }
     }
-    if hosting {
+    if session_hosting(gs) { // (not `hosting`: Close may have just shut it)
         joined := 0
         for p, slot in gs.players { if p.active && slot != gs.server.local_player { joined += 1 } }
         text(joined == 0 ? "Open. Nobody has joined yet." : fmt.tprintf("Open. %d player%s joined.", joined, joined == 1 ? "" : "s"), COLOR_ACCENT, 13)
         text(fmt.tprintf("Friends join with your public IP address: forward UDP port %d on your router to this PC.", int(gs.server.host.address.port)), COLOR_TEXT_FAINT, 12)
+        if clay.UI()(setting_row()) {
+            row_label("Visitors build")
+            build := gs.server.guests_build
+            toggle("GuestBuild", &build)
+            server_set_guests_build(&gs.server, build)
+        }
+        // Whoever's here, each with a way to send them off.
+        for p, slot in gs.players {
+            if !p.active || slot == gs.server.local_player { continue }
+            if clay.UI(clay.ID("Visitor", u32(slot)))(setting_row()) {
+                if clay.UI()({layout = {sizing = {clay.SizingFixed(10), clay.SizingFixed(10)}},
+                    backgroundColor = {player_tint(slot).r * 255, player_tint(slot).g * 255, player_tint(slot).b * 255, 255}, cornerRadius = clay.CornerRadiusAll(5)}) {}
+                text(client_player_name(gs, slot), COLOR_TEXT, 15)
+                spacer()
+                if gs.server.kicked[slot] {
+                    text("leaving...", COLOR_TEXT_DIM, 13)
+                } else if button(clay.ID("Kick", u32(slot)), "Remove", width = 100, danger = true) {
+                    server_kick(&gs.server, slot)
+                }
+            }
+        }
     } else {
         text("Lets friends join this world.", COLOR_TEXT_FAINT, 12)
     }

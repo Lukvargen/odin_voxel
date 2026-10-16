@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), size_of(Msg_Rules), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -67,6 +67,7 @@ Msg_Kind :: enum u8 {
     Player_Name,  // Msg_Player_Name: what a player is called
     Restore,      // Msg_Restore: your character here: carry on as you were, or start fresh
     Chat_Line,    // Msg_Chat_Line: a chat line, or the server's news (someone joined, left)
+    Rules,        // Msg_Rules: what the host lets visitors do
 }
 
 TEXT_MAX    :: 96   // bytes of a chat line
@@ -83,6 +84,10 @@ Msg_Restore :: struct {
     known:  bool, // been here before: record is how they left; else start fresh
     move:   bool, // to record.pos (not when told where to start: at=)
     record: Player_Record,
+}
+
+Msg_Rules :: struct {
+    guests_build: bool, // players other than the host may change blocks
 }
 
 Msg_Player_Name :: struct {
@@ -160,7 +165,7 @@ msg_get_bytes :: proc(r: ^Msg_Reader, n: int) -> (b: []u8, ok: bool) {
     return b, true
 }
 
-Refuse_Reason :: enum u8 { Version, Full }
+Refuse_Reason :: enum u8 { Version, Full, Kicked }
 
 Msg_Welcome :: struct {
     slot: u8,

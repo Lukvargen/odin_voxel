@@ -40,6 +40,8 @@ Server :: struct {
     away:         map[[2]int]^Column, // columns edited this step that aren't loaded: saved, then freed
     names:        [MAX_PLAYERS]Msg_Text, // what each player is called (empty: not said yet)
     started:      time.Tick, // Msg_Clock.time counts from here
+    guests_build: bool,      // the other players may change blocks (the host always can)
+    kicked:       [MAX_PLAYERS]bool, // sent away by the host, on its way out
     // Characters, by name (player_save.odin): those seen this session, and
     // what each slot's client last said it carries.
     records:      map[string]Player_Record,
@@ -54,7 +56,7 @@ Remote :: struct {
 }
 
 server_init :: proc(srv: ^Server, sim: ^Sim, link: ^Loopback) {
-    srv^ = {sim = sim, link = link, local_player = LOCAL_PLAYER, started = time.tick_now()}
+    srv^ = {sim = sim, link = link, local_player = LOCAL_PLAYER, started = time.tick_now(), guests_build = true}
     sim.world = &srv.world
 }
 
@@ -73,7 +75,16 @@ server_host :: proc(srv: ^Server, port: int) -> bool {
 
 server_shutdown :: proc(srv: ^Server) {
     if srv.host == nil { return }
-    for &r in srv.remotes { if r.peer != nil { enet.peer_disconnect(r.peer, 0) } }
+    for &rem, slot in srv.remotes {
+        if rem.peer == nil { continue }
+        player_record_note(srv, slot, write = true)
+        enet.peer_disconnect(rem.peer, 0)
+        rem.peer = nil
+        clear(&rem.out.reliable)
+        clear(&rem.out.unreliable)
+        srv.sim.players[slot].active = false
+        srv.names[slot], srv.kept_known[slot], srv.kicked[slot] = {}, false, false
+    }
     enet.host_flush(srv.host)
     enet.host_destroy(srv.host)
     srv.host = nil
@@ -147,6 +158,7 @@ server_greet :: proc(srv: ^Server, peer: ^enet.Peer, data: []u8) {
         peer.data = rawptr(uintptr(slot + 1))
         pos, yaw := arrival_point(srv)
         outbox_put(&rem.out, .Welcome, Msg_Welcome{slot = u8(slot), pos = pos, yaw = yaw})
+        outbox_put(&rem.out, .Rules, Msg_Rules{guests_build = srv.guests_build})
         server_send_edited(srv, &rem.out)
         for &name, s in srv.names {
             if name.len > 0 { outbox_put(&rem.out, .Player_Name, Msg_Player_Name{slot = u8(s), name = name}) }
@@ -196,6 +208,30 @@ arrival_point :: proc(srv: ^Server) -> (pos: [3]f32, yaw: f32) {
     return find_spawn(), 0
 }
 
+// Whether player `slot` may change blocks: the host always; the others
+// unless the host turned that off.
+@(private="file")
+server_may_build :: proc(srv: ^Server, slot: int) -> bool { return slot == srv.local_player || srv.guests_build }
+
+// The host lets the others build, or not; they're told.
+server_set_guests_build :: proc(srv: ^Server, on: bool) {
+    if srv.guests_build == on { return }
+    srv.guests_build = on
+    server_broadcast(srv, .Rules, Msg_Rules{guests_build = on})
+    server_notice(srv, on ? "Visitors can build again" : "The host turned off building for visitors")
+}
+
+// The host sends a player away: told why, then disconnected (server_drop
+// follows when it's gone).
+server_kick :: proc(srv: ^Server, slot: int) {
+    rem := &srv.remotes[slot]
+    if rem.peer == nil || srv.kicked[slot] { return }
+    srv.kicked[slot] = true
+    outbox_put(&rem.out, .Refuse, Refuse_Reason.Kicked)
+    outbox_send(&rem.out, rem.peer)
+    enet.peer_disconnect_later(rem.peer, 0)
+}
+
 // A remote player left (or timed out): its slot empties.
 @(private="file")
 server_drop :: proc(srv: ^Server, slot: int) {
@@ -208,8 +244,8 @@ server_drop :: proc(srv: ^Server, slot: int) {
     srv.kept_known[slot] = false
     srv.sim.players[slot].active = false
     server_broadcast(srv, .Player_Gone, u8(slot))
-    server_notice(srv, fmt.tprintf("%s left", server_player_name(srv, slot)))
-    srv.names[slot] = {}
+    server_notice(srv, fmt.tprintf(srv.kicked[slot] ? "%s was removed by the host" : "%s left", server_player_name(srv, slot)))
+    srv.names[slot], srv.kicked[slot] = {}, false
     fmt.printf("Host: player %d left\n", slot)
 }
 
@@ -283,11 +319,24 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
         case .Voxels:
             m := msg_get(&r, Msg_Voxels) or_break
             m.count = min(m.count, VOXEL_BATCH)
+            if !server_may_build(srv, player) {
+                // Not theirs to change: what's really there, back to them.
+                for &v in m.items[:m.count] { v.block = u8(get_voxel(srv.sim.world, int(v.pos.x), int(v.pos.y), int(v.pos.z))) }
+                outbox_put(server_outbox(srv, player), .Voxels, m)
+                break
+            }
             for v in m.items[:m.count] { server_write(srv, la.array_cast(v.pos, int), v.block) }
             server_forward(srv, player, .Voxels, m)
         case .Chunk_Voxels:
             m := msg_get(&r, Msg_Chunk_Voxels) or_break
             if chunk_y_index(int(m.key.y)) < 0 { break }
+            if !server_may_build(srv, player) {
+                if c := world_chunk(srv.sim.world, la.array_cast(m.key, int)); c != nil {
+                    for &v, vi in m.voxels { v = chunk_voxel(c, vi) }
+                    outbox_put(server_outbox(srv, player), .Chunk_Voxels, m)
+                }
+                break
+            }
             base := la.array_cast(m.key, int) * CHUNK_VOXELS
             for v, vi in m.voxels {
                 server_write(srv, base + {vi & 7, (vi >> 3) & 7, vi >> 6}, v)
@@ -315,7 +364,7 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
         case .Say:
             m := msg_get(&r, Msg_Text) or_break
             if len(text_of(&m)) > 0 { server_broadcast(srv, .Chat_Line, Msg_Chat_Line{slot = u8(player), line = m}) }
-        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line, .Restore:
+        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line, .Restore, .Rules:
             r.at = len(r.data) // not a connected client's to send: drop the rest
         }
     }
