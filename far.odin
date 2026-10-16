@@ -68,12 +68,14 @@ far_summary_init :: proc(s: ^Far_Summary) {
 far_record :: proc(s: ^Far_Summary, lx, wy, lz: int, b: u8) {
     ci := lx / FAR_CELL + (lz / FAR_CELL) * FAR_TILE_CELLS
     switch b {
-    case u8(Block_Type.Air), u8(Block_Type.Cactus): // cacti are too thin to show
-    case u8(Block_Type.Leaves), u8(Block_Type.Spruce_Leaves), u8(Block_Type.Birch_Leaves), u8(Block_Type.Autumn_Leaves):
+    case u8(Block_Type.Air), u8(Block_Type.Cactus), u8(Block_Type.Tall_Grass), u8(Block_Type.Flower), u8(Block_Type.Fern), u8(Block_Type.Dry_Bush):
+        // cacti and plants are too thin to show
+    case u8(Block_Type.Leaves), u8(Block_Type.Spruce_Leaves), u8(Block_Type.Birch_Leaves), u8(Block_Type.Autumn_Leaves),
+         u8(Block_Type.Acacia_Leaves), u8(Block_Type.Willow_Leaves):
         s.leaves_lo[ci] = min(s.leaves_lo[ci], wy)
         s.leaves_hi[ci] = max(s.leaves_hi[ci], wy)
         s.canopy[ci] = b
-    case u8(Block_Type.Log), u8(Block_Type.Spruce_Log), u8(Block_Type.Birch_Log):
+    case u8(Block_Type.Log), u8(Block_Type.Spruce_Log), u8(Block_Type.Birch_Log), u8(Block_Type.Acacia_Log):
         s.log_lo[ci] = min(s.log_lo[ci], wy)
         s.log_hi[ci] = max(s.log_hi[ci], wy)
     case:
@@ -87,7 +89,7 @@ far_record :: proc(s: ^Far_Summary, lx, wy, lz: int, b: u8) {
     }
 }
 
-// GPU cell: ground top (10 bits, above WORLD_Y_MIN), ground block (5),
+// GPU cell: ground top (10 bits, above WORLD_Y_MIN), ground block (8),
 // canopy bottom above the ground (6), canopy height (6, 0 = no canopy),
 // canopy kind (2: far_canopy_kind).
 far_pack_cell :: proc(s: ^Far_Summary, ci: int) -> u32 {
@@ -109,9 +111,9 @@ far_pack_cell :: proc(s: ^Far_Summary, ci: int) -> u32 {
         has_canopy = false
     }
     enc :: proc(y: int) -> u32 { return u32(clamp(y - WORLD_Y_MIN, 0, 1023)) }
-    cell := enc(g) | u32(gm & 31) << 10
+    cell := enc(g) | u32(gm) << 10
     if has_canopy {
-        cell |= u32(clamp(lo - g, 0, 63)) << 15 | u32(clamp(hi - lo, 1, 63)) << 21 | far_canopy_kind(leaves) << 27
+        cell |= u32(clamp(lo - g, 0, 63)) << 18 | u32(clamp(hi - lo, 1, 63)) << 24 | far_canopy_kind(leaves) << 30
     }
     return cell
 }
@@ -121,7 +123,7 @@ far_pack_cell :: proc(s: ^Far_Summary, ci: int) -> u32 {
 far_canopy_kind :: proc(leaves: u8) -> u32 {
     switch leaves {
     case u8(Block_Type.Spruce_Leaves): return 1
-    case u8(Block_Type.Birch_Leaves):  return 2
+    case u8(Block_Type.Birch_Leaves), u8(Block_Type.Willow_Leaves): return 2
     case u8(Block_Type.Autumn_Leaves): return 3
     }
     return 0
@@ -130,7 +132,7 @@ far_canopy_kind :: proc(leaves: u8) -> u32 {
 // Highest surface of a packed cell (for the tile's max height).
 far_cell_top :: proc(cell: u32) -> int {
     g := int(cell & 0x3FF) + WORLD_Y_MIN
-    if ch := (cell >> 21) & 63; ch != 0 { g = max(g, g + int((cell >> 15) & 63) + int(ch)) }
+    if ch := (cell >> 24) & 63; ch != 0 { g = max(g, g + int((cell >> 18) & 63) + int(ch)) }
     return g
 }
 

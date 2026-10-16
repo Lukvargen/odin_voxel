@@ -612,6 +612,7 @@ biome_name :: proc(b: Biome) -> string {
     case .Snowy:     return "Snowy tundra"
     case .Desert:    return "Desert"
     case .Badlands:  return "Badlands"
+    case .Savanna:   return "Savanna"
     case .Mountains: return "Mountains"
     case .Peaks:     return "Peaks"
     }
@@ -1012,6 +1013,14 @@ icon_colors :: proc(b: Block_Type) -> (top, side: [3]f32) {
     case .Birch_Log:     return {0.80, 0.72, 0.56}, {0.88, 0.87, 0.82}
     case .Birch_Leaves:  return {0.42, 0.62, 0.22}, {0.38, 0.57, 0.20}
     case .Autumn_Leaves: return {0.90, 0.48, 0.14}, {0.80, 0.36, 0.12}
+    case .Acacia_Log:    return {0.72, 0.45, 0.28}, {0.45, 0.40, 0.35}
+    case .Acacia_Leaves: return {0.40, 0.50, 0.18}, {0.36, 0.45, 0.16}
+    case .Willow_Leaves: return {0.48, 0.62, 0.26}, {0.44, 0.58, 0.24}
+    case .Dry_Grass:     return {0.70, 0.64, 0.30}, {0.47, 0.33, 0.22}
+    case .Tall_Grass:    return {0.38, 0.62, 0.24}, {0.32, 0.55, 0.20}
+    case .Fern:          return {0.20, 0.45, 0.18}, {0.18, 0.40, 0.16}
+    case .Flower:        return {0.95, 0.80, 0.25}, {0.30, 0.55, 0.20}
+    case .Dry_Bush:      return {0.55, 0.42, 0.25}, {0.48, 0.36, 0.22}
     case .Snow:       return {0.93, 0.95, 0.98}, {0.90, 0.92, 0.96}
     case .Ice:        return {0.68, 0.80, 0.93}, {0.62, 0.75, 0.90}
     case .Terracotta: return {0.70, 0.40, 0.27}, {0.70, 0.40, 0.27}
@@ -1076,10 +1085,10 @@ draw_block_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, b: Block_Type) {
                 col := fi == 0 ? top : side
                 // Per-block details.
                 #partial switch b {
-                case .Grass:
+                case .Grass, .Dry_Grass:
                     if fi > 0 && j == 0 { col = top }
                     if fi > 0 && j == 1 && icon_hash(i, j, fi) < 0.4 { col = top }
-                case .Log, .Spruce_Log, .Birch_Log:
+                case .Log, .Spruce_Log, .Birch_Log, .Acacia_Log:
                     if fi == 0 && (i == 0 || i == N - 1 || j == 0 || j == N - 1) { col = side }
                     if b == .Birch_Log && fi > 0 && icon_hash(i, j, fi + 11) < 0.22 { col = {0.18, 0.17, 0.16} }
                 case .Terracotta:
@@ -1088,7 +1097,7 @@ draw_block_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, b: Block_Type) {
                     if icon_hash(i, j, fi + 7) < 0.25 {
                         col = b == .Coal_Ore ? {0.15, 0.15, 0.16} : (b == .Iron_Ore ? {0.80, 0.62, 0.48} : {0.95, 0.80, 0.30})
                     }
-                case .Leaves, .Spruce_Leaves, .Birch_Leaves, .Autumn_Leaves:
+                case .Leaves, .Spruce_Leaves, .Birch_Leaves, .Autumn_Leaves, .Acacia_Leaves, .Willow_Leaves:
                     if icon_hash(i, j, fi + 3) < 0.25 { col *= 0.7 }
                     if b == .Autumn_Leaves && icon_hash(i, j, fi + 9) < 0.3 { col = {0.85, 0.22, 0.10} }
                 case .Weathered_Stone:

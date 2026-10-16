@@ -67,6 +67,7 @@ biome_map_color :: proc(b: Biome) -> [3]f32 {
     case .Snowy:     return {0.88, 0.92, 0.95}
     case .Desert:    return {0.9, 0.82, 0.5}
     case .Badlands:  return {0.8, 0.45, 0.25}
+    case .Savanna:   return {0.72, 0.68, 0.32}
     case .Mountains: return {0.5, 0.5, 0.48}
     case .Peaks:     return {0.97, 0.97, 1}
     }

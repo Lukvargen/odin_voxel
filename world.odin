@@ -148,12 +148,26 @@ Block_Type :: enum u8 {
     Birch_Log     = 28,  // white bark, dark marks
     Birch_Leaves  = 29,
     Autumn_Leaves = 30,  // oaks and birches in autumn patches of forest
-    // Must stay below 32: the far LOD stores block ids in 5 bits.
+    // Land plants: drawn like the sea's, crossed cutout planes; you walk
+    // through them, light passes, they go when the ground under them does.
+    Tall_Grass    = 31,
+    Flower        = 32,  // petals coloured per flower (shader)
+    Fern          = 33,
+    Dry_Bush      = 34,
+    Acacia_Log    = 35,
+    Acacia_Leaves = 36,
+    Willow_Leaves = 37,
+    Dry_Grass     = 38,  // savanna ground: grass gone yellow
 }
 
 // Plants that live in water and count as water for everything but drawing.
 block_is_water_plant :: #force_inline proc(b: u8) -> bool {
     return b == u8(Block_Type.Kelp) || b == u8(Block_Type.Seagrass) || b == u8(Block_Type.Sea_Pickle)
+}
+
+// Grass tufts, flowers, ferns, dry bushes.
+block_is_land_plant :: #force_inline proc(b: u8) -> bool {
+    return b >= u8(Block_Type.Tall_Grass) && b <= u8(Block_Type.Dry_Bush)
 }
 
 // Water, or a plant standing in it: swimming, buoyancy, underwater sound.
@@ -163,15 +177,16 @@ block_is_watery :: #force_inline proc(b: u8) -> bool {
 
 // Blocks the player and entities collide with.
 block_solid :: #force_inline proc(b: u8) -> bool {
-    return b != u8(Block_Type.Air) && !block_is_watery(b)
+    return b != u8(Block_Type.Air) && !block_is_watery(b) && !block_is_land_plant(b)
 }
 
 block_is_leaves :: #force_inline proc(b: u8) -> bool {
-    return b == u8(Block_Type.Leaves) || b == u8(Block_Type.Spruce_Leaves) || b == u8(Block_Type.Birch_Leaves) || b == u8(Block_Type.Autumn_Leaves)
+    return b == u8(Block_Type.Leaves) || b == u8(Block_Type.Spruce_Leaves) || b == u8(Block_Type.Birch_Leaves) || b == u8(Block_Type.Autumn_Leaves) ||
+           b == u8(Block_Type.Acacia_Leaves) || b == u8(Block_Type.Willow_Leaves)
 }
 
 block_is_log :: #force_inline proc(b: u8) -> bool {
-    return b == u8(Block_Type.Log) || b == u8(Block_Type.Spruce_Log) || b == u8(Block_Type.Birch_Log)
+    return b == u8(Block_Type.Log) || b == u8(Block_Type.Spruce_Log) || b == u8(Block_Type.Birch_Log) || b == u8(Block_Type.Acacia_Log)
 }
 
 // The voxel world: the resident columns, and which have edits saved. Only
@@ -531,6 +546,7 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
     height: [N]int
     layers: [N]Surface_Layers
     seas: [N]Sea_Kind
+    plants: [N]Block_Type
     surf_min, surf_max, deep_min := max(int), min(int), max(int)
     for z in 0 ..< CHUNK_VOXELS {
         for x in 0 ..< CHUNK_VOXELS {
@@ -542,12 +558,13 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
             height[i] = s.height
             layers[i] = surface_layers(s, slope)
             seas[i] = sea_kind(s)
+            plants[i] = ground_plant(s, layers[i].top, gx + x, gz + z)
             surf_min = min(surf_min, s.height)
             surf_max = max(surf_max, s.height)
             deep_min = min(deep_min, s.height - layers[i].filler_depth)
         }
     }
-    top_max := surf_min < SEA_LEVEL ? max(surf_max, SEA_LEVEL) : surf_max
+    top_max := (surf_min < SEA_LEVEL ? max(surf_max, SEA_LEVEL) : surf_max) + 1 // and the plants on top
     profile_add(.Terrain_Noise, t_noise)
 
     t_fill := time.tick_now()
@@ -583,6 +600,8 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
                     case wy >= h:
                         if wy < SEA_LEVEL {
                             b = l.frozen && wy == SEA_LEVEL - 1 ? .Ice : .Water
+                        } else if wy == h {
+                            b = plants[ci]
                         }
                     case wy > CAVE_FLOOR_Y && wy < cave_top &&
                          noise.noise_3d_improve_xy(7, {f64(gx + x) * (0.04 / TERRAIN_SCALE), f64(wy) * (0.05 / TERRAIN_SCALE), f64(gz + z) * (0.04 / TERRAIN_SCALE)}) > CAVE_THRESHOLD:
@@ -899,7 +918,97 @@ generate_tree_kind :: proc(tgt: ^Tree_Target, kind: Tree_Kind, bx, by, bz: int) 
     case .Birch:     generate_birch(tgt, bx, by, bz, seed)
     case .Dead:      generate_dead_tree(tgt, bx, by, bz, seed)
     case .Fallen_Log: generate_fallen_log(tgt, bx, by, bz, seed)
+    case .Acacia:    generate_acacia(tgt, bx, by, bz, seed)
+    case .Willow:    generate_willow(tgt, bx, by, bz, seed)
     }
+}
+
+// Acacia: a leaning trunk that forks into two or three limbs, each under a
+// flat, wide umbrella of leaves.
+generate_acacia :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 22, by, bz - 22, bx + 23, by + 26, bz + 23) { return }
+    rng := seed
+    h := tree_rand(&rng, 6, 9)
+    lean := tree_rand(&rng, 0, math.TAU)
+    cx, cz := f64(bx) + 0.5, f64(bz) + 0.5
+    fx, fz := cx + math.cos(lean) * 2, cz + math.sin(lean) * 2
+    draw_thick_segment(tgt, cx, f64(by), cz, fx, f64(by) + h, fz, 1.0, 0.8, seed, .Acacia_Log)
+    // Limbs reach out wide and end about level, so their canopies join into
+    // one flat top with the trunk standing clear under it.
+    top := f64(by) + h + tree_rand(&rng, 3, 5)
+    n := tree_rand(&rng, 0, 1) < 0.5 ? 2 : 3
+    for i in 0 ..< n {
+        a := lean + f64(i) / f64(n) * math.TAU + tree_rand(&rng, -0.5, 0.5)
+        l := tree_rand(&rng, 5, 8)
+        ex, ey, ez := fx + math.cos(a) * l, top + tree_rand(&rng, -1, 1), fz + math.sin(a) * l
+        draw_thick_segment(tgt, fx, f64(by) + h, fz, ex, ey, ez, 0.7, 0.45, seed + 3 + i, .Acacia_Log)
+        r := tree_rand(&rng, 5, 7)
+        place_crown(tgt, ex, ey + 1, ez, r, tree_rand(&rng, 1.2, 1.6), r, seed + 9 + i, .Acacia_Leaves)
+    }
+    place_crown(tgt, fx, top + 1.5, fz, tree_rand(&rng, 6, 8), 1.4, tree_rand(&rng, 6, 8), seed + 2, .Acacia_Leaves)
+}
+
+// Willow, by the water: a stout trunk, limbs spreading under a broad crown,
+// and long strands of leaves hanging from it almost to the ground.
+generate_willow :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 20, by - 2, bz - 20, bx + 21, by + 26, bz + 21) { return }
+    rng := seed
+    h := tree_rand(&rng, 6, 9)
+    cx, cz := f64(bx) + 1, f64(bz) + 1
+    draw_thick_segment(tgt, cx, f64(by), cz, cx, f64(by) + h, cz, 1.7, 1.2, seed)
+    n := int(tree_rand(&rng, 4, 7))
+    a0 := tree_rand(&rng, 0, math.TAU)
+    for i in 0 ..< n {
+        a := a0 + f64(i) / f64(n) * math.TAU + tree_rand(&rng, -0.3, 0.3)
+        l := tree_rand(&rng, 5, 8)
+        ex, ey, ez := cx + math.cos(a) * l, f64(by) + h + l * tree_rand(&rng, 0.5, 0.9), cz + math.sin(a) * l
+        draw_thick_segment(tgt, cx, f64(by) + h - 1, cz, ex, ey, ez, 1.0, 0.5, seed + 5 + i)
+        r := tree_rand(&rng, 4, 5.5)
+        place_crown(tgt, ex, ey + 1, ez, r, r * 0.6, r, seed + 15 + i, .Willow_Leaves)
+        // Strands down from the crown's underside and rim.
+        for k in 0 ..< 14 {
+            sa := tree_rand(&rng, 0, math.TAU)
+            sr := r * math.sqrt(tree_rand(&rng, 0.3, 1.0))
+            sx := int(math.floor(ex + math.cos(sa) * sr))
+            sz := int(math.floor(ez + math.sin(sa) * sr))
+            top := int(math.floor(ey + 1 - r * 0.45))
+            for y in 0 ..< int(tree_rand(&rng, 5, 12)) { place_leaves(tgt, sx, top - y, sz, .Willow_Leaves) }
+            _ = k
+        }
+    }
+    place_crown(tgt, cx, f64(by) + h + 3, cz, 4.5, 3, 4.5, seed + 2, .Willow_Leaves)
+}
+
+// What grows on the ground at (wx, wz): grass tufts, ferns, flowers in
+// patches, dry bushes in the desert; nothing on bare or frozen ground.
+ground_plant :: proc(s: Terrain_Sample, top: Block_Type, wx, wz: int) -> Block_Type {
+    if s.height < SEA_LEVEL + 1 { return .Air }
+    h := tree_hash(wx, wz, 71)
+    if top == .Sand || top == .Red_Sand {
+        return (s.biome == .Desert || s.biome == .Badlands) && h < 0.012 ? .Dry_Bush : .Air
+    }
+    if top != .Grass && top != .Dry_Grass { return .Air }
+    p := [2]f64{f64(wx), f64(wz)}
+    flowers := n2(72, p / (40 * TERRAIN_SCALE)) > 0.45 ? 0.22 : 0.012 // meadows in patches
+    #partial switch s.biome {
+    case .Plains:
+        if h < flowers { return .Flower }
+        if h < flowers + 0.30 { return .Tall_Grass }
+    case .Savanna:
+        if h < 0.006 { return .Dry_Bush }
+        if h < 0.38 { return .Tall_Grass }
+    case .Forest:
+        if h < flowers * 0.4 { return .Flower }
+        if h < 0.10 { return .Fern }
+        if h < 0.22 { return .Tall_Grass }
+    case .Taiga:
+        if h < 0.12 { return .Fern }
+        if h < 0.17 { return .Tall_Grass }
+    case .Mountains:
+        if h < flowers * 0.5 { return .Flower }
+        if h < 0.12 { return .Tall_Grass }
+    }
+    return .Air
 }
 
 // Broadleaf trees in an autumn patch of forest turn: most of them, so a

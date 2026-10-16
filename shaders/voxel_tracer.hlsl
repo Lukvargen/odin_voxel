@@ -230,7 +230,7 @@ float tex_noise(float2 fuv, float scale, float seed) {
 // Meadow tint: deep green <-> warm olive over ~75 voxels. Shared with the
 // far terrain LOD.
 float3 grass_tint(float2 xz) {
-    float m = fbm2(xz * 0.013);
+    float m = fbm2(xz * (0.013 / TERRAIN_SCALE));
     return lerp(float3(0.15, 0.33, 0.09), float3(0.30, 0.37, 0.12), m);
 }
 
@@ -248,13 +248,13 @@ float3 dirt_texture(float h, float n, float pebble, float detail) {
 // voxels thick (warped over hundreds of voxels) run straight through the
 // stepped slopes, ledges hold snow that thickens with altitude, and low
 // ledges grow moss. Shared by the near texture and the far terrain LOD.
-#define STRATA_THICK 3.5
-#define SNOW_DUST_LO 118.0 // ledge snow starts here...
-#define SNOW_DUST_HI 168.0 // ...and covers everything here (terrain SNOW_LINE)
+#define STRATA_THICK (3.5 * TERRAIN_SCALE)
+#define SNOW_DUST_LO 165.0 // ledge snow starts here (118 design)...
+#define SNOW_DUST_HI 240.0 // ...and covers everything here (terrain SNOW_LINE, 168 design)
 
 // Layer value 0..1 at p (voxel units); `edge` = position within the layer.
 float stone_layer(float3 p, out float edge) {
-    float warp = fbm2(p.xz * 0.011) * 16.0;
+    float warp = fbm2(p.xz * (0.011 / TERRAIN_SCALE)) * 16.0 * TERRAIN_SCALE;
     float sv = (p.y + p.x * 0.21 - p.z * 0.13 + warp) / STRATA_THICK;
     edge = frac(sv);
     return hash31i(int3(int(floor(sv)), 913, 17));
@@ -271,7 +271,7 @@ float3 stratum_color(float lh) {
 
 // 0..1 share of a ledge top under snow at altitude y.
 float snow_dust_cover(float3 p) {
-    return smoothstep(SNOW_DUST_LO, SNOW_DUST_HI, p.y + (vnoise2(p.xz * 0.08) - 0.5) * 36.0);
+    return smoothstep(SNOW_DUST_LO, SNOW_DUST_HI, p.y + (vnoise2(p.xz * (0.08 / TERRAIN_SCALE)) - 0.5) * 36.0 * TERRAIN_SCALE);
 }
 
 #define SNOW_COLOR float3(0.84, 0.87, 0.93)
@@ -343,7 +343,7 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
     float3 h3 = (hash33i(tkey) - 0.5) * detail; // per-texel hue offset
     float  vj = hash31i(vkey) - 0.5;    // small per-voxel luminance variety
 
-    if (block_id == BLOCK_GRASS || block_id == BLOCK_SNOW) {
+    if (block_id == BLOCK_GRASS || block_id == BLOCK_SNOW || block_id == BLOCK_DRY_GRASS) {
         bool snow = block_id == BLOCK_SNOW;
         bool on_top;
         if (nrm.y > 0.5) {
@@ -354,7 +354,8 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
             // Side: ragged HARD-EDGED band (no fade) — depth varies per
             // texel column, only where the voxel above is open air.
             // Snow drifts over the edge in a smooth wavy band instead.
-            bool exposed = (sample_voxel(float3(vkey) + float3(0.5, 1.5, 0.5)) == 0u);
+            uint above = sample_voxel(float3(vkey) + float3(0.5, 1.5, 0.5));
+            bool exposed = above == 0u || block_is_land_plant(above);
             int band = 0;
             if (exposed) {
                 if (snow) {
@@ -385,6 +386,7 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         if (snow) return snow_texture(fuv, h, hd, detail);
         // Clumps of blades a few texels wide, lighter tips, darker roots.
         float3 g = grass_tint(float2(vkey.xz));
+        if (block_id == BLOCK_DRY_GRASS) g = lerp(g, float3(0.40, 0.35, 0.13), 0.8);
         float  clump = tex_noise(fuv, 2.2, 5.3);
         float3 c = g * (0.80 + 0.36 * clump + (hd - 0.5) * 0.30);
         c += h3 * float3(0.02, 0.04, 0.01);
@@ -424,6 +426,20 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         return saturate(c * (1.0 + vj * 0.06));
     }
 
+    if (block_id == BLOCK_ACACIA_LOG) {
+        // Grey bark, the cut showing orange wood.
+        float3 c;
+        if (top) {
+            float2 d = float2(txl.xz) - 3.5;
+            c = length(d) > 3.6 ? float3(0.32, 0.29, 0.26) : float3(0.62, 0.36, 0.18) * (0.9 + 0.1 * hd);
+        } else {
+            float col = hash31i(int3(tkey.x, 1919, tkey.z));
+            float seg = hash31i(int3(tkey.x, tkey.y >> 1, tkey.z) + 71);
+            c = float3(0.33, 0.30, 0.27) * (0.75 + 0.35 * col) * (0.9 + 0.2 * lerp(0.5, seg, detail));
+        }
+        return saturate(c * (1.0 + vj * 0.08));
+    }
+
     if (block_id == BLOCK_LOG || block_id == BLOCK_SPRUCE_LOG) {
         bool spruce = block_id == BLOCK_SPRUCE_LOG;
         float3 c;
@@ -454,6 +470,8 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         float3 dark  = spruce ? float3(0.04, 0.13, 0.07) : float3(0.08, 0.24, 0.06);
         float3 light = spruce ? float3(0.09, 0.24, 0.12) : float3(0.17, 0.38, 0.09);
         if (block_id == BLOCK_BIRCH_LEAVES) { dark = float3(0.13, 0.28, 0.06); light = float3(0.29, 0.47, 0.11); }
+        if (block_id == BLOCK_ACACIA_LEAVES) { dark = float3(0.11, 0.17, 0.04); light = float3(0.25, 0.32, 0.08); }
+        if (block_id == BLOCK_WILLOW_LEAVES) { dark = float3(0.16, 0.27, 0.08); light = float3(0.34, 0.47, 0.15); }
         if (block_id == BLOCK_AUTUMN_LEAVES) {
             // Each voxel leans orange, red or gold.
             float k = hash31i(vkey + 7);
@@ -536,12 +554,38 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         return float3(0.10, 0.28, 0.36);
     }
 
-    if (block_is_water_plant(block_id)) {
+    if (block_is_cutout(block_id)) {
         // Plane texel (plant_texel): u along the plane = local x, v up.
         float3 lp = hit_pos - float3(vkey);
         int cu = clamp(int(lp.x * TEXELS), 0, TEXELS - 1);
         int cv = clamp(int(lp.y * TEXELS), 0, TEXELS - 1);
         float th = hash31i(int3(vkey.x * 8 + cu, vkey.y * 8 + cv, vkey.z));
+        if (block_id == BLOCK_TALL_GRASS) {
+            // The ground's own green (or straw on dry grass), lighter tips.
+            float3 g = grass_tint(float2(vkey.xz));
+            if (sample_voxel(float3(vkey) + float3(0.5, -0.5, 0.5)) == BLOCK_DRY_GRASS) g = lerp(g, float3(0.46, 0.40, 0.16), 0.85);
+            float3 c = g * lerp(0.75, 1.25, float(cv) / 7.0);
+            return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.2));
+        }
+        if (block_id == BLOCK_FERN) {
+            float3 c = lerp(float3(0.06, 0.20, 0.06), float3(0.14, 0.36, 0.10), float(cv) / 7.0);
+            return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.2));
+        }
+        if (block_id == BLOCK_FLOWER) {
+            if (cv >= 5) {
+                // One colour per flower; a darker eye in the middle.
+                uint k = uint(hash31i(vkey + int3(3, 7, 1)) * 6.0);
+                float3 petal = k == 0u ? float3(0.85, 0.12, 0.10) : k == 1u ? float3(0.95, 0.80, 0.15)
+                             : k == 2u ? float3(0.92, 0.92, 0.88) : k == 3u ? float3(0.55, 0.30, 0.85)
+                             : k == 4u ? float3(0.30, 0.45, 0.95) : float3(0.95, 0.50, 0.70);
+                if (cv == 6 && (cu == 3 || cu == 4)) petal = float3(0.35, 0.25, 0.05);
+                return saturate(petal * (0.9 + 0.2 * th));
+            }
+            return float3(0.14, 0.34, 0.09) * (0.9 + 0.2 * th);
+        }
+        if (block_id == BLOCK_DRY_BUSH) {
+            return float3(0.36, 0.26, 0.15) * (0.8 + 0.4 * th);
+        }
         if (block_id == BLOCK_KELP) {
             bool stalk = cu == 3 || cu == 4;
             float3 c = stalk ? float3(0.22, 0.24, 0.07) : float3(0.30, 0.38, 0.09);
@@ -1045,6 +1089,10 @@ float3 far_block_color(uint id, int2 cell, float3 n, float y) {
     if (id == BLOCK_BIRCH_LEAVES)  return float3(0.132, 0.233, 0.054);
     if (id == BLOCK_AUTUMN_LEAVES) return float3(0.300, 0.115, 0.030);
     if (id == BLOCK_BIRCH_LOG)     return float3(0.62, 0.60, 0.55);
+    if (id == BLOCK_ACACIA_LOG)    return float3(0.30, 0.27, 0.24);
+    if (id == BLOCK_ACACIA_LEAVES) return float3(0.110, 0.150, 0.040);
+    if (id == BLOCK_WILLOW_LEAVES) return float3(0.150, 0.230, 0.070);
+    if (id == BLOCK_DRY_GRASS)     return n.y > 0.5 ? float3(0.36, 0.32, 0.13) : DIRT_COLOR * 0.95;
     if (id == BLOCK_LOG)           return float3(0.30, 0.20, 0.10);
     if (id == BLOCK_SPRUCE_LOG)    return float3(0.20, 0.13, 0.07);
     if (id == BLOCK_DIRT)          return dirt;
@@ -1140,7 +1188,7 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     // Voxel light in front of this face: sky (ambient + whether the
     // sun can reach at all) and block light (torches). A water plant's
     // planes cut through its own voxel, which holds the light.
-    bool   plant = block_is_water_plant(hit.block_id);
+    bool   plant = block_is_cutout(hit.block_id);
     float2 lv;
     if (plant) {
         uint pl = sample_light(hit.vkey);
@@ -1267,7 +1315,7 @@ float3 water_reflection(float3 p, float3 n, float2 wave_var, float3 dir, float t
 HitInfo trace_view_ray(float3 o, float3 d, float max_len, uint skip) {
     HitInfo h = trace_ray_chunk(o, d, false, RAY_ITERATIONS, max_len, skip);
     float t0 = 0.0;
-    for (int k = 0; k < 3 && block_is_water_plant(h.block_id) && t0 + h.t < PLANT_NEAR_CLIP; k++) {
+    for (int k = 0; k < 3 && block_is_cutout(h.block_id) && t0 + h.t < PLANT_NEAR_CLIP; k++) {
         t0 += h.t + 0.02;
         h = trace_ray_chunk(o + d * t0, d, false, RAY_ITERATIONS, max_len - t0, skip);
     }

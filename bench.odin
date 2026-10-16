@@ -664,6 +664,14 @@ bench_teleport :: proc(gs: ^Game_State, pos: [3]f32) {
         floor_div(int(pos.z), CHUNK_VOXELS),
     }
     worker_pool_set_player(&gs.pool, gs.player_chunk[0], gs.player_chunk[2])
+    // What's out of view from here goes first: a jump across the world would
+    // otherwise keep the old place resident until the ring reuses its slots.
+    far_away := make([dynamic][2]int, context.temp_allocator)
+    for key in gs.columns {
+        d := key - [2]int{gs.player_chunk.x, gs.player_chunk.z}
+        if d.x * d.x + d.y * d.y > (view_radius + 2) * (view_radius + 2) { append(&far_away, key) }
+    }
+    for key in far_away { unload_column(gs, key) }
     enqueue_chunks(gs)
     t0 := time.now()
     for !streaming_idle(gs) && time.duration_seconds(time.since(t0)) < 120 {

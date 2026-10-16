@@ -81,13 +81,28 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_BIRCH_LOG     28u
 #define BLOCK_BIRCH_LEAVES  29u
 #define BLOCK_AUTUMN_LEAVES 30u
+#define BLOCK_TALL_GRASS    31u // land plants: crossed cutout planes, like the sea's
+#define BLOCK_FLOWER        32u
+#define BLOCK_FERN          33u
+#define BLOCK_DRY_BUSH      34u
+#define BLOCK_ACACIA_LOG    35u
+#define BLOCK_ACACIA_LEAVES 36u
+#define BLOCK_WILLOW_LEAVES 37u
+#define BLOCK_DRY_GRASS     38u // savanna ground
+
+// World blocks per design block (terrain.odin TERRAIN_SCALE): textures laid
+// out over the world in design sizes use it.
+#define TERRAIN_SCALE 1.5
 
 #define SEA_LEVEL_Y 24.0 // top of the sea (terrain.odin SEA_LEVEL)
 
-bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES || id == BLOCK_BIRCH_LEAVES || id == BLOCK_AUTUMN_LEAVES; }
+bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES || id == BLOCK_BIRCH_LEAVES || id == BLOCK_AUTUMN_LEAVES || id == BLOCK_ACACIA_LEAVES || id == BLOCK_WILLOW_LEAVES; }
+bool block_is_land_plant(uint id) { return id >= BLOCK_TALL_GRASS && id <= BLOCK_DRY_BUSH; }
 bool block_is_water_plant(uint id) { return id == BLOCK_KELP || id == BLOCK_SEAGRASS || id == BLOCK_SEA_PICKLE; }
 // Water, or a plant standing in it (the camera is "in water" in either).
 bool block_is_watery(uint id) { return id == BLOCK_WATER || block_is_water_plant(id); }
+// Drawn as crossed cutout planes (plant_hit).
+bool block_is_cutout(uint id) { return block_is_water_plant(id) || block_is_land_plant(id); }
 
 // Radiance a block's surface emits on its own (0 = not emissive). Added to
 // shading UNLIT (not multiplied by lighting/AO). Their light on the world
@@ -248,7 +263,7 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float m
             } else if (block_is_leaves(bid)) {
                 factor *= LEAF_TRANSMIT;
                 if (factor < 0.01) return 0.0;
-            } else if (block_is_water_plant(bid)) {
+            } else if (block_is_cutout(bid)) {
                 factor *= PLANT_TRANSMIT;
             } else {
                 return 0.0;
@@ -541,6 +556,31 @@ struct HitInfo {
 // Opaque texel of plant `id` at plane texel (cu, cv) of plane `pl`.
 bool plant_texel(uint id, int3 vkey, int cu, int cv, int pl) {
     float h = hash31i(vkey * 2 + int3(pl, 0, 0));
+    if (id == BLOCK_TALL_GRASS) {
+        // Blades of random height, most of them reaching well up.
+        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 7 + 3));
+        if (hb > 0.62) return false;
+        return float(cv) < 2.0 + hb * 11.0;
+    }
+    if (id == BLOCK_FERN) {
+        // A frond up each plane: a stem with leaflets that narrow upward and
+        // droop at the tip.
+        int reach = 3 - cv / 3;
+        if (cv >= 7) return cu == (pl == 0 ? 5 : 2);
+        return (abs(cu * 2 - 7) <= reach * 2 + 1 && ((cu + cv) & 1) == 0) || cu == 3 || cu == 4;
+    }
+    if (id == BLOCK_FLOWER) {
+        // A stem, a leaf, and the bloom on top (both planes show it).
+        if (cv >= 5 && cv <= 6) return cu >= 2 && cu <= 5;
+        if (cv == 7) return cu == 3 || cu == 4;
+        if (cv == 2) return pl == 0 ? (cu == 2 || cu == 3) : (cu == 4 || cu == 5);
+        return (cu == 3 || cu == 4) && pl == 0;
+    }
+    if (id == BLOCK_DRY_BUSH) {
+        // Bare twigs fanning up from the ground.
+        int spread = cv / 2;
+        return cv < 7 && (cu == 3 + spread || cu == 4 - spread || (cv > 3 && hash31i(int3(vkey.x * 8 + cu, cv, vkey.z + pl)) < 0.25));
+    }
     if (id == BLOCK_KELP) {
         // A stalk up the middle, and a leaf blade every few texels that
         // grows out to one side, widest at its base.
@@ -638,7 +678,7 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
         if (uniform_id != 0u) hit_block_id = uniform_id;
         else if (voxel_solid(chunk_i, lvi)) hit_block_id = load_voxel(global_chunk_i + lvi);
         if (hit_block_id == skip_id) hit_block_id = 0u;
-        if (block_is_water_plant(hit_block_id)) {
+        if (block_is_cutout(hit_block_id)) {
             float3 pn;
             float  s = plant_hit(hit_block_id, chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i),
                                  local_entry - float3(x_i, y_i, z_i), dir,
@@ -666,7 +706,7 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
         int lvi2 = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
         if (voxel_solid(chunk_i, lvi2)) {
             uint b = load_voxel(global_chunk_i + lvi2);
-            if (block_is_water_plant(b)) {
+            if (block_is_cutout(b)) {
                 float3 pn;
                 float  s = plant_hit(b, chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i),
                                      local_entry + dir * t - float3(x_i, y_i, z_i), dir,

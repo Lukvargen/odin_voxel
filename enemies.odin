@@ -549,7 +549,7 @@ roamer_for :: proc(b: Biome, night: f32) -> (kind: Enemy_Kind, pack: int, ok: bo
     if night > 0.6 && rand.float32() < 0.6 { return .Skeleton, 1 + rand.int_max(2), true }
     #partial switch b {
     case .Plains, .Forest:   return .Goblin, 2 + rand.int_max(2), true
-    case .Desert, .Badlands: return rand.float32() < 0.5 ? .Orc : .Goblin, rand.float32() < 0.5 ? 1 : 2, true
+    case .Desert, .Badlands, .Savanna: return rand.float32() < 0.5 ? .Orc : .Goblin, rand.float32() < 0.5 ? 1 : 2, true
     case .Taiga, .Snowy, .Mountains, .Peaks: return .Skeleton, 1 + rand.int_max(2), true
     }
     return .Goblin, 0, false

@@ -193,13 +193,13 @@ vary :: proc(amount: f32 = 0.08) -> f32 {
 
 block_material :: proc(b: Block_Type) -> Material {
     #partial switch b {
-    case .Grass:                         return .Grass
+    case .Grass, .Dry_Grass:             return .Grass
     case .Dirt:                          return .Dirt
     case .Sand, .Red_Sand:               return .Sand
     case .Snow:                          return .Snow
     case .Ice:                           return .Ice
-    case .Log, .Spruce_Log, .Birch_Log, .Cactus, .Torch: return .Wood
-    case .Leaves, .Spruce_Leaves, .Birch_Leaves, .Autumn_Leaves: return .Leaves
+    case .Log, .Spruce_Log, .Birch_Log, .Acacia_Log, .Cactus, .Torch: return .Wood
+    case .Leaves, .Spruce_Leaves, .Birch_Leaves, .Autumn_Leaves, .Acacia_Leaves, .Willow_Leaves: return .Leaves
     case .Gravel:                        return .Gravel
     }
     return .Stone
@@ -269,7 +269,7 @@ surroundings_update :: proc(gs: ^Game_State, dt: f32) {
         d := [3]f32{rand.float32_range(-1, 1), rand.float32_range(-1, 1), rand.float32_range(-1, 1)}
         if la.dot(d, d) > 1 { continue }
         #partial switch voxel_at(gs, p + d * RADIUS) {
-        case .Leaves, .Spruce_Leaves, .Birch_Leaves, .Autumn_Leaves: audio.leaf_hits += 1
+        case .Leaves, .Spruce_Leaves, .Birch_Leaves, .Autumn_Leaves, .Acacia_Leaves, .Willow_Leaves: audio.leaf_hits += 1
         case .Water, .Kelp, .Seagrass, .Sea_Pickle: audio.water_hits += 1
         }
         audio.samples += 1
@@ -306,7 +306,7 @@ surroundings_update :: proc(gs: ^Game_State, dt: f32) {
     case .River:  crickets = 0.45
     case .Beach:  crickets = 0.2
     case .Taiga:  crickets = 0.2
-    case .Desert, .Badlands: cicadas = 1
+    case .Desert, .Badlands, .Savanna: cicadas = 1
     }
     low := 1 - math.smoothstep(f32(6), 30, audio.agl)
     ease(&audio.crickets, crickets * low * outside, 0.4, dt)

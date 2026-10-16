@@ -478,7 +478,7 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
                 vi := (x & 7) + (y & 7) * CHUNK_VOXELS + (z & 7) * CHUNK_VOXELS * CHUNK_VOXELS
                 cur := chunk_voxel(c, vi)
                 if block != .Air {
-                    if mask == .Air && cur != 0 && cur != water { continue }
+                    if mask == .Air && cur != 0 && cur != water && !block_is_land_plant(cur) { continue }
                     if mask == .Solid && !block_solid(cur) { continue }
                 }
                 if !into_player && aabb_hits_voxel(eye, p) { continue }
@@ -497,6 +497,20 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
     if len(changed) == 0 {
         delete(rec.changes)
         return 0
+    }
+    // Plants on ground that's gone go with it.
+    for i in 0 ..< len(changed) {
+        p := changed[i]
+        if block_solid(u8(get_voxel(gs, p.x, p.y, p.z))) { continue }
+        q := p + {0, 1, 0}
+        v := u8(get_voxel(gs, q.x, q.y, q.z))
+        col := gs.columns[{q.x >> 3, q.z >> 3}]
+        if !block_is_land_plant(v) || col == nil || q.y >= WORLD_Y_MAX { continue }
+        c := &col.chunks[chunk_y_index(q.y >> 3)]
+        if !chunk_set_voxel(c, (q.x & 7) + (q.y & 7) * CHUNK_VOXELS + (q.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS, 0) { continue }
+        dirty[ring_slot(q.x >> 3, q.y >> 3, q.z >> 3)] = true
+        append(&changed, q)
+        append(&rec.changes, Voxel_Change{{i32(q.x), i32(q.y), i32(q.z)}, v})
     }
     if block == .Air { fill_dug_water(gs, changed[:]) }
     build_commit(gs, changed[:], dirty)

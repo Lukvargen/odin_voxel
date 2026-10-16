@@ -59,7 +59,7 @@ landmark_in_cell :: proc(cx, cz: int) -> Landmark {
     kind: Landmark_Kind
     k := lm_hash(cx, cz, 41)
     #partial switch s.biome {
-    case .Plains:
+    case .Plains, .Savanna:
         kind = k < 0.35 ? .Tower : (k < 0.55 ? .Stones : (k < 0.7 ? .Shrine : .Camp))
     case .Taiga, .Snowy, .Mountains:
         kind = k < 0.45 ? .Tower : (k < 0.7 ? .Stones : (k < 0.85 ? .Shrine : .Camp))

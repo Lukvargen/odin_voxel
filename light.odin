@@ -27,7 +27,7 @@ LIGHT_SKY   :: u8(LIGHT_MAX << 4) // full sky, no block light
 Light_Channel :: enum { Sky, Block }
 
 block_opaque :: #force_inline proc(b: u8) -> bool {
-    return b != u8(Block_Type.Air) && !block_is_leaves(b) && !block_is_watery(b)
+    return b != u8(Block_Type.Air) && !block_is_leaves(b) && !block_is_watery(b) && !block_is_land_plant(b)
 }
 
 block_emission :: #force_inline proc(b: u8) -> u8 {
@@ -49,7 +49,7 @@ chan_set :: #force_inline proc(v: u8, ch: Light_Channel, l: u8) -> u8 {
 // (index into NEIGHBOURS). Sky light keeps full strength going straight down
 // through air and water.
 spread_level :: #force_inline proc(l: u8, ch: Light_Channel, d: int, into: u8) -> u8 {
-    if ch == .Sky && d == DIR_DOWN && l == LIGHT_MAX && (into == u8(Block_Type.Air) || block_is_watery(into)) {
+    if ch == .Sky && d == DIR_DOWN && l == LIGHT_MAX && (into == u8(Block_Type.Air) || block_is_watery(into) || block_is_land_plant(into)) {
         return LIGHT_MAX
     }
     return l > 0 ? l - 1 : 0
@@ -162,7 +162,7 @@ light_column_compute :: proc(column: ^Column) {
             y := COLUMN_H - 1
             for ; y >= 0; y -= 1 {
                 i := x + y * COL_DY + z * COL_DZ
-                if blocks[i] != u8(Block_Type.Air) && !block_is_watery(blocks[i]) { break }
+                if blocks[i] != u8(Block_Type.Air) && !block_is_watery(blocks[i]) && !block_is_land_plant(blocks[i]) { break }
                 sky[i] = LIGHT_MAX
             }
             lowest  = min(lowest, y + 1)

@@ -43,7 +43,7 @@ world_h :: #force_inline proc "contextless" (h: int) -> int {
 }
 
 Biome :: enum u8 {
-    Ocean, Beach, River, Plains, Forest, Taiga, Snowy, Desert, Badlands, Mountains, Peaks,
+    Ocean, Beach, River, Plains, Forest, Taiga, Snowy, Desert, Badlands, Mountains, Peaks, Savanna,
 }
 
 // The slowly varying fields at one point.
@@ -65,6 +65,7 @@ Terrain_Sample :: struct {
     moist:    f64,
     mountain: f64,
     detail:   f64, // small-scale noise in [-1, 1], for ragged borders
+    wet:      f64, // 1 on a river's bank, fading to 0 away from it
 }
 
 n2 :: #force_inline proc(seed: i64, p: [2]f64) -> f64 {
@@ -222,6 +223,7 @@ terrain_from_cell :: proc(cell: ^Coarse_Cell, wx, wz: int) -> Terrain_Sample {
         moist    = f.moist + detail * 0.04,
         mountain = f.mountain,
         detail   = detail,
+        wet      = 1 - smooth(0.03, 0.09, rv),
     }
     s.temp = f.temp + detail * 0.04 - max(0, h - f64(SEA_LEVEL) - 50) / 160
 
@@ -244,6 +246,8 @@ terrain_from_cell :: proc(cell: ^Coarse_Cell, wx, wz: int) -> Terrain_Sample {
         s.biome = .Badlands
     case s.temp > 0.3 && s.moist < 0.0:
         s.biome = .Desert
+    case s.temp > 0.22 && s.moist < 0.12:
+        s.biome = .Savanna
     case s.moist > 0.12:
         s.biome = .Forest
     case:
@@ -352,6 +356,9 @@ surface_layers_design :: proc(s: Terrain_Sample, slope: int) -> Surface_Layers {
         return {top = cliff ? .Terracotta : .Red_Sand, filler = .Terracotta, filler_depth = 48}
     case .Desert:
         return {top = cliff ? .Sandstone : .Sand, filler = .Sandstone, filler_depth = 10}
+    case .Savanna:
+        if cliff { return {top = .Weathered_Stone, filler = .Stone, filler_depth = 1} }
+        return {top = .Dry_Grass, filler = .Dirt, filler_depth = 3}
     case .Snowy:
         if cliff { return {top = .Weathered_Stone, filler = .Stone, filler_depth = 1, frozen = true} }
         return {top = .Snow, filler = .Dirt, filler_depth = 3, frozen = true}
@@ -363,7 +370,7 @@ surface_layers_design :: proc(s: Terrain_Sample, slope: int) -> Surface_Layers {
 
 // ---- Trees ---------------------------------------------------------------
 
-Tree_Kind :: enum u8 { None, Oak, Medium_Oak, Small_Oak, Bush, Spruce, Cactus, Birch, Dead, Fallen_Log }
+Tree_Kind :: enum u8 { None, Oak, Medium_Oak, Small_Oak, Bush, Spruce, Cactus, Birch, Dead, Fallen_Log, Acacia, Willow }
 
 // Tree densities (trees per voxel of ground) by biome. A candidate spot is
 // rejected by its hash against the densest biome before any terrain is
@@ -377,6 +384,10 @@ Tree_Rate :: struct { kind: Tree_Kind, density: f64 }
 // forests are birch woods; a few dead trees and fallen logs about.
 @(private="file")
 biome_trees :: proc(s: Terrain_Sample) -> [6]Tree_Rate {
+    // River banks: willows lean over the water.
+    if s.wet > 0.4 && (s.biome == .Plains || s.biome == .Forest || s.biome == .Savanna) {
+        return {{.Willow, 1.0 / 160}, {.Bush, 1.0 / 300}, {.Small_Oak, 1.0 / 900}, {}, {}, {}}
+    }
     #partial switch s.biome {
     case .Forest:
         if s.temp < 0 {
@@ -388,6 +399,7 @@ biome_trees :: proc(s: Terrain_Sample) -> [6]Tree_Rate {
     case .Taiga:     return {{.Spruce, 1.0 / 66}, {.Birch, 1.0 / 900}, {.Fallen_Log, 1.0 / 1500}, {.Dead, 1.0 / 3000}, {}, {}}
     case .Snowy:     return {{.Spruce, 1.0 / 260}, {.Dead, 1.0 / 4000}, {}, {}, {}, {}}
     case .Mountains: if s.height < world_h(150) { return {{.Spruce, 1.0 / 140}, {.Dead, 1.0 / 5000}, {}, {}, {}, {}} }
+    case .Savanna:   return {{.Acacia, 1.0 / 1100}, {.Bush, 1.0 / 700}, {.Dead, 1.0 / 4000}, {}, {}, {}}
     case .Desert:    return {{.Cactus, 1.0 / 380}, {.Dead, 1.0 / 5000}, {}, {}, {}, {}}
     case .Badlands:  return {{.Cactus, 1.0 / 1600}, {.Dead, 1.0 / 2500}, {}, {}, {}, {}}
     }
