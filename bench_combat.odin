@@ -221,8 +221,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
 
     // Night: roaming spawns around the player.
     for &e in gs.enemies.list { e.alive = false }
-    gs.day.hour = 23
-    day_update(gs, 0)
+    day_set_hour(gs, 23)
     cam.fly_mode = false
     gs.enemies.spawn_timer, gs.enemies.site_timer = 0, 1e9
     for _ in 0 ..< 60 * 20 { sim_sync_client(gs); enemies_update(gs, dt); client_after_sim(gs) }

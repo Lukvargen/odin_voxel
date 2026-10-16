@@ -38,7 +38,7 @@ Sim :: struct {
     players:  [MAX_PLAYERS]Player,
     slimes:   Slimes,    // (slime.odin)
     enemies:  Enemies,   // skeletons, goblins, orcs; landmark guards (enemies.odin)
-    day:      Day_Cycle, // time of day: sun, moon, night, mist (daycycle.odin)
+    day:      Day_Clock, // the time of day, and how much night (daycycle.odin)
     events:   [dynamic]Sim_Event, // this frame's happenings, for the client (events.odin)
 }
 

@@ -96,6 +96,7 @@ Game_State :: struct {
 
     // Settings
     light_dir:      [3]f32,
+    sky:            Sky,   // sun or moon light, mist, eye adaptation (daycycle.odin)
     reflect_amount: i32,
     aa_samples:     i32,   // anti-alias samples: 1/2/4 (F2 cycles)
     shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
@@ -184,9 +185,7 @@ main :: proc() {
             case a == "sea": bench_sea = true
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
-                gs.day.hour = h
-                day_update(&gs, 0)
-                gs.day.eye = day_target_eye(gs.day.night, gs.day.sun_true.y)
+                day_set_hour(&gs, h, settle = true)
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])
@@ -426,9 +425,10 @@ main :: proc() {
             fwd := camera_forward(gs.camera)
             gs.light_dir = fwd
             gs.sun_intensity = SUN_PEAK
-            gs.day.paused, gs.day.manual = true, true // until the clock is set or restarted (options)
+            gs.day.paused, gs.sky.manual = true, true // until the clock is set or restarted (options)
         }
-        day_update(&gs, dt)
+        day_tick(&gs, dt)
+        sky_update(&gs, dt)
 
         // The wheel walks the hotbar (down = next) or sizes the current
         // tool (up = bigger), by the modifiers held (build_tools.odin).

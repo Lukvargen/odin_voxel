@@ -625,7 +625,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         vol            = (gs.vol_enabled ? 100 : 0) + gs.vol_steps,
         entity_count   = gs.entity_count,
         time           = f32(SDL.GetTicks()) / 1000.0,
-        exposure       = gs.exposure * gs.day.eye,
+        exposure       = gs.exposure * gs.sky.eye,
         fog_density    = gs.fog_density,
         cave_factor    = gs.cave_factor,
         sun_intensity  = gs.sun_intensity,
@@ -640,8 +640,8 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
             max(f32(near_r * CHUNK_VOXELS) - 6, 0),
             0,
         },
-        sun_true       = {gs.day.sun_true.x, gs.day.sun_true.y, gs.day.sun_true.z, gs.day.night},
-        atmos          = {gs.day.mist, 0, 0, 0},
+        sun_true       = {gs.sky.sun_true.x, gs.sky.sun_true.y, gs.sky.sun_true.z, gs.sky.night},
+        atmos          = {gs.sky.mist, 0, 0, 0},
     }
     sky_thermals_update(gs)
     for th, i in gs.sky_thermals[:gs.sky_thermal_count] {

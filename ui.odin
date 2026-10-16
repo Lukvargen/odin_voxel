@@ -1475,9 +1475,7 @@ menu_graphics :: proc(gs: ^Game_State) {
         t := gs.day.hour / 24
         hh, mm := day_clock(gs.day.hour)
         if slider(gs, clay.ID("Hour"), &t, fmt.tprintf("%02d:%02d", hh, mm)) {
-            gs.day.hour = clamp(t, 0, 0.999) * 24
-            gs.day.manual = false
-            day_update(gs, 0)
+            day_set_hour(gs, clamp(t, 0, 0.999) * 24)
         }
     }
     if clay.UI()(setting_row()) {
@@ -1485,7 +1483,7 @@ menu_graphics :: proc(gs: ^Game_State) {
         running := !gs.day.paused
         toggle("Day", &running)
         gs.day.paused = !running
-        if running { gs.day.manual = false }
+        if running { gs.sky.manual = false }
     }
     // Exposure 0.25..4 and haze (fog density 0.0003..0.006), both on log scales.
     if clay.UI()(setting_row()) {
