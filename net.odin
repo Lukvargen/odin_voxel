@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -45,6 +45,10 @@ Msg_Kind :: enum u8 {
     Set_Monsters, // bool: slimes and enemies on or off (options)
     Spawn,        // Msg_Spawn: debug F6 / F8
     Clear,        // no body: every slime and enemy gone (debug F7)
+    Column_Request, // [2]i32: an edited column (Edited), please
+    // both ways: blocks a player changed (client → server → the others)
+    Voxels,       // Msg_Voxels
+    Chunk_Voxels, // Msg_Chunk_Voxels: a whole chunk, when an edit changed much of it
     // server → client
     Welcome,      // Msg_Welcome: your player slot, and where to appear
     Refuse,       // Refuse_Reason
@@ -52,6 +56,54 @@ Msg_Kind :: enum u8 {
     Player_Gone,  // u8: that player's slot is empty now
     Clock,        // Msg_Clock
     Event,        // Sim_Event
+    Edited,       // Msg_Edited: columns that differ from the generated world (ask for them)
+    Column_Data,  // Msg_Column_Data, then `size` bytes: the column, run-length (column_encode)
+}
+
+VOXEL_BATCH :: 32 // single voxels per Voxels message; a chunk with more goes whole
+
+Msg_Voxel :: struct {
+    pos:   [3]i32,
+    block: u8,
+}
+
+Msg_Voxels :: struct {
+    count: u8,
+    items: [VOXEL_BATCH]Msg_Voxel,
+}
+
+Msg_Chunk_Voxels :: struct {
+    key:    [3]i32, // world chunk coordinate
+    voxels: [VOXELS_PER_BRICK]u8,
+}
+
+Msg_Edited :: struct {
+    count: u8,
+    keys:  [64][2]i32,
+}
+
+Msg_Column_Data :: struct {
+    key:  [2]i32,
+    size: u32, // 0: not edited after all, generate it
+}
+
+MAX_COLUMN_BYTES :: COLUMN_VOXELS * 3 // the most a column's run-length bytes can be
+
+// A message whose fixed body is followed by `bytes` (Column_Data).
+outbox_put_bytes :: proc(o: ^Outbox, kind: Msg_Kind, body: $T, bytes: []u8) {
+    outbox_put(o, kind, body)
+    append(msg_reliable(kind) ? &o.reliable : &o.unreliable, ..bytes)
+}
+
+// The n bytes following a message's fixed body.
+msg_get_bytes :: proc(r: ^Msg_Reader, n: int) -> (b: []u8, ok: bool) {
+    if n < 0 || r.at + n > len(r.data) {
+        r.at = len(r.data)
+        return
+    }
+    b = r.data[r.at:][:n]
+    r.at += n
+    return b, true
 }
 
 Refuse_Reason :: enum u8 { Version, Full }

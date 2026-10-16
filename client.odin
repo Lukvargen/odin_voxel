@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import la "core:math/linalg"
 import enet "vendor:ENet"
 
 // The client's half of the conversation with the server (server.odin): it
@@ -34,6 +35,10 @@ Client_Net :: struct {
     arriving:   bool,
     arrive_pos: [3]f32,
     arrive_yaw: f32,
+    // Joined: the columns that differ from the generated world, which come
+    // from the server (client_request_column), and those asked for.
+    edited:     map[[2]int]bool,
+    requested:  map[[2]int]bool,
 }
 
 // Another player, drawn where its client last said it was.
@@ -152,6 +157,36 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
         case .Refuse:
             why := msg_get(&r, Refuse_Reason) or_break
             ui_toast(gs, why == .Full ? "The server is full" : "The server runs a different version", 5)
+        case .Voxels:
+            m := msg_get(&r, Msg_Voxels) or_break
+            changed := make([dynamic][3]int, 0, VOXEL_BATCH, context.temp_allocator)
+            for v in m.items[:min(m.count, VOXEL_BATCH)] {
+                client_write(gs, la.array_cast(v.pos, int), v.block, &changed)
+            }
+            world_refresh(gs, changed[:])
+        case .Chunk_Voxels:
+            m := msg_get(&r, Msg_Chunk_Voxels) or_break
+            if chunk_y_index(int(m.key.y)) < 0 { break }
+            changed := make([dynamic][3]int, 0, VOXELS_PER_BRICK, context.temp_allocator)
+            base := la.array_cast(m.key, int) * CHUNK_VOXELS
+            for v, vi in m.voxels { client_write(gs, base + {vi & 7, (vi >> 3) & 7, vi >> 6}, v, &changed) }
+            world_refresh(gs, changed[:])
+        case .Edited:
+            m := msg_get(&r, Msg_Edited) or_break
+            if !client_joined(gs) { break }
+            for k in m.keys[:min(int(m.count), len(m.keys))] {
+                key := [2]int{int(k.x), int(k.y)}
+                gs.net.edited[key] = true
+                // Generated here before we knew: the server's instead.
+                if col := gs.columns[key]; col != nil && !col.modified {
+                    unload_column(gs, key)
+                    client_request_column(gs, key)
+                }
+            }
+        case .Column_Data:
+            m := msg_get(&r, Msg_Column_Data) or_break
+            bytes := msg_get_bytes(&r, int(min(m.size, MAX_COLUMN_BYTES))) or_break
+            client_take_column(gs, {int(m.key.x), int(m.key.y)}, bytes)
         case: // a client's kind: never sent to one
             r.at = len(r.data)
         }
@@ -160,6 +195,79 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
     others_update(gs, dt)
     monsters_push_player(gs)
     client_hold_arrival(gs)
+}
+
+// Blocks this client just changed (build_commit), to the server, which
+// passes them on: as they are now, a chunk at a time where an edit changed
+// much of one.
+client_send_voxels :: proc(gs: ^Game_State, changed: [][3]int) {
+    per_chunk := make(map[[3]int]int, 16, context.temp_allocator)
+    for p in changed { per_chunk[{p.x >> 3, p.y >> 3, p.z >> 3}] += 1 }
+    m: Msg_Voxels
+    for p in changed {
+        key := [3]int{p.x >> 3, p.y >> 3, p.z >> 3}
+        n := per_chunk[key]
+        if n < 0 { continue } // this chunk already went whole
+        if n > VOXEL_BATCH {
+            per_chunk[key] = -1
+            whole := Msg_Chunk_Voxels{key = {i32(key.x), i32(key.y), i32(key.z)}}
+            if c := world_chunk(gs, key); c != nil {
+                for &v, vi in whole.voxels { v = chunk_voxel(c, vi) }
+                client_send(gs, .Chunk_Voxels, whole)
+            }
+            continue
+        }
+        m.items[m.count] = {pos = {i32(p.x), i32(p.y), i32(p.z)}, block = u8(get_voxel(gs, p.x, p.y, p.z))}
+        m.count += 1
+        if m.count == VOXEL_BATCH {
+            client_send(gs, .Voxels, m)
+            m.count = 0
+        }
+    }
+    if m.count > 0 { client_send(gs, .Voxels, m) }
+}
+
+// A block another player changed, into our world if we have its column
+// (noted in `changed` for world_refresh); either way the column now differs
+// from the generated one.
+@(private="file")
+client_write :: proc(gs: ^Game_State, p: [3]int, block: u8, changed: ^[dynamic][3]int) {
+    if p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX || int(block) >= len(Block_Type) { return }
+    key := [2]int{p.x >> 3, p.z >> 3}
+    if client_joined(gs) { gs.net.edited[key] = true }
+    col := gs.columns[key]
+    if col == nil { return }
+    vi := (p.x & 7) + (p.y & 7) * CHUNK_VOXELS + (p.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS
+    chunk_set_voxel(&col.chunks[chunk_y_index(p.y >> 3)], vi, block) // already set if the server shares our world
+    col.modified = true
+    append(changed, p)
+}
+
+// Ask the server for an edited column (once until it comes).
+client_request_column :: proc(gs: ^Game_State, key: [2]int) {
+    if key in gs.net.requested { return }
+    gs.net.requested[key] = true
+    client_send(gs, .Column_Request, [2]i32{i32(key.x), i32(key.y)})
+}
+
+// An edited column from the server: lit and made resident (and kept apart
+// from our own world: modified, so leaving drops it). No bytes: it isn't
+// edited after all, so generate it.
+@(private="file")
+client_take_column :: proc(gs: ^Game_State, key: [2]int, bytes: []u8) {
+    n := &gs.net
+    delete_key(&n.requested, key)
+    if !client_joined(gs) { return }
+    col := len(bytes) > 0 ? column_decode(bytes) : nil
+    if col == nil {
+        delete_key(&n.edited, key)
+        if !(key in gs.columns) { worker_pool_enqueue(&gs.pool, key, false) }
+        return
+    }
+    light_column_compute(col)
+    col.modified = true
+    if key in gs.columns { unload_column(gs, key) }
+    integrate_column(gs, key, col)
 }
 
 // Go to `pos` (eye) facing `yaw`, held there until the ground has loaded.

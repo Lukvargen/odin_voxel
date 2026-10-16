@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import la "core:math/linalg"
 import enet "vendor:ENet"
 
 // The server: runs the simulation (sim.odin) for its players. Clients only
@@ -13,6 +14,13 @@ import enet "vendor:ENet"
 //
 // Each step: take in what the clients sent (server_receive), run the world
 // (server_simulate), send out what happened (server_flush).
+//
+// The world's edits: a player's client changes blocks itself and sends the
+// results (Voxels, Chunk_Voxels); the server writes them into its World,
+// where a column it doesn't have loaded is changed in its save file, and
+// passes them on to every other client. A joining client gets the list of
+// edited columns (Edited) and asks for those it needs (Column_Request)
+// instead of generating them.
 
 VIEW_RATE :: 30 // player views and the clock sent this many times a second
 
@@ -24,6 +32,7 @@ Server :: struct {
     remotes:      [MAX_PLAYERS]Remote, // by player slot
     view_timer:   f32,
     local_out:    Outbox,    // to the local client, moved to link.to_client at the flush
+    away:         map[[2]int]^Column, // columns edited this step that aren't loaded: saved, then freed
 }
 
 // A player connected over ENet.
@@ -72,6 +81,7 @@ server_simulate :: proc(srv: ^Server, dt: f32) {
 // Take in what the clients sent since the last step: the local one's
 // bytes, and the network's connections, departures and packets.
 server_receive :: proc(srv: ^Server) {
+    defer server_save_away(srv)
     server_handle(srv, srv.local_player, srv.link.to_server[:])
     clear(&srv.link.to_server)
     if srv.host == nil { return }
@@ -123,6 +133,7 @@ server_greet :: proc(srv: ^Server, peer: ^enet.Peer, data: []u8) {
         peer.data = rawptr(uintptr(slot + 1))
         pos, yaw := arrival_point(srv)
         outbox_put(&rem.out, .Welcome, Msg_Welcome{slot = u8(slot), pos = pos, yaw = yaw})
+        server_send_edited(srv, &rem.out)
         fmt.printf("Host: player %d joined from %v\n", slot, peer.address)
         return
     }
@@ -164,6 +175,18 @@ server_drop :: proc(srv: ^Server, slot: int) {
 server_broadcast :: proc(srv: ^Server, kind: Msg_Kind, body: $T) {
     outbox_put(&srv.local_out, kind, body)
     for &rem in srv.remotes { if rem.peer != nil { outbox_put(&rem.out, kind, body) } }
+}
+
+// Messages for every client but player `from`'s.
+server_forward :: proc(srv: ^Server, from: int, kind: Msg_Kind, body: $T) {
+    if from != srv.local_player { outbox_put(&srv.local_out, kind, body) }
+    for &rem, slot in srv.remotes { if rem.peer != nil && slot != from { outbox_put(&rem.out, kind, body) } }
+}
+
+// Player `player`'s client's outbox.
+@(private="file")
+server_outbox :: proc(srv: ^Server, player: int) -> ^Outbox {
+    return player == srv.local_player ? &srv.local_out : &srv.remotes[player].out
 }
 
 // Apply what player `player`'s client sent. The local player is the host:
@@ -208,7 +231,23 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
                 slimes_clear(sim)
                 enemies_clear(sim)
             }
-        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event:
+        case .Voxels:
+            m := msg_get(&r, Msg_Voxels) or_break
+            m.count = min(m.count, VOXEL_BATCH)
+            for v in m.items[:m.count] { server_write(srv, la.array_cast(v.pos, int), v.block) }
+            server_forward(srv, player, .Voxels, m)
+        case .Chunk_Voxels:
+            m := msg_get(&r, Msg_Chunk_Voxels) or_break
+            if chunk_y_index(int(m.key.y)) < 0 { break }
+            base := la.array_cast(m.key, int) * CHUNK_VOXELS
+            for v, vi in m.voxels {
+                server_write(srv, base + {vi & 7, (vi >> 3) & 7, vi >> 6}, v)
+            }
+            server_forward(srv, player, .Chunk_Voxels, m)
+        case .Column_Request:
+            key := msg_get(&r, [2]i32) or_break
+            server_send_column(srv, server_outbox(srv, player), {int(key.x), int(key.y)})
+        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data:
             r.at = len(r.data) // not a connected client's to send: drop the rest
         }
     }
@@ -232,6 +271,72 @@ server_hit :: proc(srv: ^Server, by: int, h: Msg_Hit) {
         if !e.alive || e.uid != h.uid || e.state == .Dead { return }
         if !enemy_damage(sim, e, h.damage, h.knock, h.boosted, by) { e.freeze = h.freeze }
     }
+}
+
+// One block a player changed, into the world: its loaded column, or the
+// column's save (server_save_away).
+@(private="file")
+server_write :: proc(srv: ^Server, p: [3]int, block: u8) {
+    if p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX || int(block) >= len(Block_Type) { return }
+    w := srv.sim.world
+    key := [2]int{p.x >> 3, p.z >> 3} // CHUNK_VOXELS == 8
+    col := w.columns[key]
+    if col == nil {
+        col = srv.away[key]
+        if col == nil {
+            col = key in w.saved_columns ? load_column(key) : nil
+            if col == nil { col = generate_column_at(key.x, key.y) }
+            srv.away[key] = col
+        }
+    }
+    vi := (p.x & 7) + (p.y & 7) * CHUNK_VOXELS + (p.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS
+    if chunk_set_voxel(&col.chunks[chunk_y_index(p.y >> 3)], vi, block) { col.modified = true }
+}
+
+// The columns edited out of the loaded world this step go to their saves.
+@(private="file")
+server_save_away :: proc(srv: ^Server) {
+    for key, col in srv.away {
+        save_column(srv.sim.world, key, col)
+        column_free(col)
+    }
+    clear(&srv.away)
+}
+
+// Every column that differs from the generated world: saved, or edited
+// since the last save.
+@(private="file")
+server_send_edited :: proc(srv: ^Server, o: ^Outbox) {
+    w := srv.sim.world
+    m: Msg_Edited
+    add :: proc(o: ^Outbox, m: ^Msg_Edited, key: [2]int) {
+        m.keys[m.count] = {i32(key.x), i32(key.y)}
+        m.count += 1
+        if int(m.count) == len(m.keys) {
+            outbox_put(o, .Edited, m^)
+            m.count = 0
+        }
+    }
+    for key in w.saved_columns { add(o, &m, key) }
+    for key, col in w.columns { if col.modified && !(key in w.saved_columns) { add(o, &m, key) } }
+    if m.count > 0 { outbox_put(o, .Edited, m) }
+}
+
+// A column, as the server has it: loaded (with its latest edits), saved,
+// or (size 0) neither, so the client generates it itself.
+@(private="file")
+server_send_column :: proc(srv: ^Server, o: ^Outbox, key: [2]int) {
+    w := srv.sim.world
+    bytes := make([dynamic]u8, 0, 4096, context.temp_allocator)
+    if col := w.columns[key]; col != nil {
+        column_encode(col, &bytes)
+    } else if key in w.saved_columns {
+        if col := load_column(key); col != nil {
+            column_encode(col, &bytes)
+            column_free(col)
+        }
+    }
+    outbox_put_bytes(o, .Column_Data, Msg_Column_Data{key = {i32(key.x), i32(key.y)}, size = u32(len(bytes))}, bytes[:])
 }
 
 @(private="file")

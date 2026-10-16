@@ -79,6 +79,8 @@ session_leave :: proc(gs: ^Game_State) {
     n.remote, n.welcomed, n.slot, n.arriving = false, false, LOCAL_PLAYER, false
     n.home_pos = {}
     for &o in n.others { o.active = false }
+    clear(&n.edited)
+    clear(&n.requested)
     clear(&n.out.reliable)
     clear(&n.out.unreliable)
     clear(&gs.loop.to_server)

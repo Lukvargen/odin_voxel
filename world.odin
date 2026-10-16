@@ -172,6 +172,7 @@ block_is_leaves :: #force_inline proc(b: u8) -> bool {
 World :: struct {
     columns:       map[[2]int]^Column,
     saved_columns: map[[2]int]bool, // columns with a save file (save.odin)
+    save_enabled:  bool,            // edits are saved (off in benches, and joined to a server)
 }
 
 // One 8x8x8 chunk. Uniform chunks (all air, all stone) keep no voxel array.
@@ -343,6 +344,10 @@ enqueue_radius :: proc(gs: ^Game_State, radius: int) {
             wcx := pcx + dcx; wcz := pcz + dcz
             key := [2]int{wcx, wcz}
             if key in gs.columns { continue }
+            if client_joined(gs) && key in gs.net.edited {
+                client_request_column(gs, key) // the server's, not generated
+                continue
+            }
             worker_pool_enqueue(&gs.pool, key, key in gs.saved_columns)
         }
     }
@@ -430,6 +435,12 @@ integrate_ready_chunks :: proc(gs: ^Game_State) {
     for r in results {
         if r.key in gs.columns {
             column_free(r.column) // already resident: discard the duplicate
+            continue
+        }
+        if client_joined(gs) && r.key in gs.net.edited {
+            // Edited on the server while it generated: the server's it is.
+            column_free(r.column)
+            client_request_column(gs, r.key)
             continue
         }
         if r.from_disk != (r.key in gs.saved_columns) {

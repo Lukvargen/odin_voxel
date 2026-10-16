@@ -45,12 +45,27 @@ save_init :: proc(gs: ^Game_State) {
     }
 }
 
-save_column :: proc(gs: ^Game_State, key: [2]int, col: ^Column) {
-    if !gs.save_enabled { return }
+save_column :: proc(w: ^World, key: [2]int, col: ^Column) {
+    if !w.save_enabled { return }
     out := make([dynamic]u8, 0, 4096)
     defer delete(out)
     append(&out, SAVE_MAGIC)
+    column_encode(col, &out)
 
+    _ = os.make_directory_all(save_dir)
+    buf: [256]u8
+    if err := os.write_entire_file(column_path(buf[:], key), out[:]); err != nil {
+        fmt.eprintln("Save: failed to write column", key, err)
+        return
+    }
+    w.saved_columns[key] = true
+    col.modified = false
+}
+
+// A column's voxels, run-length encoded (block u8, count u16 little
+// endian), appended to out: a save file's body, and what the server sends
+// of an edited column.
+column_encode :: proc(col: ^Column, out: ^[dynamic]u8) {
     run_v, run_n := u8(0), 0
     flush :: proc(out: ^[dynamic]u8, v: u8, n: int) {
         n := n
@@ -66,20 +81,34 @@ save_column :: proc(gs: ^Game_State, key: [2]int, col: ^Column) {
         for vi in 0 ..< VOXELS_PER_BRICK {
             v := chunk_voxel(&c, vi)
             if v == run_v { run_n += 1; continue }
-            flush(&out, run_v, run_n)
+            flush(out, run_v, run_n)
             run_v, run_n = v, 1
         }
     }
-    flush(&out, run_v, run_n)
+    flush(out, run_v, run_n)
+}
 
-    _ = os.make_directory_all(save_dir)
-    buf: [256]u8
-    if err := os.write_entire_file(column_path(buf[:], key), out[:]); err != nil {
-        fmt.eprintln("Save: failed to write column", key, err)
-        return
+// A column from column_encode's bytes, or nil if they don't make one
+// (unknown blocks, wrong length). No light yet.
+column_decode :: proc(rle: []u8) -> ^Column {
+    voxels := make([]u8, COLUMN_VOXELS)
+    defer delete(voxels)
+    n := 0
+    for i := 0; i + 3 <= len(rle); i += 3 {
+        count := int(endian.unchecked_get_u16le(rle[i + 1:]))
+        if n + count > COLUMN_VOXELS || int(rle[i]) >= len(Block_Type) { return nil }
+        for &v in voxels[n:][:count] { v = rle[i] }
+        n += count
     }
-    gs.saved_columns[key] = true
-    col.modified = false
+    if n != COLUMN_VOXELS { return nil }
+
+    col := new(Column)
+    for &c, iy in col.chunks {
+        c.voxels = new([VOXELS_PER_BRICK]u8)
+        copy(c.voxels[:], voxels[iy * VOXELS_PER_BRICK:][:VOXELS_PER_BRICK])
+        chunk_compact(&c)
+    }
+    return col
 }
 
 // Save every resident column with unsaved edits.
@@ -106,24 +135,5 @@ load_column :: proc(key: [2]int) -> ^Column {
     if err != nil { return nil }
     defer delete(data)
     if len(data) < len(SAVE_MAGIC) || string(data[:len(SAVE_MAGIC)]) != SAVE_MAGIC { return nil }
-
-    voxels := make([]u8, COLUMN_VOXELS)
-    defer delete(voxels)
-    n := 0
-    for i := len(SAVE_MAGIC); i + 3 <= len(data); i += 3 {
-        count := int(endian.unchecked_get_u16le(data[i + 1:]))
-        if n + count > COLUMN_VOXELS { return nil }
-        for &v in voxels[n:][:count] { v = data[i] }
-        n += count
-    }
-    if n != COLUMN_VOXELS { return nil }
-
-    col := new(Column)
-    for &c, iy in col.chunks {
-        c.voxels = new([VOXELS_PER_BRICK]u8)
-        copy(c.voxels[:], voxels[iy * VOXELS_PER_BRICK:][:VOXELS_PER_BRICK])
-        chunk_compact(&c)
-    }
-    col.modified = false
-    return col
+    return column_decode(data[len(SAVE_MAGIC):])
 }

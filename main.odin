@@ -60,7 +60,6 @@ Game_State :: struct {
     light_pool:      Brick_Pool,         // free-list allocator over light pool ids
     light_dirty:     [dynamic]int,       // slots whose light needs GPU upload
     stitch_queue:    [dynamic][2]int,    // integrated columns awaiting light stitching
-    save_enabled:    bool,               // off in bench mode, so benches never touch saves
     last_autosave:   time.Tick,
     player_chunk:    [3]int,
     prof_frames:     int,

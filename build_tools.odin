@@ -515,9 +515,21 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
     return len(changed)
 }
 
-// Relight, re-upload and re-summarise after voxels changed.
+// Relight, re-upload and re-summarise after voxels changed, and tell the
+// server (which passes the change on to the other players).
 @(private="file")
 build_commit :: proc(gs: ^Game_State, changed: [][3]int, dirty: map[int]bool) {
+    light_on_edit(gs, changed)
+    for slot in dirty { gpu_sync_slot(gs, slot) }
+    far_update_edited(gs, changed)
+    client_send_voxels(gs, changed)
+}
+
+// Relight, re-upload and re-summarise after another player changed voxels.
+world_refresh :: proc(gs: ^Game_State, changed: [][3]int) {
+    if len(changed) == 0 { return }
+    dirty := make(map[int]bool, 16, context.temp_allocator)
+    for p in changed { dirty[ring_slot(p.x >> 3, p.y >> 3, p.z >> 3)] = true }
     light_on_edit(gs, changed)
     for slot in dirty { gpu_sync_slot(gs, slot) }
     far_update_edited(gs, changed)
