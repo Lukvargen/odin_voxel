@@ -618,12 +618,12 @@ site_spawn :: proc(sim: ^Sim, lm: Landmark, key: [2]int, night: f32) -> int {
     add :: proc(k: ^[6]Enemy_Kind, n: ^int, kind: Enemy_Kind, count: int) {
         for _ in 0 ..< count { if n^ < len(k) { k[n^] = kind; n^ += 1 } }
     }
-    ring := f32(6)
+    ring := f32(6 * TERRAIN_SCALE)
     switch lm.kind {
     case .None:
     case .Tower:  add(&kinds, &n, .Skeleton, 3)
-    case .Shrine: add(&kinds, &n, .Skeleton, 2); ring = 5
-    case .Stones: add(&kinds, &n, .Skeleton, night > 0.5 ? 4 : 2); ring = 4
+    case .Shrine: add(&kinds, &n, .Skeleton, 2); ring = 5 * TERRAIN_SCALE
+    case .Stones: add(&kinds, &n, .Skeleton, night > 0.5 ? 4 : 2); ring = 4 * TERRAIN_SCALE
     case .Camp:
         b := terrain_at(lm.x, lm.z).biome
         orcs := (b == .Desert || b == .Badlands) ? 2 : 1
@@ -637,7 +637,7 @@ site_spawn :: proc(sim: ^Sim, lm: Landmark, key: [2]int, night: f32) -> int {
             r := rand.float32_range(ring * 0.5, ring * 1.3)
             x := lm.x + int(math.floor(math.cos(a) * r))
             z := lm.z + int(math.floor(math.sin(a) * r))
-            y, ok := stand_y(sim, x, z, lm.base + 6)
+            y, ok := stand_y(sim, x, z, lm.base + 9)
             if !ok { continue }
             e := enemy_spawn(sim, kinds[i], {f32(x) + 0.5, f32(y), f32(z) + 0.5})
             if e == nil { return placed }

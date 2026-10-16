@@ -597,6 +597,7 @@ Tree_Target :: struct {
     far:      ^Far_Summary,
     ox, oz:   int,     // world voxel coord of local (0, *, 0)
     size:     int,     // footprint width in voxels
+    design:   ^Landmark_Design, // or a landmark being built at its design size (landmarks.odin)
 }
 
 // Max horizontal voxel reach of a tree from its base (trunk wander + branch +
@@ -604,6 +605,7 @@ Tree_Target :: struct {
 TREE_VOXEL_REACH :: 48
 
 set_voxel_world :: proc(t: ^Tree_Target, wx, wy, wz: int, block: Block_Type) {
+    if t.design != nil { design_put(t.design, wx, wy, wz, block); return }
     lx := wx - t.ox; lz := wz - t.oz
     if lx < 0 || lx >= t.size { return }
     if lz < 0 || lz >= t.size { return }

@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:math"
 
 // `bench landmarks [hour=h] [dir]`: the nearest landmark of each kind seen
-// from ~30 voxels away, from eye level and from above, plus a cave crystal
+// from ~30 design blocks away, from eye level and from above, plus a cave crystal
 // grotto, for judging the ruins in their light.
 bench_landmarks: bool
 
@@ -19,12 +19,12 @@ bench_landmarks_run :: proc(gs: ^Game_State) {
         fmt.printf("landmarks: %v at %d,%d (base %d)\n", kind, lm.x, lm.z, lm.base)
         for view in 0 ..< 2 {
             a := f32(lm.seed % 360)
-            d: f32 = view == 0 ? 26 : 40
+            d: f32 = (view == 0 ? 26 : 40) * TERRAIN_SCALE
             p := [3]f32{f32(lm.x) + 0.5 + math.sin(math.to_radians(a)) * d, 0, f32(lm.z) + 0.5 + math.cos(math.to_radians(a)) * d}
-            p.y = f32(max(surface_height_at(int(p.x), int(p.z)), lm.base)) + (view == 0 ? 6 : 34)
+            p.y = f32(max(surface_height_at(int(p.x), int(p.z)), lm.base)) + (view == 0 ? 9 : 51)
             bench_teleport(gs, p)
             bench_clear_view(gs)
-            to := [3]f32{f32(lm.x) + 0.5, f32(lm.base) + 10, f32(lm.z) + 0.5} - cam.pos
+            to := [3]f32{f32(lm.x) + 0.5, f32(lm.base) + 15, f32(lm.z) + 0.5} - cam.pos
             cam.yaw = math.to_degrees(math.atan2(to.x, to.z))
             cam.pitch = math.to_degrees(math.atan2(to.y, math.sqrt(to.x * to.x + to.z * to.z)))
             bench_measure(gs)

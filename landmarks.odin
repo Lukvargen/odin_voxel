@@ -16,10 +16,15 @@ import "core:math"
 //  - Camp: a goblin camp, a ring of sharpened stakes around a fire pit and
 //    lean-to huts of branches. Its goblins and orcs are spawned by
 //    enemies.odin, as are the skeletons that guard the ruins.
+//
+// They're designed in design blocks, like the terrain: each is built into a
+// Landmark_Design at that size around its site, then stretched
+// TERRAIN_SCALE times into the world (landmark_place), doorways and all.
 
-LANDMARK_CELL   :: 224
-LANDMARK_MARGIN :: 32 // keep sites this far inside their cell
-LANDMARK_REACH  :: 18 // max horizontal reach from the site centre
+LANDMARK_CELL   :: 336 // world blocks (224 design)
+LANDMARK_MARGIN :: 48  // keep sites this far inside their cell
+LANDMARK_REACH  :: 28  // world blocks: max horizontal reach from the site centre...
+LANDMARK_DESIGN_REACH :: 18 // ...18 design blocks
 
 Landmark_Kind :: enum u8 { None, Tower, Stones, Shrine, Camp }
 
@@ -47,7 +52,7 @@ landmark_in_cell :: proc(cx, cz: int) -> Landmark {
         px := cx * LANDMARK_CELL + LANDMARK_MARGIN + int(lm_hash(cx + i * 101, cz, 31) * f64(span))
         pz := cz * LANDMARK_CELL + LANDMARK_MARGIN + int(lm_hash(cx, cz + i * 101, 37) * f64(span))
         ps := terrain_at(px, pz)
-        if ps.height > s.height && ps.height < SNOW_LINE - 10 { x, z, s = px, pz, ps }
+        if ps.height > s.height && ps.height < world_h(SNOW_LINE - 10) { x, z, s = px, pz, ps }
     }
     if s.height < SEA_LEVEL + 3 { return {} }
 
@@ -66,14 +71,14 @@ landmark_in_cell :: proc(cx, cz: int) -> Landmark {
     }
 
     // Needs fairly level ground: sample the rim.
-    r := kind == .Stones || kind == .Camp ? 9 : 6
+    r := kind == .Stones || kind == .Camp ? 14 : 9
     lo, hi := s.height, s.height
     for d in ([4][2]int{{r, 0}, {-r, 0}, {0, r}, {0, -r}}) {
         hh := surface_height_at(x + d.x, z + d.y)
         if hh < SEA_LEVEL + 1 { return {} }
         lo, hi = min(lo, hh), max(hi, hh)
     }
-    if hi - lo > (kind == .Stones || kind == .Camp ? 5 : 8) { return {} }
+    if hi - lo > (kind == .Stones || kind == .Camp ? 8 : 12) { return {} }
     return {kind, x, z, kind == .Stones || kind == .Camp ? s.height : hi, int(h * 1e6) + cx * 31 + cz * 17}
 }
 
@@ -97,21 +102,102 @@ generate_landmarks :: proc(tgt: ^Tree_Target) {
             if lm.kind == .None { continue }
             if !aabb_hits_chunk(tgt, lm.x - LANDMARK_REACH, 0, lm.z - LANDMARK_REACH,
                                 lm.x + LANDMARK_REACH, 0, lm.z + LANDMARK_REACH) { continue }
-            switch lm.kind {
-            case .None:
-            case .Tower:  generate_tower(tgt, lm)
-            case .Stones: generate_stone_circle(tgt, lm)
-            case .Shrine: generate_shrine(tgt, lm)
-            case .Camp:   generate_camp(tgt, lm)
+            landmark_place(tgt, lm)
+        }
+    }
+}
+
+// A landmark at its design size, around its site: (x, base, z) is the same
+// point in both, and a design block is TERRAIN_SCALE world blocks.
+Landmark_Design :: struct {
+    lm:        Landmark,
+    voxels:    [LD_W * LD_H * LD_W]u8, // LD_UNSET where the design leaves the world as it is
+    clear_r:   int, // the glade cleared of trees (design blocks), up to clear_top
+    clear_top: int,
+}
+
+@(private="file") LD_W     :: 2 * LANDMARK_DESIGN_REACH + 3
+@(private="file") LD_H     :: 80 // design blocks, from LD_BELOW under the base
+@(private="file") LD_BELOW :: 28
+@(private="file") LD_UNSET :: 0xff
+
+// Build lm's design, then stretch it into tgt.
+@(private="file")
+landmark_place :: proc(tgt: ^Tree_Target, lm: Landmark) {
+    d := new(Landmark_Design)
+    defer free(d)
+    d.lm = lm
+    for &v in d.voxels { v = LD_UNSET }
+    dt := Tree_Target{design = d}
+    switch lm.kind {
+    case .None:
+    case .Tower:  generate_tower(&dt, lm)
+    case .Stones: generate_stone_circle(&dt, lm)
+    case .Shrine: generate_shrine(&dt, lm)
+    case .Camp:   generate_camp(&dt, lm)
+    }
+    if d.clear_r > 0 {
+        clear_vegetation(tgt, lm, int(f64(d.clear_r) * TERRAIN_SCALE), lm.base + int(f64(d.clear_top - lm.base) * TERRAIN_SCALE))
+    }
+    // Every world voxel of the footprint near the site takes the design
+    // voxel its centre falls in.
+    y0 := lm.base - int(f64(LD_BELOW) * TERRAIN_SCALE)
+    y1 := lm.base + int(f64(LD_H - LD_BELOW) * TERRAIN_SCALE)
+    for wz in max(lm.z - LANDMARK_REACH, tgt.oz) ..< min(lm.z + LANDMARK_REACH + 1, tgt.oz + tgt.size) {
+        for wx in max(lm.x - LANDMARK_REACH, tgt.ox) ..< min(lm.x + LANDMARK_REACH + 1, tgt.ox + tgt.size) {
+            for wy in y0 ..< y1 {
+                if v := design_voxel_at_world(d, wx, wy, wz); v != LD_UNSET { set_voxel_world(tgt, wx, wy, wz, Block_Type(v)) }
             }
         }
     }
+}
+
+// The design point a world block's centre lies in.
+@(private="file")
+design_of_world :: #force_inline proc(lm: Landmark, wx, wy, wz: int) -> [3]int {
+    return {
+        lm.x + int(math.floor((f64(wx - lm.x) + 0.5) / TERRAIN_SCALE)),
+        lm.base + int(math.floor((f64(wy - lm.base) + 0.5) / TERRAIN_SCALE)),
+        lm.z + int(math.floor((f64(wz - lm.z) + 0.5) / TERRAIN_SCALE)),
+    }
+}
+
+@(private="file")
+design_index :: #force_inline proc(d: ^Landmark_Design, p: [3]int) -> (int, bool) {
+    x := p.x - d.lm.x + LANDMARK_DESIGN_REACH + 1
+    y := p.y - d.lm.base + LD_BELOW
+    z := p.z - d.lm.z + LANDMARK_DESIGN_REACH + 1
+    if x < 0 || x >= LD_W || y < 0 || y >= LD_H || z < 0 || z >= LD_W { return 0, false }
+    return x + y * LD_W + z * LD_W * LD_H, true
+}
+
+@(private="file")
+design_voxel_at_world :: proc(d: ^Landmark_Design, wx, wy, wz: int) -> u8 {
+    i, ok := design_index(d, design_of_world(d.lm, wx, wy, wz))
+    return ok ? d.voxels[i] : LD_UNSET
+}
+
+// A design voxel, written by a generator through set_voxel_world.
+design_put :: proc(d: ^Landmark_Design, x, y, z: int, b: Block_Type) {
+    if i, ok := design_index(d, {x, y, z}); ok { d.voxels[i] = u8(b) }
+}
+
+// The ground under design point (x, z), in design blocks.
+@(private="file")
+lm_ground :: proc(t: ^Tree_Target, x, z: int) -> int {
+    d := t.design
+    if d == nil { return surface_height_at(x, z) }
+    wx := d.lm.x + int(math.floor(f64(x - d.lm.x) * TERRAIN_SCALE))
+    wz := d.lm.z + int(math.floor(f64(z - d.lm.z) * TERRAIN_SCALE))
+    g := surface_height_at(wx, wz)
+    return d.lm.base + int(math.floor(f64(g - d.lm.base) / TERRAIN_SCALE + 0.5))
 }
 
 // A glade: remove tree logs and leaves within radius r of the site, up to y1
 // (in a far summary there is nothing to remove; trees there are only tops).
 @(private="file")
 clear_vegetation :: proc(t: ^Tree_Target, lm: Landmark, r: int, y1: int) {
+    if t.design != nil { t.design.clear_r, t.design.clear_top = r, y1; return } // done in the world after
     if t.col == nil { return }
     for wz in lm.z - r ..= lm.z + r {
         for wx in lm.x - r ..= lm.x + r {
@@ -130,6 +216,7 @@ clear_vegetation :: proc(t: ^Tree_Target, lm: Landmark, r: int, y1: int) {
 
 @(private="file")
 in_footprint :: #force_inline proc(t: ^Tree_Target, wx, wz: int) -> bool {
+    if t.design != nil { return true } // the whole design is built
     lx, lz := wx - t.ox, wz - t.oz
     return lx >= 0 && lx < t.size && lz >= 0 && lz < t.size
 }
@@ -137,7 +224,7 @@ in_footprint :: #force_inline proc(t: ^Tree_Target, wx, wz: int) -> bool {
 // Fill from the ground up to (and including) top - 1 at (wx, wz).
 @(private="file")
 foundation :: proc(t: ^Tree_Target, wx, wz, top: int, b: Block_Type) {
-    g := surface_height_at(wx, wz)
+    g := lm_ground(t, wx, wz)
     for y in min(g - 2, top - 1) ..< top { set_voxel_world(t, wx, y, wz, b) }
 }
 
@@ -215,7 +302,7 @@ generate_tower :: proc(t: ^Tree_Target, lm: Landmark) {
         wx := lm.x + int(math.floor(math.cos(a) * d))
         wz := lm.z + int(math.floor(math.sin(a) * d))
         if !in_footprint(t, wx, wz) { continue }
-        g := surface_height_at(wx, wz)
+        g := lm_ground(t, wx, wz)
         if g < SEA_LEVEL { continue }
         set_voxel_world(t, wx, g, wz, ruin_block(wx, g, wz, seed + 1))
     }
@@ -240,7 +327,7 @@ generate_stone_circle :: proc(t: ^Tree_Target, lm: Landmark) {
                 wx := sx + int(math.round(tx * f64(s)))
                 wz := sz + int(math.round(tz * f64(s)))
                 if !in_footprint(t, wx, wz) { continue }
-                g := surface_height_at(wx, wz)
+                g := lm_ground(t, wx, wz)
                 set_voxel_world(t, wx, g, wz, .Stone)
             }
             continue
@@ -250,7 +337,7 @@ generate_stone_circle :: proc(t: ^Tree_Target, lm: Landmark) {
         for p in 0 ..< 2 {
             wx, wz := sx + ox * p, sz + oz * p
             if !in_footprint(t, wx, wz) { continue }
-            g := surface_height_at(wx, wz)
+            g := lm_ground(t, wx, wz)
             for y in g - 2 ..< g + h - p { set_voxel_world(t, wx, y, wz, .Stone) }
         }
     }
@@ -272,7 +359,7 @@ generate_stone_circle :: proc(t: ^Tree_Target, lm: Landmark) {
 generate_shrine :: proc(t: ^Tree_Target, lm: Landmark) {
     seed := lm.seed
     floor_top := lm.base + 1
-    clear_vegetation(t, lm, 7, lm.base + 40)
+    clear_vegetation(t, lm, 10, lm.base + 40)
     for dz in -3 ..= 3 {
         for dx in -3 ..= 3 {
             wx, wz := lm.x + dx, lm.z + dz
@@ -318,7 +405,7 @@ generate_camp :: proc(t: ^Tree_Target, lm: Landmark) {
             for a < 0 { a += math.TAU }
             gate := a < 0.32 || abs(a - math.PI) < 0.32
             if gate || lm_hash(wx, wz, seed + 3) < 0.12 { continue }
-            g := surface_height_at(wx, wz)
+            g := lm_ground(t, wx, wz)
             h := 3 + int(lm_hash(wx, wz, seed + 5) * 2.5)
             for y in g - 1 ..< g + h { set_voxel_world(t, wx, y, wz, .Spruce_Log) }
         }
@@ -328,7 +415,7 @@ generate_camp :: proc(t: ^Tree_Target, lm: Landmark) {
         for dx in -1 ..= 1 {
             wx, wz := lm.x + dx, lm.z + dz
             if !in_footprint(t, wx, wz) { continue }
-            g := surface_height_at(wx, wz)
+            g := lm_ground(t, wx, wz)
             set_voxel_world(t, wx, g - 1, wz, dx == 0 && dz == 0 ? .Gravel : .Stone)
             if dx == 0 && dz == 0 { set_voxel_world(t, wx, g, wz, .Torch) }
         }
@@ -341,7 +428,7 @@ generate_camp :: proc(t: ^Tree_Target, lm: Landmark) {
         for k in -1 ..= 1 {
             wx := lm.x + int(math.round(ca * 3 - sa * f64(k)))
             wz := lm.z + int(math.round(sa * 3 + ca * f64(k)))
-            if in_footprint(t, wx, wz) { set_voxel_world(t, wx, surface_height_at(wx, wz), wz, .Log) }
+            if in_footprint(t, wx, wz) { set_voxel_world(t, wx, lm_ground(t, wx, wz), wz, .Log) }
         }
         // Hut: a sloped roof of leaves on a log ridge, open toward the fire.
         hx, hz := f64(lm.x) + ca * 6.5, f64(lm.z) + sa * 6.5
@@ -350,7 +437,7 @@ generate_camp :: proc(t: ^Tree_Target, lm: Landmark) {
                 wx := int(math.round(hx - sa * f64(u) + ca * f64(v - 1)))
                 wz := int(math.round(hz + ca * f64(u) + sa * f64(v - 1)))
                 if !in_footprint(t, wx, wz) { continue }
-                g := surface_height_at(wx, wz)
+                g := lm_ground(t, wx, wz)
                 roof := 3 - v
                 if v == 0 && abs(u) == 2 { for y in g ..< g + 3 { set_voxel_world(t, wx, y, wz, .Log) } }
                 if roof >= 0 { set_voxel_world(t, wx, g + roof, wz, v == 0 ? .Log : .Spruce_Leaves) }
