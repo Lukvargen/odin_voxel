@@ -152,6 +152,10 @@ bench_run :: proc(gs: ^Game_State) {
         bench_sea_run(gs)
         return
     }
+    if bench_climb {
+        bench_climb_run(gs)
+        return
+    }
 
     gs.camera.fly_mode = true
     spawn := gs.camera.pos

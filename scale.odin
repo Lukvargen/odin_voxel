@@ -26,8 +26,8 @@ world_scale_apply :: proc(s: f32) {
     SWIM_UP_ACCEL *= s
     SWIM_FLOAT_EYE *= s
     SWIM_HOP_SPEED *= s
-    CLIMB_SPEED *= s
     CLIMB_REACH *= s
+    MANTLE_REACH *= s
     // Gliding: lift goes with speed squared, so its constant takes 1/S for
     // the forces to come out S times (glider.odin).
     GLIDER_GRAVITY *= s

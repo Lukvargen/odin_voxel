@@ -798,7 +798,7 @@ sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: 
 // The sword and the arm holding it, in first person.
 combat_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     c := &gs.combat
-    if !c.sword || gs.glider.deployed || gs.glider.chase_dist > 1.5 || !ent_begin(f) { return }
+    if !c.sword || gs.camera.climbing || gs.glider.deployed || gs.glider.chase_dist > 1.5 || !ent_begin(f) { return }
     cam := gs.camera
     fwd, right, up := camera_view_basis(cam, 1)
     right, up = la.normalize(right), la.normalize(up)
@@ -808,6 +808,37 @@ combat_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
     // The elbow hangs down and out to the side.
     sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.7 - up - fwd * 0.3)
+    ent_end(f)
+}
+
+// Both hands on the lip while pulling up onto a ledge (camera.odin), in
+// first person: the shoulders rise past them, so the arms go from reaching
+// up to pressing down with the elbows back. Let go just before the end.
+mantle_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
+    cam := gs.camera
+    if !cam.climbing || gs.glider.chase_dist > 1.5 { return }
+    m := cam.mantle
+    u := m.t / m.dur
+    if u > 0.9 || !ent_begin(f) { return }
+    _, right, up := camera_view_basis(cam, 1)
+    right, up = la.normalize(right), la.normalize(up)
+    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+    ent_scale_about(f, eye, world_scale)
+    fwd := m.dir
+    side := la.normalize([3]f32{-fwd.z, 0, fwd.x}) // flat, to the right of the ledge
+    if la.dot(side, right) < 0 { side = -side }
+    for s in ([2]f32{-1, 1}) {
+        // The hand on the lip (world), brought into the body's design frame.
+        hw := m.hands + side * (s * 0.22 * world_scale) + [3]f32{0, 0.04 * world_scale, 0} + fwd * (0.06 * world_scale)
+        hand := eye + (hw - eye) / world_scale
+        shoulder := eye + right * (s * 0.19) - up * 0.22
+        pole := side * (s * 0.6) - fwd * 0.8 - [3]f32{0, 0.2, 0}
+        elbow, wrist := two_bone_ik(shoulder, hand, pole, UPPER_ARM_LEN, FOREARM_LEN)
+        ent_segment(f, .Arm_Upper, shoulder, elbow, pole, PLAYER_TINT)
+        ent_segment(f, .Arm_Fore, elbow, wrist, pole, PLAYER_TINT)
+        grip := side * s
+        ent_part(f, .Fist, wrist, basis_from_axes(fwd, la.cross(grip, fwd), grip))
+    }
     ent_end(f)
 }
 
