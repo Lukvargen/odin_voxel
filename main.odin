@@ -204,7 +204,7 @@ main :: proc() {
         // [world=<name>]: play the world saved in saves/<name> (default "world").
         // [host] [port=<n>]: let players elsewhere join (UDP port, default NET_PORT).
         // [join=<address>[:<port>]]: play on someone's server instead.
-        // [at=<x>,<z>] [yaw=<degrees>]: start there, facing that way.
+        // [at=<x>,<z>] [yaw=<degrees>]: start there, facing that way. [hour=<h>]: at that time.
         for a in os.args[1:] {
             switch {
             case strings.has_prefix(a, "at="):
@@ -216,6 +216,9 @@ main :: proc() {
                 }
             case strings.has_prefix(a, "yaw="):
                 start_yaw, _ = strconv.parse_f32(a[4:])
+            case strings.has_prefix(a, "hour="):
+                h, _ := strconv.parse_f32(a[5:])
+                day_set_hour(&gs, clamp(h, 0, 23.99), settle = true)
             case strings.has_prefix(a, "world="):
                 save_dir = strings.concatenate({"saves/", a[6:]})
             case a == "host":
