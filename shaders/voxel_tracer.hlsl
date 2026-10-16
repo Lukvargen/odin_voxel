@@ -167,7 +167,7 @@ float corner_ao(bool s1, bool s2, bool c) {
 // Water doesn't darken the corners it fills.
 bool ao_occludes(float3 p) {
     uint v = sample_voxel(p);
-    return v != 0u && v != BLOCK_WATER;
+    return v != 0u && !block_is_watery(v);
 }
 
 float compute_ao(float3 p, float3 nrm, float3 hit_pos) {
@@ -511,6 +511,43 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         return float3(0.10, 0.28, 0.36);
     }
 
+    if (block_is_water_plant(block_id)) {
+        // Plane texel (plant_texel): u along the plane = local x, v up.
+        float3 lp = hit_pos - float3(vkey);
+        int cu = clamp(int(lp.x * TEXELS), 0, TEXELS - 1);
+        int cv = clamp(int(lp.y * TEXELS), 0, TEXELS - 1);
+        float th = hash31i(int3(vkey.x * 8 + cu, vkey.y * 8 + cv, vkey.z));
+        if (block_id == BLOCK_KELP) {
+            bool stalk = cu == 3 || cu == 4;
+            float3 c = stalk ? float3(0.22, 0.24, 0.07) : float3(0.30, 0.38, 0.09);
+            // Blades lighter toward their edge, a gas bladder now and then.
+            if (!stalk && (cu == 0 || cu == 7)) c *= 1.2;
+            if (stalk && th > 0.93) c = float3(0.45, 0.42, 0.12);
+            return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.15));
+        }
+        if (block_id == BLOCK_SEAGRASS) {
+            float3 c = lerp(float3(0.10, 0.28, 0.08), float3(0.30, 0.55, 0.18), float(cv) / 7.0);
+            return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.2));
+        }
+        // Sea pickle: pale lime capsules with brighter tops.
+        return cv >= 2 ? float3(0.70, 0.95, 0.40) : float3(0.40, 0.62, 0.22);
+    }
+
+    if (block_id == BLOCK_CORAL) {
+        // One colour per reef head (smooth noise picks it, so a head is
+        // mostly one colour), porous: polyp pits and bright tips.
+        static const float3 coral_cols[6] = {
+            float3(0.95, 0.36, 0.50), float3(0.98, 0.52, 0.20), float3(0.62, 0.30, 0.82),
+            float3(0.96, 0.82, 0.28), float3(0.25, 0.58, 0.92), float3(0.92, 0.26, 0.24),
+        };
+        float  pick = vnoise2(float2(vkey.xz) * 0.31 + float(vkey.y) * 0.07 + 5.3);
+        float3 c = coral_cols[min(int(pick * 6.0), 5)];
+        float  pit = tex_noise(fuv, 1.5, 33.0);
+        c *= lerp(1.0, pit < 0.35 ? 0.55 : (h > 0.85 ? 1.25 : 0.95), detail);
+        if (top) c *= 1.1;
+        return saturate(c * (1.0 + vj * 0.12));
+    }
+
     if (block_id == BLOCK_STONE_BRICKS) {
         // Courses of bricks 8 texels long and 4 high (two courses per
         // voxel), staggered by half a brick, with dark mortar joints. Weathering by world position: moss creeps
@@ -719,10 +756,49 @@ float cloud_shadow(float3 p, float3 l) {
     return exp(-od * CLOUD_SIGMA * CLOUD_SHADOW_SCALE);
 }
 
+// ---- Sunlight under water ------------------------------------------------------
+// Sunlight reaching p under the sea: absorbed along its slanted path down
+// from the surface, and focused by the waves into drifting caustic lines
+// whose contrast fades with depth. 1 above water. All generated water tops
+// out at SEA_LEVEL_Y, so the depth is taken from that; p must be in water
+// (a watery voxel), which also keeps caves below sea level dry of it.
+#define SUN_WATER_ABSORB 0.06 // per voxel of slanted path
+
+// Bright net of lines (0..1) at sea-surface position xz.
+float caustics(float2 xz) {
+    float  t = u_time * 0.5;
+    float2 q = xz * 0.45;
+    [unroll]
+    for (int i = 0; i < 2; i++) {
+        q += float2(sin(q.y * 1.3 + t * (1.0 + 0.4 * i)), cos(q.x * 1.1 - t * (0.9 + 0.3 * i))) * 0.55;
+    }
+    float v = abs(sin(q.x) + sin(q.y)) * 0.5;
+    return pow(1.0 - v, 6.0);
+}
+
+float underwater_sun(float3 p, float3 l) {
+    if (p.y >= SEA_LEVEL_Y || !block_is_watery(sample_voxel(p))) return 1.0;
+    float depth = SEA_LEVEL_Y - p.y;
+    float ly    = max(l.y, 0.15);
+    // Where this sunbeam crossed the surface (refraction steepens it).
+    float2 at = p.xz + l.xz / ly * depth * 0.75;
+    float  c  = lerp(1.0, 0.45 + 1.6 * caustics(at), exp(-depth * 0.05));
+    return exp(-depth / ly * SUN_WATER_ABSORB) * c;
+}
+
+// Sky light under the sea: the voxel light lets it straight down through
+// water at full strength, so it is darkened here instead, smoothly with
+// depth, and turned blue-green (red goes first). 1 above water.
+float3 underwater_light(float3 p) {
+    if (p.y >= SEA_LEVEL_Y || !block_is_watery(sample_voxel(p))) return float3(1, 1, 1);
+    float d = SEA_LEVEL_Y - p.y;
+    return exp(-d * float3(0.075, 0.035, 0.028));
+}
+
 // Shading for an entity voxel hit: direct sun (with entity occlusion) plus
 // the voxel light at the entity's surface. Entities are terminal hits (no
 // reflection bounce) so the caller breaks after compositing the result.
-float4 shade_entity(EntityHit ehit, float3 dir) {
+float4 shade_entity(EntityHit ehit, float3 dir, float t_off) {
     float3 P = ehit.hit_pos;
     float3 N = ehit.normal;
     uint flags;
@@ -740,12 +816,13 @@ float4 shade_entity(EntityHit ehit, float3 dir) {
         sun = ndl * trace_shadow_transmittance(so, l)
                   * entity_shadow_transmittance(so, l, RAY_MAX_LENGTH)
                   * cloud_shadow(so, l)
+                  * underwater_sun(so, l)
                   * u_sun_intensity;
     }
 
     // Sky + torch light of the voxel just off the surface.
     uint   lv    = sample_light(int3(floor(P + N * 0.6)));
-    float3 ambient = sky_ambient() * light_curve(float(lv >> 4)) + MIN_AMBIENT;
+    float3 ambient = sky_ambient() * light_curve(float(lv >> 4)) * underwater_light(P + N * 0.3) + MIN_AMBIENT;
     float3 torch   = TORCH_LIGHT_COLOR * light_curve(float(lv & 15u));
 
     float3 col = albedo * (ambient + sun + torch);
@@ -760,7 +837,7 @@ float4 shade_entity(EntityHit ehit, float3 dir) {
         float pulse = 0.85 + 0.15 * sin(u_time * 3.0 + float(ehit.index));
         col += albedo * 4.0 * pulse;
     }
-    return apply_fog(float4(col, 1.0), ehit.t, dir);
+    return apply_fog(float4(col, 1.0), ehit.t + t_off, dir);
 }
 
 // ---- Water ------------------------------------------------------------------
@@ -768,13 +845,26 @@ float4 shade_entity(EntityHit ehit, float3 dir) {
 // Fresnel share of the reflected sky, then carries on through the water
 // (skipping water voxels). Whatever it reaches next fades toward the water
 // colour with the distance travelled under water.
-#define WATER_ABSORB    0.12 // per voxel: ~8 voxels down it's mostly water colour
-#define WATER_VIEW_DIST 36.0 // past this under water, only water colour is left (exp(-4.3))
+#define WATER_ABSORB    0.075 // per voxel: ~13 voxels down it's mostly water colour
+#define WATER_VIEW_DIST 56.0  // past this under water, only water colour is left (exp(-4.2))
+#define WATER_HAZE_DIST 48.0  // seen from this far off, water is twice as murky
+
+// Absorption per voxel under a surface t_surface from the camera. Far off,
+// the glare and scatter at the surface hide what's under it: the water
+// there reads as murkier, which also keeps the many far water pixels from
+// walking deep into the sea (kelp forests make that slow).
+float water_absorb(float t_surface) {
+    return WATER_ABSORB * (1.0 + t_surface / WATER_HAZE_DIST);
+}
 
 static bool g_cam_in_water;
 
+// The colour water fades to: lit from above, darker and bluer the deeper
+// the camera is (seen from above, the surface's own).
 float3 water_deep_color() {
-    return float3(0.02, 0.085, 0.11) * (sky_ambient() + sun_tint() * (u_sun_intensity * 0.5 * sun_elevation()));
+    float3 c = float3(0.025, 0.11, 0.13) * (sky_ambient() + sun_tint() * (u_sun_intensity * 0.5 * sun_elevation()));
+    if (g_cam_in_water) c *= exp(-max(SEA_LEVEL_Y - u_cam_pos.y, 0.0) * float3(0.06, 0.03, 0.025));
+    return c;
 }
 
 // Wind waves for the surface normal: eight waves of different lengths and
@@ -857,7 +947,7 @@ float water_fresnel(float3 dir, float3 n) {
 // camera, with reflection share F of refl.
 float3 water_mix(float3 col, float d, float t_surface, float3 dir, float F, float3 refl) {
     float3 deep = apply_fog(float4(water_deep_color(), 1.0), t_surface, dir).rgb;
-    col = lerp(deep, col, exp(-d * WATER_ABSORB));
+    col = lerp(deep, col, exp(-d * water_absorb(t_surface)));
     return lerp(col, refl, F);
 }
 
@@ -1020,16 +1110,26 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     float epsilon      = 0.01;
 
     // Voxel light in front of this face: sky (ambient + whether the
-    // sun can reach at all) and block light (torches).
-    float2 lv = face_light(hit.vkey, surf_normal, hit_point);
+    // sun can reach at all) and block light (torches). A water plant's
+    // planes cut through its own voxel, which holds the light.
+    bool   plant = block_is_water_plant(hit.block_id);
+    float2 lv;
+    if (plant) {
+        uint pl = sample_light(hit.vkey);
+        lv = float2(float(pl >> 4), float(pl & 15u));
+    } else {
+        lv = face_light(hit.vkey, surf_normal, hit_point);
+    }
     float  sky_level = lv.x;
-    float3 lighting = (sky_ambient() * light_curve(sky_level) + MIN_AMBIENT
+    float3 uw = underwater_light(hit_point + surf_normal * 0.05);
+    float3 lighting = (sky_ambient() * light_curve(sky_level) * uw + MIN_AMBIENT
                     + TORCH_LIGHT_COLOR * light_curve(lv.y)) * face_shade(surf_normal);
 
     // Sun. No sky light means sealed off from the sky (caves), so the
     // shadow ray is skipped there.
     float3 l = light_dir_normalized;
     float n_dot_l = dot(surf_normal, l);
+    if (plant) n_dot_l = abs(n_dot_l) * 0.7 + 0.3; // thin blades: lit from either side
     if (n_dot_l > 0.0 && sky_level > 0.0) {
         float3 shadow_origin = hit_point + surf_normal * epsilon;
         float shadow_factor = full_sun ? trace_shadow_transmittance(shadow_origin, l)
@@ -1059,12 +1159,13 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
             shadow_factor *= entity_shadow_transmittance(shadow_origin, l, RAY_MAX_LENGTH);
         }
         if (full_sun && shadow_factor > 0.0) shadow_factor *= cloud_shadow(shadow_origin, l);
+        if (shadow_factor > 0.0) shadow_factor *= underwater_sun(shadow_origin, l);
         lighting += sun_tint() * (n_dot_l * shadow_factor * u_sun_intensity);
     }
     // Sunlight bounced off the ground fills faces that look sideways
     // or down, so shadowed walls and overhangs keep some warmth and
     // shape instead of flat sky blue.
-    lighting += bounce_light(surf_normal) * light_curve(sky_level);
+    lighting += bounce_light(surf_normal) * light_curve(sky_level) * uw;
 
     // Leaf backlit glow: sun behind the leaves tints them warm
     // yellow-green, scaled by how open to the sky they are.
@@ -1073,7 +1174,7 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
         hit_color.rgb += float3(0.3, 0.45, 0.1) * back_light * light_curve(sky_level) * sun_tint();
     }
 
-    float ao = ao_on ? compute_ao(hit_point + surf_normal * epsilon, surf_normal, hit_point) : 1.0;
+    float ao = (ao_on && !plant) ? compute_ao(hit_point + surf_normal * epsilon, surf_normal, hit_point) : 1.0;
     hit_color.xyz *= lighting * ao;
     // Emissive blocks radiate on their own — NOT multiplied by
     // lighting/AO/shadow. Bright enough to trip the bloom threshold.
@@ -1129,6 +1230,63 @@ float3 water_reflection(float3 p, float3 n, float2 wave_var, float3 dir, float t
     return c + glint;
 }
 
+// ---- View rays ------------------------------------------------------------------
+// A view ray from the camera. A water plant right at the eye (swimming
+// through kelp) would fill the screen with one blade, so plants closer
+// than PLANT_NEAR_CLIP are passed through like geometry in front of a
+// near plane.
+#define PLANT_NEAR_CLIP 0.6
+HitInfo trace_view_ray(float3 o, float3 d, float max_len, uint skip) {
+    HitInfo h = trace_ray_chunk(o, d, false, RAY_ITERATIONS, max_len, skip);
+    float t0 = 0.0;
+    for (int k = 0; k < 3 && block_is_water_plant(h.block_id) && t0 + h.t < PLANT_NEAR_CLIP; k++) {
+        t0 += h.t + 0.02;
+        h = trace_ray_chunk(o + d * t0, d, false, RAY_ITERATIONS, max_len - t0, skip);
+    }
+    h.t += t0;
+    return h;
+}
+
+// ---- The sea surface from below -------------------------------------------------
+// Distance along a ray under water to the open sea surface above it (the
+// air over SEA_LEVEL_Y), or 1e30 if it doesn't rise to one.
+float water_surface_t(float3 o, float3 d) {
+    if (d.y <= 0.0 || o.y >= SEA_LEVEL_Y) return 1e30;
+    float ts = (SEA_LEVEL_Y - o.y) / d.y;
+    float3 ps = o + d * ts;
+    return sample_voxel(ps + float3(0.0, 0.5, 0.0)) == 0u ? ts : 1e30;
+}
+
+// The surface seen from below at ps. Inside Snell's window (within ~49
+// degrees of straight up) the world above shows through, squeezed toward
+// the zenith by refraction: the bent ray is traced and shaded the cheap
+// way (no entities: the screen-tile entity lists only hold for straight
+// rays). Outside it the surface is a mirror (total internal reflection)
+// that shows the water, which at that range is mostly its own colour.
+float3 water_surface_below(float3 ps, float3 dir, float t_surf) {
+    float2 wv;
+    float3 n  = water_normal(ps, dir, wv);
+    float3 rr = refract(dir, -n, 1.333);
+    float3 mirror = water_deep_color();
+    if (dot(rr, rr) < 1e-4) return mirror;
+    rr = normalize(rr);
+    float F = 0.02 + 0.98 * pow(1.0 - saturate(dot(rr, n)), 5.0);
+    float3 o = ps + float3(0.0, 0.02, 0.0);
+    int exit_axis;
+    float near_len = primary_max_len(o, rr, exit_axis);
+    HitInfo h = trace_ray_chunk(o, rr, false, RAY_ITERATIONS, near_len, BLOCK_WATER);
+    float3 c;
+    if (h.block_id != 0u) {
+        c = shade_voxel(h, rr, t_surf, false, false).rgb;
+    } else {
+        FarHit fh;
+        fh.hit = false;
+        if (u_far_enabled != 0) fh = far_trace(o, rr, near_len, exit_axis);
+        c = fh.hit ? shade_far(fh, rr, t_surf).rgb : sky_color(rr).rgb;
+    }
+    return lerp(c, mirror, F);
+}
+
 // hit0/far0/ehit0/use_hit0: precomputed primary voxel, far terrain and
 // entity hits for the center ray — when set, the first bounce of this sample
 // skips its traces entirely.
@@ -1159,27 +1317,49 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
             far_hit = far0;
         } else if (in_water) {
             // Under water only the next few dozen voxels can show.
-            hit = trace_ray_chunk(origin, dir, false, RAY_ITERATIONS, WATER_VIEW_DIST, skip);
+            // From above only the (1 - F) let through the surface shows, so
+            // stop where that has faded to 3% (at a grazing angle, soon).
+            float view = WATER_VIEW_DIST;
+            if (i > 0) view = min(view, log(max(1.0 - water_F, 0.03) / 0.03) / water_absorb(t_acc));
+            if (i == 0) hit = trace_view_ray(origin, dir, view, skip);
+            else        hit = trace_ray_chunk(origin, dir, false, RAY_ITERATIONS, view, skip);
         } else if (bounce == 0) {
             int exit_axis;
             float near_len = primary_max_len(origin, dir, exit_axis);
-            hit = trace_ray_chunk(origin, dir, false, RAY_ITERATIONS, near_len, skip);
+            if (i == 0) hit = trace_view_ray(origin, dir, near_len, skip);
+            else        hit = trace_ray_chunk(origin, dir, false, RAY_ITERATIONS, near_len, skip);
             if (hit.block_id == 0u && u_far_enabled != 0) far_hit = far_trace(origin, dir, near_len, exit_axis);
         } else {
             hit = trace_ray_chunk(origin, dir, false, RAY_ITERATIONS, RAY_MAX_LENGTH, skip);
         }
         float hit_t = hit.block_id != 0u ? hit.t : (far_hit.hit ? far_hit.t : RAY_MAX_LENGTH);
 
-        // Entities compete with the voxel hit on the primary view ray. The
-        // voxel hit caps the trace so occluded entities exit on the AABB test.
-        if (i == 0 && u_entity_count > 0 && (u_ent_debug & 1) == 0) {
+        // Under water, rising to the open surface before hitting anything.
+        float surf_t = in_water ? water_surface_t(origin, dir) : 1e30;
+        if (surf_t < hit_t) hit_t = surf_t;
+
+        // Entities compete with the voxel hit along the view ray, also past
+        // the water surface (fish seen from the shore): the ray goes on
+        // straight until a solid bounce, so the screen-tile entity lists
+        // still hold. The voxel hit caps the trace so occluded entities exit
+        // on the AABB test.
+        if ((i == 0 || (in_water && bounce == 0)) && u_entity_count > 0 && (u_ent_debug & 1) == 0) {
             EntityHit ehit;
-            if (use_hit0) ehit = ehit0;
-            else          ehit = trace_entities(origin, dir, hit_t);
+            if (i == 0 && use_hit0) ehit = ehit0;
+            else                    ehit = trace_entities(origin, dir, hit_t);
             if (ehit.index >= 0 && ehit.t < hit_t) {
-                pixel_color = lerp(pixel_color, shade_entity(ehit, dir), reflection_amount);
+                float4 c = shade_entity(ehit, dir, t_acc);
+                if (in_water) c.rgb = water_mix(c.rgb, ehit.t, t_acc, dir, water_F, water_refl);
+                pixel_color = lerp(pixel_color, c, reflection_amount);
                 break; // terminal: entities don't spawn reflection bounces in v1
             }
+        }
+
+        if (surf_t <= hit_t && surf_t < 1e29) {
+            float3 c = water_surface_below(origin + dir * surf_t, dir, t_acc + surf_t);
+            c = water_mix(c, surf_t, t_acc, dir, water_F, water_refl);
+            pixel_color = lerp(pixel_color, float4(c, 1.0), reflection_amount);
+            break;
         }
 
         if (hit.block_id == BLOCK_WATER) {
@@ -1195,7 +1375,7 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
         }
 
         // Too deep under water to show through: skip shading it.
-        if (in_water && hit.block_id != 0u && exp(-hit.t * WATER_ABSORB) < 0.03) {
+        if (in_water && hit.block_id != 0u && exp(-hit.t * water_absorb(t_acc)) < 0.03) {
             hit.block_id = 0u;
             far_hit.hit  = false;
         }
@@ -1250,19 +1430,19 @@ void main(uint3 id : SV_DispatchThreadID) {
     int exit_axis;
     float near_len = primary_max_len(u_cam_pos, cdir, exit_axis);
     // Under water: pass through water, see only WATER_VIEW_DIST (as trace_pixel does).
-    g_cam_in_water = sample_voxel(u_cam_pos) == BLOCK_WATER;
+    g_cam_in_water = block_is_watery(sample_voxel(u_cam_pos));
     g_refl_cached  = false;
     g_pix_angle    = 2.0 * length(u_cam_right) / dims.x;
     ent_set_pixel(uint2(ipix));
-    HitInfo hit0 = trace_ray_chunk(u_cam_pos, cdir, false, RAY_ITERATIONS,
-                                   g_cam_in_water ? WATER_VIEW_DIST : near_len,
-                                   g_cam_in_water ? BLOCK_WATER : 0u);
+    HitInfo hit0 = trace_view_ray(u_cam_pos, cdir, g_cam_in_water ? WATER_VIEW_DIST : near_len,
+                                  g_cam_in_water ? BLOCK_WATER : 0u);
     FarHit far0;
     far0.hit = false;
     if (hit0.block_id == 0u && u_far_enabled != 0 && !g_cam_in_water) far0 = far_trace(u_cam_pos, cdir, near_len, exit_axis);
     float hit0_t = hit0.block_id != 0u ? hit0.t : (far0.hit ? far0.t : 1e30);
     // Entities on the center ray: shared by AA sample 0 and merged into the
     // depth output (volumetric clamp + composite bilateral upscale read it).
+    if (g_cam_in_water) hit0_t = min(hit0_t, water_surface_t(u_cam_pos, cdir));
     EntityHit ehit0 = trace_entities(u_cam_pos, cdir, (u_ent_debug & 1) != 0 ? 0.0 : min(hit0_t, RAY_MAX_LENGTH));
     float prim_depth = hit0_t;
     if (ehit0.index >= 0) prim_depth = min(prim_depth, ehit0.t);

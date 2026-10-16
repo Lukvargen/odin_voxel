@@ -50,7 +50,6 @@ Terrain_Sample :: struct {
     detail:   f64, // small-scale noise in [-1, 1], for ragged borders
 }
 
-@(private="file")
 n2 :: #force_inline proc(seed: i64, p: [2]f64) -> f64 {
     return f64(noise.noise_2d(seed, p))
 }

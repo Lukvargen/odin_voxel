@@ -33,6 +33,8 @@ Model_Id :: enum u32 {
     Gob_Head, Gob_Torso, Gob_Arm, Gob_Leg,
     Orc_Head, Orc_Torso,
     Club, Old_Sword, Axe, // grip at the origin, along +z
+    // sea.odin
+    Fish_Body, Fish_Body_Striped, Fish_Tail,
 }
 
 Voxel_Model :: struct {
@@ -62,7 +64,9 @@ Pal :: enum u8 {
     Slime, Slime_Light, Slime_Core, Mouth,
     Bone, Bone_Shadow, Eye_Glow, Hide, Hide_Dark, Leather, Leather_Dark,
     Tusk, Iron, Rust, Wood, Wood_Dark, Cloth, Eye_Yellow, Eye_Red,
+    Fish_Scale, Fish_Belly, Fish_Fin, Fish_Stripe,
 }
+#assert(len(Pal) <= 64) // ENT_PAL_BASE reserves 64 entries
 
 @(private="file")
 pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
@@ -121,6 +125,10 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Cloth:         return {128, 38, 30}, 0
     case .Eye_Yellow:    return {232, 204, 70}, 0
     case .Eye_Red:       return {196, 40, 28}, PAL_EMIT
+    case .Fish_Scale:    return {255, 255, 255}, PAL_TINT
+    case .Fish_Belly:    return {236, 232, 222}, 0
+    case .Fish_Fin:      return {180, 180, 180}, PAL_TINT | PAL_THIN
+    case .Fish_Stripe:   return {246, 244, 238}, 0
     }
     return {255, 0, 255}, 0
 }
@@ -249,6 +257,7 @@ ent_models_bake :: proc() {
     creature_models_bake()
     combat_models_bake()
     enemy_models_bake()
+    fish_models_bake()
     ent_models[.Crystal]      = model_bake({-0.3, -0.52, -0.3}, {0.3, 0.52, 0.3}, 1.0 / 16, shape_crystal)
     ent_models[.Glider_Wing]  = model_bake({-3.85, 0.95, -2.05}, {3.85, 2.05, 2.0}, 1.0 / 12, shape_glider_wing)
     ent_models[.Rod]          = model_bake({-0.05, -0.05, 0}, {0.05, 0.05, 1}, 1.0 / 24, shape_rod)

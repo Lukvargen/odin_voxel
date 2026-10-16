@@ -423,7 +423,7 @@ enemy_move :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
     if e.rising > 0 { e.vel = {}; return }
 
     centre := e.pos + {0, h * 0.5, 0}
-    in_water := get_voxel(gs, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z))) == u32(Block_Type.Water)
+    in_water := block_is_watery(u8(get_voxel(gs, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z)))))
     if in_water {
         e.vel *= max(1 - 2.5 * dt, 0)
         e.vel.y += 9 * dt
@@ -530,7 +530,7 @@ stand_y :: proc(gs: ^Game_State, x, z, from_y: int) -> (y: int, ok: bool) {
     for yy := from_y; yy > from_y - 40; yy -= 1 {
         if solid_at(gs, x, yy, z) {
             if !solid_at(gs, x, yy + 1, z) && !solid_at(gs, x, yy + 2, z) &&
-               get_voxel(gs, x, yy + 1, z) != u32(Block_Type.Water) { return yy + 1, true }
+               !block_is_watery(u8(get_voxel(gs, x, yy + 1, z))) { return yy + 1, true }
             return 0, false
         }
     }

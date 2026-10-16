@@ -253,7 +253,7 @@ voxel_at :: proc(gs: ^Game_State, p: [3]f32) -> Block_Type {
 surroundings_update :: proc(gs: ^Game_State, dt: f32) {
     cam := &gs.camera
     p := cam.pos
-    ease(&audio.under, voxel_at(gs, p) == .Water ? 1 : 0, 10, dt)
+    ease(&audio.under, block_is_watery(u8(voxel_at(gs, p))) ? 1 : 0, 10, dt)
     ease(&audio.echo, math.smoothstep(f32(0.25), 0.8, gs.cave_factor), 2, dt)
     ease(&audio.cave, gs.cave_factor, 1.5, dt)
 
@@ -270,7 +270,7 @@ surroundings_update :: proc(gs: ^Game_State, dt: f32) {
         if la.dot(d, d) > 1 { continue }
         #partial switch voxel_at(gs, p + d * RADIUS) {
         case .Leaves, .Spruce_Leaves: audio.leaf_hits += 1
-        case .Water:                  audio.water_hits += 1
+        case .Water, .Kelp, .Seagrass, .Sea_Pickle: audio.water_hits += 1
         }
         audio.samples += 1
     }
@@ -319,7 +319,7 @@ player_sounds :: proc(gs: ^Game_State, dt: f32) {
     cam := &gs.camera
     p := cam.pos
     feet := p - {0, PLAYER_EYE_HEIGHT + 0.05, 0}
-    in_water := voxel_at(gs, p - {0, PLAYER_EYE_HEIGHT * 0.5, 0}) == .Water
+    in_water := block_is_watery(u8(voxel_at(gs, p - {0, PLAYER_EYE_HEIGHT * 0.5, 0})))
     walking := !cam.fly_mode && !gs.glider.deployed
     moved := p - audio.prev_pos
     teleport := la.length(moved) > 40
@@ -332,7 +332,7 @@ player_sounds :: proc(gs: ^Game_State, dt: f32) {
                 hspeed := horiz / max(dt, 0.001)
                 audio.stride = 1.9 + hspeed * 0.11 // longer strides when running
                 vol := clamp(0.22 + 0.03 * hspeed, 0, 0.6)
-                if voxel_at(gs, feet + {0, 0.3, 0}) == .Water {
+                if block_is_watery(u8(voxel_at(gs, feet + {0, 0.3, 0}))) {
                     play(.Swim, vol * 0.7, vary(0.15) * 1.2) // wading
                 } else {
                     play(step_sound(ground_material(gs, feet)), vol, vary())
@@ -403,7 +403,7 @@ ground_material :: proc(gs: ^Game_State, feet: [3]f32) -> Material {
             if b != .Air { break }
         }
     }
-    if b == .Air || b == .Water { return .Dirt }
+    if b == .Air || block_is_watery(u8(b)) { return .Dirt }
     return block_material(b)
 }
 

@@ -18,8 +18,14 @@ WALK_FRICTION  :: f32(12.0)
 AIR_ACCEL      :: f32(2.5)
 TERMINAL_VEL   :: f32(60.0)
 SWIM_DRAG      :: f32(3.0)   // velocity lost per second in water (fraction)
-SWIM_ACCEL     :: f32(18.0)
+SWIM_ACCEL     :: f32(18.0)  // top speed SWIM_ACCEL / SWIM_DRAG
+SWIM_SPRINT    :: f32(1.6)   // sprint factor under water
 SWIM_UP_ACCEL  :: f32(26.0)  // holding jump in water
+SWIM_FLOAT_EYE :: f32(0.35)  // floating: eye this far above the water surface
+SWIM_HOP_SPEED :: f32(6.5)   // Space at the surface: hop up out of the water
+CLIMB_SPEED    :: f32(5.5)   // pulling up onto a ledge out of the water
+CLIMB_REACH    :: f32(3.5)   // highest ledge top above the feet you can pull up onto
+                             // (floating: a lip two blocks over the water)
 
 STEP_SMOOTH_SPEED :: f32(10.0) // how fast the visual offset catches up (units/sec)
 
@@ -31,6 +37,9 @@ Camera :: struct {
     fly_mode:          bool,
     on_ground:         bool,
     swim_up:           bool,   // jump held: swim upward in water
+    swimming:          bool,   // body in water (for the view and sounds)
+    submerged:         bool,   // eye under water
+    climbing:          bool,   // pulling up out of the water onto a ledge
     sprinting:         bool,
     sneaking:          bool,
     crouch:            f32,    // 0..1 sneak pose, eased (lowers the view)
@@ -177,19 +186,64 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
 
     has_input := wish_len > 0.0001
 
-    // Swimming: body in water. Heavy drag, weak gravity, jump swims up.
-    body := [3]int{int(math.floor(cam.pos.x)), int(math.floor(cam.pos.y - PLAYER_EYE_HEIGHT * 0.5)), int(math.floor(cam.pos.z))}
-    if get_voxel(gs, body.x, body.y, body.z) == u32(Block_Type.Water) {
+    // Swimming: body in water. Heavy drag. With the head under you swim
+    // where you look; at the surface you float with the head out, Space
+    // hops, and Space facing a ledge pulls you up onto it (swim_climb).
+    watery :: proc(gs: ^Game_State, x, y, z: f32) -> bool {
+        return block_is_watery(u8(get_voxel(gs, int(math.floor(x)), int(math.floor(y)), int(math.floor(z)))))
+    }
+    feet := cam.pos.y - PLAYER_EYE_HEIGHT
+    in_water := watery(gs, cam.pos.x, cam.pos.y - PLAYER_EYE_HEIGHT * 0.5, cam.pos.z)
+    cam.swimming  = in_water
+    cam.submerged = watery(gs, cam.pos.x, cam.pos.y - 0.1, cam.pos.z)
+    // A climb, once started from the water, carries on until over the top.
+    near_water := in_water || watery(gs, cam.pos.x, feet - 0.5, cam.pos.z) || cam.climbing
+    cam.climbing = false
+    if near_water && cam.swim_up && swim_climb(gs, cam, has_input ? wish_dir : flat_fwd) {
+        cam.climbing = true
+    } else if in_water {
         drag := max(1 - SWIM_DRAG * dt, 0)
         cam.velocity *= drag
-        if has_input {
-            cam.velocity.x += wish_dir.x * SWIM_ACCEL * dt
-            cam.velocity.z += wish_dir.z * SWIM_ACCEL * dt
+        speed := SWIM_ACCEL * (sprint ? SWIM_SPRINT : 1)
+        // Top of the water over the body (a few voxels up at most).
+        surface := math.floor(cam.pos.y - PLAYER_EYE_HEIGHT * 0.5)
+        for _ in 0 ..< 3 {
+            if !watery(gs, cam.pos.x, surface + 1, cam.pos.z) { break }
+            surface += 1
         }
-        cam.velocity.y -= GRAVITY * 0.15 * dt
-        if jump || cam.swim_up { cam.velocity.y += SWIM_UP_ACCEL * dt }
-        if sneak { cam.velocity.y -= SWIM_UP_ACCEL * 0.6 * dt }
-        cam.on_ground = false
+        surface += 1
+        // Near the top and not diving down (Shift, or swimming on while
+        // looking down): float there instead of swimming freely.
+        diving := sneak || (move_fwd && cam.pitch < -20) || (move_back && cam.pitch > 20)
+        at_top := cam.pos.y > surface - 1.0 && !diving && !cam.swim_up
+        if cam.submerged && !at_top {
+            // Free swimming: forward follows the view, up and down included.
+            look := la.normalize(camera_forward(cam^))
+            wish: [3]f32
+            if move_fwd   { wish += look }
+            if move_back  { wish -= look }
+            if move_right { wish += flat_right }
+            if move_left  { wish -= flat_right }
+            if la.length(wish) > 0.0001 { cam.velocity += la.normalize(wish) * speed * dt }
+            cam.velocity.y -= GRAVITY * 0.04 * dt // nearly neutral: a slow sink
+            if cam.swim_up { cam.velocity.y += SWIM_UP_ACCEL * dt }
+            if sneak       { cam.velocity.y -= SWIM_UP_ACCEL * 0.6 * dt }
+        } else {
+            // At the top: float with the eye SWIM_FLOAT_EYE above the water
+            // (a damped spring), Space hops, Shift dives.
+            if has_input {
+                cam.velocity.x += wish_dir.x * speed * dt
+                cam.velocity.z += wish_dir.z * speed * dt
+            }
+            if diving {
+                cam.velocity.y -= SWIM_UP_ACCEL * dt
+            } else {
+                err := surface + SWIM_FLOAT_EYE - cam.pos.y
+                cam.velocity.y += (err * 30 - cam.velocity.y * 6) * dt
+                if jump || cam.swim_up { cam.velocity.y = max(cam.velocity.y, err * 4) }
+                if jump && err > -0.2 { cam.velocity.y = SWIM_HOP_SPEED }
+            }
+        }
     } else if cam.on_ground {
         // Friction
         horiz_speed := la.length([3]f32{cam.velocity.x, 0, cam.velocity.z})
@@ -228,7 +282,7 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
     }
 
     // Gravity (water applies its own above)
-    if get_voxel(gs, body.x, body.y, body.z) != u32(Block_Type.Water) { cam.velocity.y -= GRAVITY * dt }
+    if !in_water && !cam.climbing { cam.velocity.y -= GRAVITY * dt }
     if cam.velocity.y < -TERMINAL_VEL { cam.velocity.y = -TERMINAL_VEL }
 
     // Move and resolve collisions axis by axis.
@@ -300,4 +354,32 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
     }
 
     cam.pos = new_pos
+}
+
+// Pulling up out of the water: a ledge in `facing` whose top is within
+// CLIMB_REACH above the feet with room to stand on it. Sets the velocity to
+// rise along the wall and, once the feet clear the top, step onto it.
+swim_climb :: proc(gs: ^Game_State, cam: ^Camera, facing: [3]f32) -> bool {
+    f := la.normalize([3]f32{facing.x, 0, facing.z})
+    ahead := cam.pos + f * (PLAYER_HALF_W + 0.4)
+    ax, az := int(math.floor(ahead.x)), int(math.floor(ahead.z))
+    feet := cam.pos.y - PLAYER_EYE_HEIGHT
+    y0 := int(math.floor(feet + 0.05))
+    top := 0
+    found := false
+    for y in y0 ..= int(math.floor(feet + CLIMB_REACH)) {
+        if solid_at(gs, ax, y, az) && !solid_at(gs, ax, y + 1, az) && !solid_at(gs, ax, y + 2, az) {
+            top, found = y + 1, true
+            break
+        }
+    }
+    if !found || f32(top) - feet > CLIMB_REACH { return false }
+    if feet < f32(top) + 0.05 {
+        cam.velocity.y = CLIMB_SPEED
+        cam.velocity.x, cam.velocity.z = f.x * 1.5, f.z * 1.5
+    } else {
+        cam.velocity.y = max(cam.velocity.y, 1)
+        cam.velocity.x, cam.velocity.z = f.x * 3, f.z * 3
+    }
+    return true
 }

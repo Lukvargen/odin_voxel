@@ -308,7 +308,7 @@ slime_move :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
     falling := -sl.vel.y
 
     centre := slime_center(sl)
-    in_water := get_voxel(gs, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z))) == u32(Block_Type.Water)
+    in_water := block_is_watery(u8(get_voxel(gs, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z)))))
     if in_water {
         sl.vel *= max(1 - 2 * dt, 0)
         sl.vel.y += 6 * dt // they float

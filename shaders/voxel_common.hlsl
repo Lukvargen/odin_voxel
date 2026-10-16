@@ -74,8 +74,17 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_WEATHERED_STONE 21u // terrain surface rock (moss / ledge snow)
 #define BLOCK_STONE_BRICKS  22u // ruins
 #define BLOCK_CRYSTAL       23u // glowing amber crystal
+#define BLOCK_KELP          24u // water plants: crossed cutout planes (plant_hit)
+#define BLOCK_SEAGRASS      25u
+#define BLOCK_CORAL         26u // solid reef block
+#define BLOCK_SEA_PICKLE    27u // glowing water plant
+
+#define SEA_LEVEL_Y 24.0 // top of the sea (terrain.odin SEA_LEVEL)
 
 bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES; }
+bool block_is_water_plant(uint id) { return id == BLOCK_KELP || id == BLOCK_SEAGRASS || id == BLOCK_SEA_PICKLE; }
+// Water, or a plant standing in it (the camera is "in water" in either).
+bool block_is_watery(uint id) { return id == BLOCK_WATER || block_is_water_plant(id); }
 
 // Radiance a block's surface emits on its own (0 = not emissive). Added to
 // shading UNLIT (not multiplied by lighting/AO). Their light on the world
@@ -85,10 +94,12 @@ bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_
 float3 block_emission(uint id) {
     if (id == BLOCK_TORCH) return float3(1.0, 0.62, 0.40) * 7.0; // times albedo^2 in shading
     if (id == BLOCK_CRYSTAL) return float3(1.0, 0.85, 0.60) * 5.0;
+    if (id == BLOCK_SEA_PICKLE) return float3(0.75, 1.0, 0.55) * 5.0;
     return float3(0.0, 0.0, 0.0);
 }
 
 #define LEAF_TRANSMIT 0.35
+#define PLANT_TRANSMIT 0.7 // water plants are mostly gaps
 
 #define PI 3.14159265359
 
@@ -234,6 +245,8 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float m
             } else if (block_is_leaves(bid)) {
                 factor *= LEAF_TRANSMIT;
                 if (factor < 0.01) return 0.0;
+            } else if (block_is_water_plant(bid)) {
+                factor *= PLANT_TRANSMIT;
             } else {
                 return 0.0;
             }
@@ -515,6 +528,62 @@ struct HitInfo {
     int3   vkey;     // exact integer voxel coord (precision-safe, for hashing)
 };
 
+// ---- Water plants -------------------------------------------------------------
+// Kelp, seagrass and sea pickles are two crossed vertical planes through the
+// voxel's centre (x = z and x + z = 1), each a cutout of PLANT_TEXELS^2
+// texels: the ray only stops on an opaque texel, so you see between the
+// blades. u runs along the plane (= local x), v up the voxel.
+#define PLANT_TEXELS 8 // as the tracer's TEXELS
+
+// Opaque texel of plant `id` at plane texel (cu, cv) of plane `pl`.
+bool plant_texel(uint id, int3 vkey, int cu, int cv, int pl) {
+    float h = hash31i(vkey * 2 + int3(pl, 0, 0));
+    if (id == BLOCK_KELP) {
+        // A stalk up the middle, and a leaf blade every few texels that
+        // grows out to one side, widest at its base.
+        if (cu == 3 || cu == 4) return pl == 0;
+        int   k    = (cv + int(h * 8.0)) & 3;           // position within a blade
+        bool  left = ((cv + int(h * 8.0)) >> 2 & 1) == pl; // blades alternate sides and planes
+        int   reach = 3 - k;                            // 3 texels out at the base .. 0 at the tip
+        return left ? (cu < 3 && cu >= 3 - reach) : (cu > 4 && cu <= 4 + reach);
+    }
+    if (id == BLOCK_SEAGRASS) {
+        // Separate blades of random height, leaning a texel now and then.
+        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 7));
+        if (hb > 0.5) return false;
+        return float(cv) < 3.0 + hb * 10.0;
+    }
+    // Sea pickle: a few short capsules on the floor.
+    int c0 = 1 + int(h * 2.0), c1 = 5 + int(h * 1.9);
+    bool col = (cu == c0 || cu == c0 + 1 || cu == c1 || cu == c1 + 1);
+    return col && cv < ((cu <= c0 + 1) ? 4 : 3);
+}
+
+// Ray against the plant planes of the voxel it spans for s in [0, span]; q0
+// is the ray position at s = 0 relative to the voxel's min corner. Returns
+// the hit distance along the ray (or -1) and the plane normal facing the ray.
+float plant_hit(uint id, int3 vkey, float3 q0, float3 dir, float span, out float3 n) {
+    float best = -1.0;
+    n = float3(0, 1, 0);
+    [unroll]
+    for (int pl = 0; pl < 2; pl++) {
+        // Plane 0: x - z = 0. Plane 1: x + z - 1 = 0.
+        float  dd  = pl == 0 ? dir.x - dir.z : dir.x + dir.z;
+        float  d0  = pl == 0 ? q0.x - q0.z : q0.x + q0.z - 1.0;
+        if (abs(dd) < 1e-6) continue;
+        float  s = -d0 / dd;
+        if (s < 0.0 || s > span || (best >= 0.0 && s >= best)) continue;
+        float3 q = q0 + dir * s;
+        int cu = clamp(int(q.x * PLANT_TEXELS), 0, PLANT_TEXELS - 1);
+        int cv = clamp(int(q.y * PLANT_TEXELS), 0, PLANT_TEXELS - 1);
+        if (!plant_texel(id, vkey, cu, cv, pl)) continue;
+        best = s;
+        float3 pn = pl == 0 ? float3(0.7071, 0, -0.7071) : float3(0.7071, 0, 0.7071);
+        n = dot(pn, dir) > 0.0 ? -pn : pn;
+    }
+    return best;
+}
+
 // world_origin: ray pos in WORLD units, used only for the final hit_pos
 //   output (depth/shading) — its far-from-spawn drift is cosmetically
 //   harmless there and pre-existing.
@@ -566,6 +635,14 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
         if (uniform_id != 0u) hit_block_id = uniform_id;
         else if (voxel_solid(chunk_i, lvi)) hit_block_id = load_voxel(global_chunk_i + lvi);
         if (hit_block_id == skip_id) hit_block_id = 0u;
+        if (block_is_water_plant(hit_block_id)) {
+            float3 pn;
+            float  s = plant_hit(hit_block_id, chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i),
+                                 local_entry - float3(x_i, y_i, z_i), dir,
+                                 min(t_max_x, min(t_max_y, t_max_z)), pn);
+            if (s < 0.0) hit_block_id = 0u;
+            else { t = s; hit_side = pn; }
+        }
     }
 
     while (i < 23 && hit_block_id == 0u) {
@@ -586,7 +663,13 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
         int lvi2 = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
         if (voxel_solid(chunk_i, lvi2)) {
             uint b = load_voxel(global_chunk_i + lvi2);
-            if (b != skip_id) hit_block_id = b;
+            if (block_is_water_plant(b)) {
+                float3 pn;
+                float  s = plant_hit(b, chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i),
+                                     local_entry + dir * t - float3(x_i, y_i, z_i), dir,
+                                     min(t_max_x, min(t_max_y, t_max_z)) - t, pn);
+                if (s >= 0.0) { hit_block_id = b; t += s; hit_side = pn; }
+            } else if (b != skip_id) hit_block_id = b;
         }
     }
 

@@ -560,7 +560,7 @@ biome_name :: proc(b: Biome) -> string {
 
 player_swimming :: proc(gs: ^Game_State) -> bool {
     p := gs.camera.pos - {0, PLAYER_EYE_HEIGHT * 0.5, 0}
-    return get_voxel(gs, int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z))) == u32(Block_Type.Water)
+    return block_is_watery(u8(get_voxel(gs, int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z)))))
 }
 
 // ─── HUD ───────────────────────────────────────────────────────────────────
@@ -832,6 +832,10 @@ icon_colors :: proc(b: Block_Type) -> (top, side: [3]f32) {
     case .Weathered_Stone: return {0.45, 0.52, 0.36}, {0.50, 0.50, 0.50}
     case .Stone_Bricks:    return {0.58, 0.57, 0.55}, {0.52, 0.51, 0.50}
     case .Crystal:         return {1.00, 0.80, 0.42}, {0.95, 0.62, 0.25}
+    case .Kelp:            return {0.30, 0.42, 0.14}, {0.26, 0.38, 0.12}
+    case .Seagrass:        return {0.30, 0.55, 0.22}, {0.26, 0.50, 0.19}
+    case .Coral:           return {0.95, 0.42, 0.52}, {0.85, 0.34, 0.45}
+    case .Sea_Pickle:      return {0.75, 0.95, 0.45}, {0.55, 0.80, 0.30}
     }
     return {0.56, 0.56, 0.58}, {0.52, 0.52, 0.55}
 }

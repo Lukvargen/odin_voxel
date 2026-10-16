@@ -136,12 +136,29 @@ Block_Type :: enum u8 {
     Weathered_Stone = 21, // natural surface rock: moss low down, ledge snow up high (shader)
     Stone_Bricks  = 22,  // ruins (landmarks.odin)
     Crystal       = 23,  // glowing amber crystal: caves, altars; a light source
+    // Sea life (decorate_ocean). Kelp, seagrass and sea pickles are plants:
+    // drawn as two crossed cutout planes in their voxel (shaders), and
+    // otherwise water: you swim through them, light and sound pass.
+    Kelp          = 24,
+    Seagrass      = 25,
+    Coral         = 26,  // solid reef block, coloured per reef head (shader)
+    Sea_Pickle    = 27,  // glowing plant: a dim light source on warm reefs
     // Must stay below 32: the far LOD stores block ids in 5 bits.
+}
+
+// Plants that live in water and count as water for everything but drawing.
+block_is_water_plant :: #force_inline proc(b: u8) -> bool {
+    return b == u8(Block_Type.Kelp) || b == u8(Block_Type.Seagrass) || b == u8(Block_Type.Sea_Pickle)
+}
+
+// Water, or a plant standing in it: swimming, buoyancy, underwater sound.
+block_is_watery :: #force_inline proc(b: u8) -> bool {
+    return b == u8(Block_Type.Water) || block_is_water_plant(b)
 }
 
 // Blocks the player and entities collide with.
 block_solid :: #force_inline proc(b: u8) -> bool {
-    return b != u8(Block_Type.Air) && b != u8(Block_Type.Water)
+    return b != u8(Block_Type.Air) && !block_is_watery(b)
 }
 
 block_is_leaves :: #force_inline proc(b: u8) -> bool {
@@ -450,6 +467,7 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
     N :: CHUNK_VOXELS * CHUNK_VOXELS
     height: [N]int
     layers: [N]Surface_Layers
+    seas: [N]Sea_Kind
     surf_min, surf_max, deep_min := max(int), min(int), max(int)
     for z in 0 ..< CHUNK_VOXELS {
         for x in 0 ..< CHUNK_VOXELS {
@@ -460,6 +478,7 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
             i := x + z * CHUNK_VOXELS
             height[i] = s.height
             layers[i] = surface_layers(s, slope)
+            seas[i] = sea_kind(s)
             surf_min = min(surf_min, s.height)
             surf_max = max(surf_max, s.height)
             deep_min = min(deep_min, s.height - layers[i].filler_depth)
@@ -537,6 +556,7 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
     }
     profile_add(.Tree_Scan, t_scan)
     decorate_caves(column, gx, gz, height[:])
+    decorate_ocean(column, gx, gz, height[:], seas[:])
     generate_landmarks(&tgt)
     for &c in column.chunks { chunk_compact(&c) }
     return column

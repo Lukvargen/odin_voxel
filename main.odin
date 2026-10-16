@@ -180,6 +180,7 @@ main :: proc() {
             case a == "build": bench_build = true
             case a == "combat": bench_combat = true
             case a == "water": bench_water = true
+            case a == "sea": bench_sea = true
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
                 gs.day.hour = h

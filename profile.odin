@@ -20,6 +20,7 @@ Profile_Zone :: enum {
     Far_Tile,        // worker: far terrain tile summary (far.odin)
     Ent_AI,          // entities_update: fox/bird movement
     Ent_Birds,       // birds_manage (about once a second)
+    Ent_Fish,        // fish_manage (about once a second)
     Ent_Build,       // posing parts + BVH
     Ent_Upload,      // entity buffer upload
     Glider,          // glider_update (flight physics + air sampling)

@@ -6,7 +6,7 @@ import "core:mem"
 import "core:time"
 import SDL "vendor:sdl3"
 
-// Entities (foxes, hovering crystals, eagles circling in thermals). The CPU
+// Entities (foxes, hovering crystals, eagles circling in thermals, fish). The CPU
 // owns the canonical list and runs the cheap "AI"; each frame the nearest
 // MAX_ENTITIES within their kind's cull radius are turned into rigid
 // voxel-model parts (voxel_models.odin, creatures.odin) — animation is just
@@ -26,6 +26,7 @@ Entity_Kind :: enum u8 {
     Fox,
     Crystal,
     Bird,
+    Fish,
 }
 
 Fox_State :: enum u8 { Walk, Idle, Flee }
@@ -51,6 +52,9 @@ Entity :: struct {
     orbit_angle: f32,
     orbit_dir:   f32,    // +1 / -1
     bank:        f32,
+    // fish (sea.odin): orbit = slot in the school (angle, radius, height, striped)
+    school:      i32,
+    vel:         [3]f32,
 }
 
 Ent_Candidate :: struct { idx: int, d2: f32 }
@@ -93,12 +97,14 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
         profile_add(.Ent_Birds, t0)
         birds_next_manage = t + 1
     }
+    fish_schools_update(gs, dt, t)
 
     t_ai := time.tick_now()
     for &e in gs.entities {
         switch e.kind {
         case .Crystal: // hovers in place; motion is in the pose
         case .Bird:    bird_update(gs, &e, dt, t)
+        case .Fish:    fish_update(gs, &e, dt, t)
         case .Fox:     fox_update(gs, &e, dt, t)
         }
     }
@@ -195,7 +201,7 @@ fox_update :: proc(gs: ^Game_State, e: ^Entity, dt, t: f32) {
             }
         } else if solid_at(gs, nx, feet+1, nz) {
             moved = false // head-height block: wall
-        } else if get_voxel(gs, nx, feet - 1, nz) == u32(Block_Type.Water) && !solid_at(gs, nx, feet - 1, nz) {
+        } else if block_is_watery(u8(get_voxel(gs, nx, feet - 1, nz))) && !solid_at(gs, nx, feet - 1, nz) {
             moved = false // foxes don't swim
         } else {
             e.pos = np // drops (ledges, mined ground) are gravity's job
@@ -246,10 +252,12 @@ entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
         e := gs.entities[c.idx]
         // Birds circle far overhead: their shadows would be specks, but
         // their spread-out boxes would cost every terrain shadow ray.
-        if !ent_begin(frame, e.kind != .Bird) { break }
+        // Fish are small and under water: not worth a shadow either.
+        if !ent_begin(frame, e.kind != .Bird && e.kind != .Fish) { break }
         switch e.kind {
         case .Fox:  fox_add(frame, e, t)
         case .Bird: bird_add(frame, e, t)
+        case .Fish: fish_add(frame, e, t)
         case .Crystal:
             s := e.scale
             hover := 0.15 * math.sin(t * 2 + e.phase)

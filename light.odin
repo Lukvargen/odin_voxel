@@ -6,10 +6,11 @@ import "core:time"
 // instead of tracing light rays. Every non-opaque voxel stores one byte:
 // high nibble = sky light (0..15), low nibble = block light (0..15, torches).
 //
-// Sky light: 15 straight down through open air from the top of the world,
-// then flood-filled sideways/down, losing 1 per voxel (leaves stop the
-// straight-down rule, so canopies shade the ground below; water also lets
-// sky light in, losing 1 per voxel of depth). Block light:
+// Sky light: 15 straight down through open air and water from the top of
+// the world, then flood-filled sideways/down, losing 1 per voxel (leaves
+// stop the straight-down rule, so canopies shade the ground below). Under
+// water the shader darkens it with depth instead (underwater_light), which
+// a whole level per voxel would overdo. Block light:
 // flood-filled from emitters (torches = TORCH_LIGHT), losing 1 per voxel.
 // Opaque blocks never hold light.
 //
@@ -20,17 +21,19 @@ import "core:time"
 LIGHT_MAX   :: 15
 TORCH_LIGHT :: 14
 CRYSTAL_LIGHT :: 9
+SEA_PICKLE_LIGHT :: 7
 LIGHT_SKY   :: u8(LIGHT_MAX << 4) // full sky, no block light
 
 Light_Channel :: enum { Sky, Block }
 
 block_opaque :: #force_inline proc(b: u8) -> bool {
-    return b != u8(Block_Type.Air) && !block_is_leaves(b) && b != u8(Block_Type.Water)
+    return b != u8(Block_Type.Air) && !block_is_leaves(b) && !block_is_watery(b)
 }
 
 block_emission :: #force_inline proc(b: u8) -> u8 {
     if b == u8(Block_Type.Torch)   { return TORCH_LIGHT }
     if b == u8(Block_Type.Crystal) { return CRYSTAL_LIGHT }
+    if b == u8(Block_Type.Sea_Pickle) { return SEA_PICKLE_LIGHT }
     return 0
 }
 
@@ -44,9 +47,9 @@ chan_set :: #force_inline proc(v: u8, ch: Light_Channel, l: u8) -> u8 {
 
 // Light of the voxel a light level `l` spreads into from direction `d`
 // (index into NEIGHBOURS). Sky light keeps full strength going straight down
-// through air.
+// through air and water.
 spread_level :: #force_inline proc(l: u8, ch: Light_Channel, d: int, into: u8) -> u8 {
-    if ch == .Sky && d == DIR_DOWN && l == LIGHT_MAX && into == u8(Block_Type.Air) {
+    if ch == .Sky && d == DIR_DOWN && l == LIGHT_MAX && (into == u8(Block_Type.Air) || block_is_watery(into)) {
         return LIGHT_MAX
     }
     return l > 0 ? l - 1 : 0
@@ -149,7 +152,8 @@ light_column_compute :: proc(column: ^Column) {
         }
     }
 
-    // Straight down from the sky until the first non-air block. Only rows
+    // Straight down from the sky until the first block that isn't air or
+    // water. Only rows
     // between the lowest and highest first-full-sky row can hold a full-sky
     // voxel next to a darker one, so the seed scan below is limited to them.
     lowest, highest := COLUMN_H, 0
@@ -158,7 +162,7 @@ light_column_compute :: proc(column: ^Column) {
             y := COLUMN_H - 1
             for ; y >= 0; y -= 1 {
                 i := x + y * COL_DY + z * COL_DZ
-                if blocks[i] != u8(Block_Type.Air) { break }
+                if blocks[i] != u8(Block_Type.Air) && !block_is_watery(blocks[i]) { break }
                 sky[i] = LIGHT_MAX
             }
             lowest  = min(lowest, y + 1)

@@ -235,7 +235,7 @@ glider_can_toggle :: proc(gs: ^Game_State) -> bool {
     if gs.glider.deployed { return true }
     if c.fly_mode || c.on_ground { return false }
     x, y, z := int(math.floor(c.pos.x)), int(math.floor(c.pos.y - PLAYER_EYE_HEIGHT * 0.5)), int(math.floor(c.pos.z))
-    return get_voxel(gs, x, y, z) != u32(Block_Type.Water)
+    return !block_is_watery(u8(get_voxel(gs, x, y, z)))
 }
 
 // Space in mid-air with the glider equipped.
@@ -425,7 +425,7 @@ glider_step :: proc(gs: ^Game_State, dt: f32, air: [3]f32,
 
     // Into water: let go.
     body := [3]int{int(math.floor(pos.x)), int(math.floor(pos.y - PLAYER_EYE_HEIGHT * 0.5)), int(math.floor(pos.z))}
-    if get_voxel(gs, body.x, body.y, body.z) == u32(Block_Type.Water) {
+    if block_is_watery(u8(get_voxel(gs, body.x, body.y, body.z))) {
         glider_stow(gs, false)
         return false
     }
