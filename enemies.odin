@@ -443,7 +443,7 @@ enemy_move :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     if e.rising > 0 { e.vel = {}; return }
 
     centre := e.pos + {0, h * 0.5, 0}
-    in_water := block_is_watery(u8(get_voxel(sim.world, int(math.floor(centre.x)), int(math.floor(centre.y)), int(math.floor(centre.z)))))
+    in_water := block_is_watery(u8(voxel_at(sim.world, centre)))
     if in_water {
         e.vel *= max(1 - 2.5 * dt, 0)
         e.vel.y += 9 * world_scale * dt

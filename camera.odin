@@ -66,6 +66,12 @@ camera_aim_eye :: proc(cam: Camera) -> [3]f32 {
     return cam.pos + [3]f32{0, cam.step_visual_offset - cam.crouch * CROUCH_VIEW_DROP, 0}
 }
 
+// The eye the view is drawn from: the physics eye plus the view's own
+// offsets (chase camera, landing dip, crouch, easing up a step).
+camera_view_eye :: proc(cam: Camera) -> [3]f32 {
+    return cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+}
+
 camera_forward :: proc(cam: Camera) -> [3]f32 {
     p := math.to_radians(cam.pitch)
     y := math.to_radians(cam.yaw)
@@ -210,9 +216,7 @@ _camera_update_walk :: proc(cam: ^Camera, gs: ^Game_State, dt: f32,
     // Swimming: body in water. Heavy drag. With the head under you swim
     // where you look; at the surface you float with the head out, Space
     // hops, and Space facing a ledge pulls you up onto it (ledge_climb).
-    watery :: proc(gs: ^Game_State, x, y, z: f32) -> bool {
-        return block_is_watery(u8(get_voxel(gs, int(math.floor(x)), int(math.floor(y)), int(math.floor(z)))))
-    }
+    watery :: proc(gs: ^Game_State, x, y, z: f32) -> bool { return block_is_watery(u8(voxel_at(gs, {x, y, z}))) }
     feet := cam.pos.y - PLAYER_EYE_HEIGHT
     in_water := watery(gs, cam.pos.x, cam.pos.y - PLAYER_EYE_HEIGHT * 0.5, cam.pos.z)
     cam.swimming  = in_water
@@ -488,8 +492,6 @@ mantle_step :: proc(gs: ^Game_State, cam: ^Camera, dt: f32) {
     if u >= 1 {
         cam.climbing, cam.on_ground = false, true
         cam.velocity = m.dir * WALK_SPEED * 0.4 // walk on, not stop dead
-        under := cam.pos - {0, PLAYER_EYE_HEIGHT + 0.05, 0}
-        b := get_voxel(gs, int(math.floor(under.x)), int(math.floor(under.y)), int(math.floor(under.z)))
-        play(step_sound(block_material(Block_Type(u8(b)))), 0.35, vary())
+        play(step_sound(block_material(voxel_at(gs, cam.pos - {0, PLAYER_EYE_HEIGHT + 0.05, 0}))), 0.35, vary())
     }
 }

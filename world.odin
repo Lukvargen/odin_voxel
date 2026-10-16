@@ -3,7 +3,6 @@ package main
 import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
-import "core:math/noise"
 import "core:slice"
 import "core:sync"
 import "core:time"
@@ -290,16 +289,8 @@ set_view_radius :: proc(gs: ^Game_State, r: int) {
     r := clamp(r, 8, LOAD_RADIUS_XZ)
     if r == view_radius { return }
     sync.atomic_store(&view_radius, r)
-    drop := make([dynamic][2]int, context.temp_allocator)
-    pc := [2]int{gs.player_chunk.x, gs.player_chunk.z}
-    for key in gs.columns {
-        d := key - pc
-        if d.x * d.x + d.y * d.y > (r + 2) * (r + 2) { append(&drop, key) }
-    }
-    for key in drop { unload_column(gs, key) }
     enqueue_chunks(gs)
 }
-LOAD_RADIUS_Y   :: 7
 
 // Cave band. Below CAVE_FLOOR_Y everything is solid stone via the no-noise
 // fast path. Caves are carved by a 3D noise lobe only between CAVE_FLOOR_Y
@@ -412,7 +403,8 @@ enqueue_chunks :: proc(gs: ^Game_State) {
     r := view_radius
     enqueue_radius(gs, r)
     if r < LOAD_RADIUS_XZ {
-        // Shorter than the ring holds: what's fallen behind goes.
+        // Shorter than the ring holds: what's fallen behind goes (with a
+        // margin, so moving about the edge doesn't load and drop columns).
         drop := make([dynamic][2]int, context.temp_allocator)
         pc := [2]int{gs.player_chunk.x, gs.player_chunk.z}
         for key in gs.columns {
@@ -689,14 +681,19 @@ TREE_VOXEL_REACH :: 48
 set_voxel_world :: proc(t: ^Tree_Target, wx, wy, wz: int, block: Block_Type) {
     if t.design != nil { design_put(t.design, wx, wy, wz, block); return }
     lx := wx - t.ox; lz := wz - t.oz
-    if lx < 0 || lx >= t.size { return }
-    if lz < 0 || lz >= t.size { return }
+    if lx < 0 || lx >= t.size || lz < 0 || lz >= t.size { return }
     if t.far != nil { far_record(t.far, lx, wy, lz, u8(block)); return }
+    if c, vi, ok := column_voxel(t.col, lx, wy, lz); ok { chunk_set_voxel(c, vi, u8(block)) }
+}
+
+// The chunk of a column holding voxel (lx, wy, lz), and its index there:
+// false above or below the world.
+column_voxel :: proc(col: ^Column, lx, wy, lz: int) -> (c: ^Chunk, vi: int, ok: bool) {
     wcy := floor_div(wy, CHUNK_VOXELS)
     iy  := chunk_y_index(wcy)
     if iy < 0 { return }
     ly := wy - wcy * CHUNK_VOXELS
-    chunk_set_voxel(&t.col.chunks[iy], lx + ly*CHUNK_VOXELS + lz*CHUNK_VOXELS*CHUNK_VOXELS, u8(block))
+    return &col.chunks[iy], lx + ly*CHUNK_VOXELS + lz*CHUNK_VOXELS*CHUNK_VOXELS, true
 }
 
 // True if a world-space AABB [lo, hi] (inclusive) overlaps this column's XZ
@@ -724,17 +721,11 @@ tree_hash :: proc(x, z, seed: int) -> f64 {
 // Clipped to the footprint.
 place_leaves :: proc(t: ^Tree_Target, wx, wy, wz: int, block := Block_Type.Leaves) {
     lx := wx - t.ox; lz := wz - t.oz
-    if lx < 0 || lx >= t.size { return }
-    if lz < 0 || lz >= t.size { return }
+    if lx < 0 || lx >= t.size || lz < 0 || lz >= t.size { return }
     if t.far != nil { far_record(t.far, lx, wy, lz, u8(block)); return }
-    wcy := floor_div(wy, CHUNK_VOXELS)
-    iy  := chunk_y_index(wcy)
-    if iy < 0 { return }
-    ly := wy - wcy * CHUNK_VOXELS
-    vi := lx + ly*CHUNK_VOXELS + lz*CHUNK_VOXELS*CHUNK_VOXELS
-    if v := chunk_voxel(&t.col.chunks[iy], vi); v == 0 || block_is_leaves(v) {
-        chunk_set_voxel(&t.col.chunks[iy], vi, u8(block))
-    }
+    c, vi, ok := column_voxel(t.col, lx, wy, lz)
+    if !ok { return }
+    if v := chunk_voxel(c, vi); v == 0 || block_is_leaves(v) { chunk_set_voxel(c, vi, u8(block)) }
 }
 
 // Fill a filled circle of logs at height wy, centred on (cx, cz) with given radius.
@@ -1270,6 +1261,11 @@ generate_cactus :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
 // True if the voxel blocks movement (water does not).
 solid_at :: proc(w: ^World, wx, wy, wz: int) -> bool {
     return block_solid(u8(get_voxel(w, wx, wy, wz)))
+}
+
+// The block at a point (the voxel it lies in).
+voxel_at :: proc(w: ^World, p: [3]f32) -> Block_Type {
+    return Block_Type(u8(get_voxel(w, int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z)))))
 }
 
 get_voxel :: proc(w: ^World, wx, wy, wz: int) -> u32 {

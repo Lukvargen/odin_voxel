@@ -14,7 +14,7 @@ StructuredBuffer<int>      chunk_index      : register(t1, space0);
 StructuredBuffer<int2>     chunk_owner      : register(t2, space0);
 StructuredBuffer<uint>     voxel_mask       : register(t3, space0);
 StructuredBuffer<int>      light_index      : register(t4, space0); // per slot: light pool id, or -1-light if uniform
-StructuredBuffer<uint>     light_pool       : register(t5, space0); // 512 light bytes per brick
+StructuredBuffer<uint>     light_pool       : register(t5, space0); // 512 u16 light values per brick, two per uint
 StructuredBuffer<uint4>    ent_data         : register(t6, space0); // entity voxel models + instances (voxel_models.odin)
 StructuredBuffer<uint>     far_data         : register(t7, space0); // far terrain tile table, then cells (far.odin)
 

@@ -65,7 +65,7 @@ render_aspect :: proc(gs: ^Game_State) -> f32 {
 hand_light :: proc(gs: ^Game_State, eye, fwd, right, up: [3]f32) -> [4]f32 {
     if gs.selected_block != .Torch || gs.combat.sword { return {} }
     p := eye + right * 0.35 - up * 0.3 + fwd * 0.3
-    if solid_at(gs, int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z))) { p = eye }
+    if block_solid(u8(voxel_at(gs, p))) { p = eye }
     t := f32(SDL.GetTicks()) / 1000.0
     flicker := 0.6 * math.sin(t * 9.3) + 0.4 * math.sin(t * 23.1 + 1.7)
     return {p.x, p.y, p.z, HAND_TORCH_LIGHT + flicker * 0.35}
@@ -143,6 +143,15 @@ render_size :: proc(gs: ^Game_State) -> (w, h: i32) {
     return max(i32(fw * k + 0.5), 16), max(i32(fh * k + 0.5), 16)
 }
 
+// The textures gpu_create_scene_textures makes.
+gpu_release_scene_textures :: proc(gs: ^Game_State) {
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.vol_texture)
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[0])
+    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[1])
+}
+
 // Match the scene textures to the window (resized, or the render scale
 // changed): waits for the GPU to idle, recreates the scene textures and
 // re-points the UI's SDL texture at them. No-op if the size is unchanged.
@@ -151,13 +160,7 @@ gpu_fit_render_size :: proc(gs: ^Game_State) {
     if w == gs.render_w && h == gs.render_h { return }
 
     _ = SDL.WaitForGPUIdle(gs.gpu_device)
-
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.vol_texture)
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[0])
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[1])
-
+    gpu_release_scene_textures(gs)
     gs.render_w, gs.render_h = w, h
     gpu_create_scene_textures(gs)
     ui_rewrap_out_texture(gs) // re-point the SDL texture at the new out_texture
@@ -330,27 +333,6 @@ gpu_init :: proc(gs: ^Game_State) {
     gpu_upload_buffer(gs, gs.index_buf, raw_data(gs.gpu_index),       int(index_buf_size))
     gpu_upload_buffer(gs, gs.owner_buf, raw_data(gs.gpu_chunk_owner), int(owner_buf_size))
     gpu_upload_buffer(gs, gs.light_index_buf, raw_data(gs.gpu_light_index), int(light_index_size))
-}
-
-gpu_upload_buffer_range :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawptr, size: int, dst_offset: int) {
-    transfer := SDL.CreateGPUTransferBuffer(gs.gpu_device, SDL.GPUTransferBufferCreateInfo{
-        usage = .UPLOAD,
-        size  = u32(size),
-    })
-    defer SDL.ReleaseGPUTransferBuffer(gs.gpu_device, transfer)
-
-    ptr := SDL.MapGPUTransferBuffer(gs.gpu_device, transfer, false)
-    mem.copy(ptr, data, size)
-    SDL.UnmapGPUTransferBuffer(gs.gpu_device, transfer)
-
-    cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
-    copy_pass := SDL.BeginGPUCopyPass(cmd)
-    SDL.UploadToGPUBuffer(copy_pass,
-        SDL.GPUTransferBufferLocation{transfer_buffer = transfer, offset = 0},
-        SDL.GPUBufferRegion{buffer = dst, offset = u32(dst_offset), size = u32(size)},
-        false)
-    SDL.EndGPUCopyPass(copy_pass)
-    _ = SDL.SubmitGPUCommandBuffer(cmd)
 }
 
 // Persistent upload staging: one per upload kind, grown by doubling and
@@ -654,8 +636,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     }
 
     fwd, right, up := camera_view_basis(gs.camera, render_aspect(gs))
-    render_pos := gs.camera.pos + gs.camera.view_offset
-    render_pos.y += gs.camera.step_visual_offset
+    render_pos := camera_view_eye(gs.camera)
     // Near region drawn as voxels: only as far out as columns are actually
     // loaded, so while streaming catches up (fast travel) the far terrain
     // fills in instead of empty space. The bench can shrink it further to
@@ -778,11 +759,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
 
 gpu_destroy :: proc(gs: ^Game_State) {
     _ = SDL.WaitForGPUIdle(gs.gpu_device)
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.out_texture)
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.depth_texture)
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.vol_texture)
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[0])
-    SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[1])
+    gpu_release_scene_textures(gs)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.voxel_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.index_buf)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.owner_buf)

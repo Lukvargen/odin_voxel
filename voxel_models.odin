@@ -433,7 +433,7 @@ ent_build_masks :: proc(f: ^Ent_Frame, gs: ^Game_State) {
     cam := gs.camera
     w, h := f32(gs.render_w), f32(gs.render_h)
     fwd, right, up := camera_view_basis(cam, w / h)
-    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+    eye := camera_view_eye(cam)
     tx := (int(gs.render_w) + ENT_TILE - 1) / ENT_TILE
     ty := (int(gs.render_h) + ENT_TILE - 1) / ENT_TILE
     f.hdr.tiles_x, f.hdr.tiles_y = u32(tx), u32(ty)

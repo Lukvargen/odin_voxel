@@ -448,7 +448,7 @@ bench_glider_run :: proc(gs: ^Game_State) {
         g.aim_pitch = -5
         profile_reset()
         t0 := time.tick_now()
-        for i in 0 ..< 600 {
+        for _ in 0 ..< 600 {
             g.aim_yaw += 0.3
             glider_update(gs, 0, 0, 1.0 / 60, false, false, false, false, false)
             glider_view_update(gs, 1.0 / 60)

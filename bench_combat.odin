@@ -18,7 +18,6 @@ BENCH_COMBAT_EVERY  :: 3
 bench_combat_run :: proc(gs: ^Game_State) {
     ui_init(gs)
     defer ui_shutdown(gs)
-    gs_ui_left_pressed_state = &gs.ui
     dir := bench_shot_dir != "" ? bench_shot_dir : "."
 
     x, z, found := bench_find_biome(.Plains)

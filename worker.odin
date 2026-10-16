@@ -174,16 +174,6 @@ worker_pool_unqueue :: proc(pool: ^Worker_Pool, key: [2]int) {
     sync.mutex_unlock(&pool.mu_queued)
 }
 
-// Drain all finished chunks. Caller owns integrating them into the world.
-worker_pool_drain :: proc(pool: ^Worker_Pool) -> []Chunk_Result {
-    sync.mutex_lock(&pool.mu_ready)
-    results := make([]Chunk_Result, len(pool.ready))
-    copy(results, pool.ready[:])
-    clear(&pool.ready)
-    sync.mutex_unlock(&pool.mu_ready)
-    return results
-}
-
 // Drain at most max_n finished columns; the rest stay queued for next frame.
 // Bounds per-frame main-thread integration cost so a burst of completed
 // columns can't spike the frame. max_n <= 0 means unbounded (drain all).
@@ -308,4 +298,12 @@ worker_far_job :: proc(pool: ^Worker_Pool) -> bool {
     sync.mutex_unlock(&pool.mu_ready)
     sync.atomic_sub(&pool.in_flight, 1)
     return true
+}
+
+// Columns still to come: being generated, plus queued.
+worker_pool_pending_count :: proc(pool: ^Worker_Pool) -> int {
+    n := int(pool.in_flight)
+    // pending dynamic array is mutex-guarded; use atomic-free best-effort read.
+    n += len(pool.pending)
+    return n
 }

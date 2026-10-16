@@ -802,7 +802,7 @@ combat_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     cam := gs.camera
     fwd, right, up := camera_view_basis(cam, 1)
     right, up = la.normalize(right), la.normalize(up)
-    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+    eye := camera_view_eye(cam)
     ent_scale_about(f, eye, world_scale)
     shoulder := eye + right * SWORD_SHOULDER.x + up * SWORD_SHOULDER.y + fwd * SWORD_SHOULDER.z
     grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
@@ -822,7 +822,7 @@ mantle_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     if u > 0.9 || !ent_begin(f) { return }
     _, right, up := camera_view_basis(cam, 1)
     right, up = la.normalize(right), la.normalize(up)
-    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+    eye := camera_view_eye(cam)
     ent_scale_about(f, eye, world_scale)
     fwd := m.dir
     side := la.normalize([3]f32{-fwd.z, 0, fwd.x}) // flat, to the right of the ledge

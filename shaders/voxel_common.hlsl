@@ -127,7 +127,6 @@ float3 block_emission(uint id) {
 #define LEAF_TRANSMIT 0.35
 #define PLANT_TRANSMIT 0.7 // water plants are mostly gaps
 
-#define PI 3.14159265359
 
 // Integer-coordinate hashes (exact at any distance from spawn).
 float hash31i(int3 v) {
@@ -533,14 +532,6 @@ float3 sky_color_d(float3 dir, float3 Ln) {
 // fogging toward them painted a faint drifting cloud pattern onto voxels.
 float3 sky_color_fog_d(float3 dir, float3 Ln) {
     return sky_color_impl(dir, Ln, 0.0, 0.5, false);
-}
-
-float3 voxel_albedo(uint block_id, int3 vkey) {
-    float3 jitter = hash33i(vkey) * 2.0 - 1.0;
-    if      (block_id == BLOCK_GRASS)  return clamp(float3(0.16,0.42,0.10) + jitter*float3(0.04,0.06,0.03), 0.0, 1.0);
-    else if (block_id == BLOCK_LOG)    return clamp(float3(0.38,0.22,0.09) + jitter*float3(0.06,0.05,0.03), 0.0, 1.0);
-    else if (block_id == BLOCK_LEAVES) return clamp(float3(0.13,0.38,0.09) + jitter*float3(0.05,0.10,0.04), 0.0, 1.0);
-    else                               return clamp(float3(0.55,0.55,0.55) + jitter*float3(0.07,0.06,0.06), 0.0, 1.0);
 }
 
 // ---- Two-level ray trace (chunk DDA -> voxel DDA) ----------------------------

@@ -156,7 +156,7 @@ fish_next_manage: f32
 
 @(private="file")
 fish_watery :: proc(gs: ^Game_State, p: [3]f32) -> bool {
-    return block_is_watery(u8(get_voxel(gs, int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z)))))
+    return block_is_watery(u8(voxel_at(gs, p)))
 }
 
 // Room to swim at p: water there and a little above and below it.

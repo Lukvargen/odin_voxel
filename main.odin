@@ -78,7 +78,7 @@ Game_State :: struct {
     mask_buf:     ^SDL.GPUBuffer,
     far_buf:      ^SDL.GPUBuffer,     // far terrain tile table, then cells (far.odin)
     light_index_buf: ^SDL.GPUBuffer,  // per-slot light pool id / uniform light (light.odin)
-    light_pool_buf:  ^SDL.GPUBuffer,  // 512-byte light bricks
+    light_pool_buf:  ^SDL.GPUBuffer,  // light bricks, a u16 per voxel
     entity_buf:   ^SDL.GPUBuffer,     // entity voxel models + instances (voxel_models.odin)
     ent_dyn_base: int,                // uint4 index of the per-frame part of entity_buf
     ent_debug:    int,                // bench only: see Camera_Uniform.ent_debug
@@ -97,10 +97,10 @@ Game_State :: struct {
     light_dir:      [3]f32,
     sky:            Sky,   // sun or moon light, mist, eye adaptation (daycycle.odin)
     reflect_amount: i32,
-    aa_samples:     i32,   // anti-alias samples: 1/2/4 (F2 cycles)
-    shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
-    vol_enabled:    bool,  // volumetric god rays on/off (F4)
-    vol_steps:      i32,   // volumetric march steps: 16/24/32 (F5 cycles)
+    aa_samples:     i32,   // anti-alias samples: 1/2/4 (options screen)
+    shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (options screen)
+    vol_enabled:    bool,  // volumetric god rays on/off (options screen)
+    vol_steps:      i32,   // volumetric march steps: 16/24/32 (options screen)
     render_scale:   f32,   // scene resolution / window resolution (options screen)
     upscale_smooth: bool,  // scene upscaled to the window linearly, else nearest (pixel look)
     render_w:       i32,   // current scene texture size (gpu_fit_render_size)
@@ -171,10 +171,10 @@ main :: proc() {
     gs.reflect_amount = 1
     // Defaults are the cheap settings; each step up roughly adds a frame's
     // worth of GPU time on a GTX 1050 Ti (see `odin run . -- bench`).
-    gs.aa_samples     = 1     // F2 cycles 1->2->4
-    gs.shadow_rays    = 1     // F3 toggles 1<->3 (1=hard, 3=soft near)
-    gs.vol_enabled    = false // F4 toggles volumetric god rays
-    gs.vol_steps      = 16    // F5 cycles 16/24/32
+    gs.aa_samples     = 1     // 1, 2 or 4
+    gs.shadow_rays    = 1     // 1 = hard, 3 = soft near the camera
+    gs.vol_enabled    = false // volumetric god rays
+    gs.vol_steps      = 16    // 16, 24 or 32
     gs.render_scale   = 1 // full resolution; less = faster, blockier (options screen)
     gs.exposure       = 1.0
     gs.fog_density    = 0.0006 // far terrain reaches ~1900 voxels; haze starts showing past ~600
@@ -341,7 +341,6 @@ main :: proc() {
     } else if net_host {
         session_host(&gs, net_port)
     }
-    gs_ui_left_pressed_state = &gs.ui
 
     // Lock mouse at start
     _ = SDL.SetWindowRelativeMouseMode(gs.window, true)
@@ -377,95 +376,7 @@ main :: proc() {
                 ui_type_text(&gs, string(event.text.text))
 
             case .KEY_DOWN:
-                key := event.key.key
-                mods := key_mods(event.key.mod)
-                if gs.ui.typing != nil { // a text box has the keys (repeats too)
-                    ui_type_key(&gs, key, mods)
-                    break
-                }
-                if event.key.repeat { break }
-                // Ctrl and Alt combos do only what they're bound to, never the
-                // plain key's action (Ctrl+3 isn't 3). Shift is sneak, so keys
-                // with no Shift binding ignore it (build_tools.odin).
-                plain := mods & {.Ctrl, .Alt} == {}
-                // Keys that work on menu screens too.
-                switch key {
-                case SDL.K_ESCAPE:
-                    ui_back(&gs) // pause menu, or one screen back
-                case SDL.K_E:
-                    if plain && (gs.ui.screen == .None || gs.ui.screen == .Inventory) {
-                        ui_open(&gs, gs.ui.screen == .None ? .Inventory : .None)
-                    }
-                case SDL.K_M:
-                    if !plain { break }
-                    audio_toggle_mute()
-                    ui_toast(&gs, audio.muted ? "Sound muted" : "Sound on")
-                }
-                if !playing { break }
-                // Movement keys: the modifiers are movement too (Ctrl sprints,
-                // Alt flies fast, Shift sneaks or dodges), so these never care.
-                switch key {
-                case SDL.K_LSHIFT:
-                    dodge_pressed = gs.combat.sword
-                case SDL.K_W:
-                    press_time := SDL.GetTicks()
-                    if press_time - gs.w_last_press_ms <= DOUBLE_TAP_MS { gs.sprint_latched = true }
-                    gs.w_last_press_ms = press_time
-                case SDL.K_SPACE:
-                    // Glider equipped: Space in mid-air opens / releases the
-                    // wing (and double-tap fly mode is off while it's on).
-                    if gs.glider.equipped && glider_can_toggle(&gs) {
-                        glider_toggle_deploy(&gs)
-                    } else if gs.glider.equipped {
-                        gs.jump_pressed = true
-                    } else {
-                        press_time := SDL.GetTicks()
-                        if gs.space_last_press_ms > 0 && (press_time - gs.space_last_press_ms) <= DOUBLE_TAP_MS {
-                            gs.camera.fly_mode = !gs.camera.fly_mode
-                            gs.camera.velocity = {}
-                            gs.space_last_press_ms = 0
-                        } else {
-                            gs.space_last_press_ms = press_time
-                            gs.jump_pressed = true
-                        }
-                    }
-                }
-                if build_key(&gs, key, mods) || !plain { break }
-                switch key {
-                case SDL.K_RETURN, SDL.K_KP_ENTER:
-                    ui_open_chat(&gs)
-                case SDL.K_F1:
-                    gs.ui.hud_hidden = !gs.ui.hud_hidden
-                case SDL.K_F2:
-                    _ = os.make_directory_all("screenshots")
-                    path := fmt.tprintf("screenshots/%d.bmp", SDL.GetTicks())
-                    bench_screenshot(&gs, path)
-                    ui_toast(&gs, fmt.tprintf("Saved %s", path))
-                case SDL.K_F3:
-                    gs.ui.debug_open = !gs.ui.debug_open
-                case SDL.K_H:
-                    gs.ui.help_open = !gs.ui.help_open
-                    gs.ui.help_t = 0
-                case SDL.K_F5:
-                    gs.glider.third_person = !gs.glider.third_person
-                case SDL.K_F6:
-                    slime_debug_spawn(&gs)
-                case SDL.K_F7:
-                    client_send_empty(&gs, .Clear)
-                    ui_toast(&gs, "Slimes and enemies cleared")
-                case SDL.K_F8:
-                    enemy_debug_spawn(&gs)
-                case SDL.K_1 ..= SDL.K_9:
-                    if gs.combat.sword { combat_toggle_sword(&gs) } // back to building
-                    hotbar_select(&gs, int(key - SDL.K_1))
-                case SDL.K_R:
-                    combat_toggle_sword(&gs)
-                case SDL.K_G:
-                    if gs.glider.deployed { glider_toggle_deploy(&gs) }
-                    gs.glider.equipped = !gs.glider.equipped
-                    if gs.glider.equipped { gs.camera.fly_mode = false }
-                    ui_toast(&gs, gs.glider.equipped ? "Hang glider: jump, then Space in the air" : "Hang glider put away")
-                }
+                if on_key_down(&gs, event.key.key, key_mods(event.key.mod), event.key.repeat, playing) { dodge_pressed = true }
 
             case .MOUSE_MOTION:
                 if gs.mouse_locked {
@@ -670,4 +581,98 @@ aabb_hits_voxel :: proc(eye: [3]f32, v: [3]int) -> bool {
     return f32(v.x) < hi.x && f32(v.x + 1) > lo.x &&
            f32(v.y) < hi.y && f32(v.y + 1) > lo.y &&
            f32(v.z) < hi.z && f32(v.z + 1) > lo.z
+}
+
+// A key going down (not held keys: those are read each frame in main).
+// Returns true for a dodge (Shift with the sword drawn).
+on_key_down :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods, repeat, playing: bool) -> (dodge: bool) {
+    if gs.ui.typing != nil { // a text box has the keys (repeats too)
+        ui_type_key(gs, key, mods)
+        return
+    }
+    if repeat { return }
+    // Ctrl and Alt combos do only what they're bound to, never the
+    // plain key's action (Ctrl+3 isn't 3). Shift is sneak, so keys
+    // with no Shift binding ignore it (build_tools.odin).
+    plain := mods & {.Ctrl, .Alt} == {}
+    // Keys that work on menu screens too.
+    switch key {
+    case SDL.K_ESCAPE:
+        ui_back(gs) // pause menu, or one screen back
+    case SDL.K_E:
+        if plain && (gs.ui.screen == .None || gs.ui.screen == .Inventory) {
+            ui_open(gs, gs.ui.screen == .None ? .Inventory : .None)
+        }
+    case SDL.K_M:
+        if plain {
+            audio_toggle_mute()
+            ui_toast(gs, audio.muted ? "Sound muted" : "Sound on")
+        }
+    }
+    if !playing { return }
+    // Movement keys: the modifiers are movement too (Ctrl sprints,
+    // Alt flies fast, Shift sneaks or dodges), so these never care.
+    switch key {
+    case SDL.K_LSHIFT:
+        dodge = gs.combat.sword
+    case SDL.K_W:
+        press_time := SDL.GetTicks()
+        if press_time - gs.w_last_press_ms <= DOUBLE_TAP_MS { gs.sprint_latched = true }
+        gs.w_last_press_ms = press_time
+    case SDL.K_SPACE:
+        // Glider equipped: Space in mid-air opens / releases the
+        // wing (and double-tap fly mode is off while it's on).
+        if gs.glider.equipped && glider_can_toggle(gs) {
+            glider_toggle_deploy(gs)
+        } else if gs.glider.equipped {
+            gs.jump_pressed = true
+        } else {
+            press_time := SDL.GetTicks()
+            if gs.space_last_press_ms > 0 && (press_time - gs.space_last_press_ms) <= DOUBLE_TAP_MS {
+                gs.camera.fly_mode = !gs.camera.fly_mode
+                gs.camera.velocity = {}
+                gs.space_last_press_ms = 0
+            } else {
+                gs.space_last_press_ms = press_time
+                gs.jump_pressed = true
+            }
+        }
+    }
+    if build_key(gs, key, mods) || !plain { return }
+    switch key {
+    case SDL.K_RETURN, SDL.K_KP_ENTER:
+        ui_open_chat(gs)
+    case SDL.K_F1:
+        gs.ui.hud_hidden = !gs.ui.hud_hidden
+    case SDL.K_F2:
+        _ = os.make_directory_all("screenshots")
+        path := fmt.tprintf("screenshots/%d.bmp", SDL.GetTicks())
+        bench_screenshot(gs, path)
+        ui_toast(gs, fmt.tprintf("Saved %s", path))
+    case SDL.K_F3:
+        gs.ui.debug_open = !gs.ui.debug_open
+    case SDL.K_H:
+        gs.ui.help_open = !gs.ui.help_open
+        gs.ui.help_t = 0
+    case SDL.K_F5:
+        gs.glider.third_person = !gs.glider.third_person
+    case SDL.K_F6:
+        slime_debug_spawn(gs)
+    case SDL.K_F7:
+        client_send_empty(gs, .Clear)
+        ui_toast(gs, "Slimes and enemies cleared")
+    case SDL.K_F8:
+        enemy_debug_spawn(gs)
+    case SDL.K_1 ..= SDL.K_9:
+        if gs.combat.sword { combat_toggle_sword(gs) } // back to building
+        hotbar_select(gs, int(key - SDL.K_1))
+    case SDL.K_R:
+        combat_toggle_sword(gs)
+    case SDL.K_G:
+        if gs.glider.deployed { glider_toggle_deploy(gs) }
+        gs.glider.equipped = !gs.glider.equipped
+        if gs.glider.equipped { gs.camera.fly_mode = false }
+        ui_toast(gs, gs.glider.equipped ? "Hang glider: jump, then Space in the air" : "Hang glider put away")
+    }
+    return
 }

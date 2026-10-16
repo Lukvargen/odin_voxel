@@ -11,7 +11,6 @@ bench_ui: bool
 bench_ui_run :: proc(gs: ^Game_State) {
     ui_init(gs)
     defer ui_shutdown(gs)
-    gs_ui_left_pressed_state = &gs.ui
     dir := bench_shot_dir != "" ? bench_shot_dir : "."
 
     gs.camera.fly_mode = false

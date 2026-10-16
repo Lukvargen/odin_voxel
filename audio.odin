@@ -243,11 +243,6 @@ ease :: proc(x: ^f32, target, rate, dt: f32) {
     x^ += (target - x^) * min(rate * dt, 1)
 }
 
-@(private="file")
-voxel_at :: proc(gs: ^Game_State, p: [3]f32) -> Block_Type {
-    return Block_Type(u8(get_voxel(gs, int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z)))))
-}
-
 // What's around the player, turned into the loops' drivers.
 @(private="file")
 surroundings_update :: proc(gs: ^Game_State, dt: f32) {

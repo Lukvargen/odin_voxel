@@ -135,6 +135,7 @@ ui_load_font :: proc(ui: ^UI_State, fontId: u16, fontSize: u16, path: cstring) {
 
 ui_init :: proc(gs: ^Game_State) {
     ui := &gs.ui
+    gs_ui_left_pressed_state = ui
     assert(TTF.Init(), "TTF.Init failed")
 
     ui.renderer_data.renderer = SDL.CreateGPURenderer(gs.gpu_device, gs.window)
@@ -619,11 +620,6 @@ biome_name :: proc(b: Biome) -> string {
     return ""
 }
 
-player_swimming :: proc(gs: ^Game_State) -> bool {
-    p := gs.camera.pos - {0, PLAYER_EYE_HEIGHT * 0.5, 0}
-    return block_is_watery(u8(get_voxel(gs, int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z)))))
-}
-
 // ─── HUD ───────────────────────────────────────────────────────────────────
 
 hud_layout :: proc(gs: ^Game_State, w, h: f32) {
@@ -744,7 +740,7 @@ player_list_layout :: proc(gs: ^Game_State) {
 @(private="file")
 name_tags_layout :: proc(gs: ^Game_State, w, h: f32) {
     cam := gs.camera
-    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+    eye := camera_view_eye(cam)
     for &o, slot in gs.net.others {
         if !o.active { continue }
         over := o.pos + {0, o.latest.gliding ? 1.9 : 0.75, 0}
@@ -909,7 +905,7 @@ combat_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     c := &gs.combat
     fx := &gs.fx
     cam := gs.camera
-    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+    eye := camera_view_eye(cam)
 
     health_bar(gs, w, h)
 
@@ -1140,8 +1136,7 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
     pv := build_preview(gs)
     if len(pv.segs) == 0 { return }
     CLEAR_COL :: [3]u8{255, 110, 95}
-    eye := gs.camera.pos + gs.camera.view_offset
-    eye.y += gs.camera.step_visual_offset
+    eye := camera_view_eye(gs.camera)
     fwd, right, up := camera_view_basis(gs.camera, w / h)
     // Point -> pixels; the edge is clipped against a near plane first.
     project :: proc(p: [3]f32, fwd, right, up: [3]f32, w, h: f32) -> [2]f32 {
@@ -2000,19 +1995,11 @@ inventory_layout :: proc(gs: ^Game_State) {
 
 // ─── Pointer edge plumbing ─────────────────────────────────────────────────
 
-// Set by main when a screen is open and a left-click event arrives. The
-// flag is cleared after layout each frame in ui_draw.
+// For widgets, which don't get the game state: whether the left button went
+// down this frame (UI_State.mouse_left_pressed). Set by ui_init.
 gs_ui_left_pressed_state: ^UI_State
 
 gs_ui_left_pressed :: proc() -> bool {
     if gs_ui_left_pressed_state == nil { return false }
     return gs_ui_left_pressed_state.mouse_left_pressed
-}
-
-// Helper: pending = workers in flight + queued column count.
-worker_pool_pending_count :: proc(pool: ^Worker_Pool) -> int {
-    n := int(pool.in_flight)
-    // pending dynamic array is mutex-guarded; use atomic-free best-effort read.
-    n += len(pool.pending)
-    return n
 }
