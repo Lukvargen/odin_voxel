@@ -200,9 +200,6 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
         case .Player_State:
             p := msg_get(&r, Player) or_break
             p.active = true
-            // Until clients see the server's slimes and enemies, those
-            // leave remote players alone: no blows out of nowhere.
-            p.ignored = player != srv.local_player
             sim.players[player] = p
         case .Hit:
             h := msg_get(&r, Msg_Hit) or_break
@@ -247,7 +244,7 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
         case .Column_Request:
             key := msg_get(&r, [2]i32) or_break
             server_send_column(srv, server_outbox(srv, player), {int(key.x), int(key.y)})
-        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data:
+        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View:
             r.at = len(r.data) // not a connected client's to send: drop the rest
         }
     }
@@ -339,6 +336,43 @@ server_send_column :: proc(srv: ^Server, o: ^Outbox, key: [2]int) {
     outbox_put_bytes(o, .Column_Data, Msg_Column_Data{key = {i32(key.x), i32(key.y)}, size = u32(len(bytes))}, bytes[:])
 }
 
+// The slimes and enemies within view of `eye`, and which slots are taken.
+@(private="file")
+server_send_monsters :: proc(srv: ^Server, o: ^Outbox, eye: [3]f32) {
+    sim := srv.sim
+    near :: proc(p, eye: [3]f32) -> bool {
+        d := p - eye
+        return d.x * d.x + d.y * d.y + d.z * d.z < MONSTER_VIEW_RANGE * MONSTER_VIEW_RANGE
+    }
+    m: Msg_Monsters
+    for &sl, i in sim.slimes.list {
+        if !sl.alive || !near(sl.pos, eye) { continue }
+        m.slimes |= 1 << u64(i)
+    }
+    for &e, i in sim.enemies.list {
+        if !e.alive || !near(e.pos, eye) { continue }
+        m.enemies |= 1 << u32(i)
+    }
+    outbox_put(o, .Monsters, m)
+    for &sl, i in sim.slimes.list {
+        if m.slimes & (1 << u64(i)) == 0 { continue }
+        outbox_put(o, .Slime_View, Msg_Slime_View{
+            index = u8(i), size = sl.size, state = sl.state, on_ground = sl.on_ground, uid = sl.uid,
+            pos = sl.pos, vel = sl.vel, color = sl.color,
+            yaw = sl.yaw, squash = sl.squash, flash = sl.flash, freeze = sl.freeze, bar = sl.bar, hp = sl.hp, age = sl.age,
+        })
+    }
+    for &e, i in sim.enemies.list {
+        if m.enemies & (1 << u32(i)) == 0 { continue }
+        outbox_put(o, .Enemy_View, Msg_Enemy_View{
+            index = u8(i), kind = e.kind, state = e.state, swing = e.swing, on_ground = e.on_ground, uid = e.uid,
+            pos = e.pos, vel = e.vel, tint = e.tint,
+            yaw = e.yaw, timer = e.timer, flash = e.flash, freeze = e.freeze, bar = e.bar, hp = e.hp,
+            death = e.death, rising = e.rising, walk_phase = e.walk_phase, speed = e.speed, age = e.age,
+        })
+    }
+}
+
 @(private="file")
 server_spawn :: proc(srv: ^Server, s: Msg_Spawn) {
     sim := srv.sim
@@ -371,6 +405,10 @@ server_flush :: proc(srv: ^Server, dt: f32) {
             for &rem, rs in srv.remotes {
                 if rem.peer != nil && rs != slot { outbox_put(&rem.out, .Player_View, view) }
             }
+        }
+        // The local client shares the simulation; the others see its monsters.
+        for &rem, rs in srv.remotes {
+            if rem.peer != nil && sim.players[rs].active { server_send_monsters(srv, &rem.out, sim.players[rs].pos) }
         }
     }
 

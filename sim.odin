@@ -34,7 +34,6 @@ Player :: struct {
     glide_pitch:   f32, // radians
     glide_bank:    f32, // radians
     glide_unfold:  f32, // 0..1
-    ignored:    bool,   // monsters leave it be (server.odin: a remote player can't see them yet)
     // Defence, as its client last reported it (hurt_outcome).
     invuln:     f32,    // dodging or just hurt: blows miss
     blocking:   bool,
@@ -95,7 +94,7 @@ player_flat_forward :: proc(p: ^Player) -> [3]f32 {
 }
 
 // Whether slimes and enemies are about this player: around it, after it.
-player_hunted :: proc(p: ^Player) -> bool { return p.active && !p.ignored }
+player_hunted :: proc(p: ^Player) -> bool { return p.active }
 
 // The hunted player nearest `pos` (ground distance), or -1 if there are none.
 nearest_player :: proc(s: ^Sim, pos: [3]f32) -> (index: int, dist: f32) {

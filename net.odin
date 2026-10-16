@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -56,6 +56,9 @@ Msg_Kind :: enum u8 {
     Player_Gone,  // u8: that player's slot is empty now
     Clock,        // Msg_Clock
     Event,        // Sim_Event
+    Monsters,     // Msg_Monsters: which slime and enemy slots near you are taken (the rest are gone)
+    Slime_View,   // Msg_Slime_View: one of them, as it is now
+    Enemy_View,   // Msg_Enemy_View
     Edited,       // Msg_Edited: columns that differ from the generated world (ask for them)
     Column_Data,  // Msg_Column_Data, then `size` bytes: the column, run-length (column_encode)
 }
@@ -126,7 +129,44 @@ Msg_Clock :: struct {
 
 // Whether a kind goes on the reliable channel; only states go unreliable.
 msg_reliable :: proc(kind: Msg_Kind) -> bool {
-    return kind != .Player_State && kind != .Player_View && kind != .Clock
+    #partial switch kind {
+    case .Player_State, .Player_View, .Clock, .Monsters, .Slime_View, .Enemy_View: return false
+    }
+    return true
+}
+
+// Slimes and enemies a client sees, sent VIEW_RATE times a second: what
+// they look like and where they're going, for drawing, hitting and being
+// shoved by (client.odin keeps them as replicas).
+MONSTER_VIEW_RANGE :: ENTITY_CULL_RADIUS
+#assert(MAX_SLIMES <= 64 && MAX_ENEMIES <= 32)
+
+Msg_Monsters :: struct {
+    slimes:  u64, // bit i: slime slot i is taken
+    enemies: u32,
+}
+
+Msg_Slime_View :: struct {
+    index:     u8,
+    size:      Slime_Size,
+    state:     Slime_State,
+    on_ground: bool,
+    uid:       u32,
+    pos, vel:  [3]f32,
+    color:     [3]f32,
+    yaw, squash, flash, freeze, bar, hp, age: f32,
+}
+
+Msg_Enemy_View :: struct {
+    index:     u8,
+    kind:      Enemy_Kind,
+    state:     Enemy_State,
+    swing:     Swing,
+    on_ground: bool,
+    uid:       u32,
+    pos, vel:  [3]f32,
+    tint:      [3]f32,
+    yaw, timer, flash, freeze, bar, hp, death, rising, walk_phase, speed, age: f32,
 }
 
 NET_RELIABLE   :: u8(0)

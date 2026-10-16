@@ -39,7 +39,20 @@ Client_Net :: struct {
     // from the server (client_request_column), and those asked for.
     edited:     map[[2]int]bool,
     requested:  map[[2]int]bool,
+    // Joined: the server's slimes and enemies near us live in gs.slimes and
+    // gs.enemies as replicas, easing toward where they were last seen.
+    slime_seen: [MAX_SLIMES]Replica,
+    enemy_seen: [MAX_ENEMIES]Replica,
 }
+
+// Where a replicated monster was last seen, how fast it was going, and how
+// long ago.
+Replica :: struct {
+    pos, vel: [3]f32,
+    age:      f32,
+}
+
+REPLICA_TIMEOUT :: 1 // seconds without word before a replicated monster is dropped
 
 // Another player, drawn where its client last said it was.
 Other_Player :: struct {
@@ -174,6 +187,17 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             base := la.array_cast(m.key, int) * CHUNK_VOXELS
             for v, vi in m.voxels { client_write(gs, base + {vi & 7, (vi >> 3) & 7, vi >> 6}, v, &changed) }
             world_refresh(gs, changed[:])
+        case .Monsters:
+            m := msg_get(&r, Msg_Monsters) or_break
+            if !client_joined(gs) { break }
+            for &sl, i in gs.slimes.list { if m.slimes & (1 << u64(i)) == 0 { sl.alive = false } }
+            for &e, i in gs.enemies.list { if m.enemies & (1 << u32(i)) == 0 { e.alive = false } }
+        case .Slime_View:
+            v := msg_get(&r, Msg_Slime_View) or_break
+            if client_joined(gs) && int(v.index) < MAX_SLIMES { client_slime_view(gs, v) }
+        case .Enemy_View:
+            v := msg_get(&r, Msg_Enemy_View) or_break
+            if client_joined(gs) && int(v.index) < MAX_ENEMIES { client_enemy_view(gs, v) }
         case .Edited:
             m := msg_get(&r, Msg_Edited) or_break
             if !client_joined(gs) { break }
@@ -196,8 +220,65 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
     }
     clear(&gs.loop.to_client)
     others_update(gs, dt)
+    if client_joined(gs) { replicas_update(gs, dt) }
     monsters_push_player(gs)
     client_hold_arrival(gs)
+}
+
+// A slime as the server last saw it. A new one (or another in its slot)
+// starts where it is; one we know eases there (replicas_update).
+@(private="file")
+client_slime_view :: proc(gs: ^Game_State, v: Msg_Slime_View) {
+    sl := &gs.slimes.list[v.index]
+    if !sl.alive || sl.uid != v.uid { sl^ = {alive = true, uid = v.uid, pos = v.pos} }
+    sl.size, sl.state, sl.on_ground, sl.vel, sl.color = v.size, v.state, v.on_ground, v.vel, v.color
+    sl.yaw, sl.squash, sl.flash, sl.freeze, sl.bar, sl.hp, sl.age = v.yaw, v.squash, v.flash, v.freeze, v.bar, v.hp, v.age
+    gs.net.slime_seen[v.index] = {pos = v.pos, vel = v.vel}
+}
+
+@(private="file")
+client_enemy_view :: proc(gs: ^Game_State, v: Msg_Enemy_View) {
+    e := &gs.enemies.list[v.index]
+    if !e.alive || e.uid != v.uid { e^ = {alive = true, uid = v.uid, pos = v.pos} }
+    e.kind, e.state, e.swing, e.on_ground, e.vel, e.tint = v.kind, v.state, v.swing, v.on_ground, v.vel, v.tint
+    e.yaw, e.timer, e.flash, e.freeze, e.bar, e.hp = v.yaw, v.timer, v.flash, v.freeze, v.bar, v.hp
+    e.death, e.rising, e.walk_phase, e.speed, e.age = v.death, v.rising, v.walk_phase, v.speed, v.age
+    gs.net.enemy_seen[v.index] = {pos = v.pos, vel = v.vel}
+}
+
+// Between views, the replicated monsters glide toward where they were
+// seen, a little ahead by their speed, and keep their clocks running (so a
+// walk keeps striding, a hit flash fades); one not heard of in a while is
+// gone.
+@(private="file")
+replicas_update :: proc(gs: ^Game_State, dt: f32) {
+    ease :: proc(pos: ^[3]f32, rep: ^Replica, dt: f32) -> bool {
+        rep.age += dt
+        if rep.age > REPLICA_TIMEOUT { return false }
+        target := rep.pos + rep.vel * min(rep.age, 0.15)
+        d := target - pos^
+        if d.x * d.x + d.y * d.y + d.z * d.z > 16 { pos^ = target } else { pos^ += d * min(dt * 15, 1) }
+        return true
+    }
+    for &sl, i in gs.slimes.list {
+        if !sl.alive { continue }
+        if !ease(&sl.pos, &gs.net.slime_seen[i], dt) { sl.alive = false; continue }
+        sl.age += dt
+        sl.flash = max(sl.flash - dt * 7, 0)
+        sl.bar = max(sl.bar - dt, 0)
+        sl.freeze = max(sl.freeze - dt, 0)
+    }
+    for &e, i in gs.enemies.list {
+        if !e.alive { continue }
+        if !ease(&e.pos, &gs.net.enemy_seen[i], dt) { e.alive = false; continue }
+        e.age += dt
+        e.timer -= dt
+        e.flash = max(e.flash - dt * 7, 0)
+        e.bar = max(e.bar - dt, 0)
+        e.freeze = max(e.freeze - dt, 0)
+        if e.state == .Dead { e.death += dt }
+        e.walk_phase += e.speed * dt * 2.6 / ENEMY_SPECS[e.kind].scale
+    }
 }
 
 // Blocks this client just changed (build_commit), to the server, which
