@@ -60,8 +60,9 @@ session_join :: proc(gs: ^Game_State, address: string) -> bool {
     gs.net.home_pos, gs.net.home_yaw = gs.camera.pos, gs.camera.yaw
     gs.net.sent_name = {}
     gs.net.names = {}
+    gs.net.restored, gs.net.sent_kept = false, {}
     if !client_join(gs, address) {
-        server_greet_local(&gs.server) // still ours, then
+        server_greet_local(&gs.server, client_name(gs), resume = false) // still ours, then
         return false
     }
     return true
@@ -77,6 +78,7 @@ session_leave :: proc(gs: ^Game_State) {
     n.home_pos = {}
     n.sent_name = {}
     n.names = {}
+    n.restored, n.sent_kept = false, {}
     for &o in n.others { o.active = false }
     clear(&n.out.reliable)
     clear(&n.out.unreliable)
@@ -86,7 +88,7 @@ session_leave :: proc(gs: ^Game_State) {
     // Our own server's world again: what we saw of theirs goes, and ours
     // tells us what's edited.
     client_reset_world(gs)
-    server_greet_local(&gs.server)
+    server_greet_local(&gs.server, client_name(gs), resume = true)
     if home != 0 { client_arrive(gs, home, yaw) }
     ui_toast(gs, "Back in your own world", 3)
 }

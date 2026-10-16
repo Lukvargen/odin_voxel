@@ -39,13 +39,11 @@ Server :: struct {
     local_out:    Outbox,    // to the local client, moved to link.to_client at the flush
     away:         map[[2]int]^Column, // columns edited this step that aren't loaded: saved, then freed
     names:        [MAX_PLAYERS]Msg_Text, // what each player is called (empty: not said yet)
-    places:       map[string]Place,      // where each player (by name) was last (server_world.odin)
-}
-
-// Where a player was, to carry on from when they're back.
-Place :: struct {
-    pos: [3]f32, // eye
-    yaw: f32,
+    // Characters, by name (player_save.odin): those seen this session, and
+    // what each slot's client last said it carries.
+    records:      map[string]Player_Record,
+    kept:         [MAX_PLAYERS]Player_Kept,
+    kept_known:   [MAX_PLAYERS]bool,
 }
 
 // A player connected over ENet.
@@ -205,10 +203,11 @@ server_drop :: proc(srv: ^Server, slot: int) {
     rem.peer = nil
     clear(&rem.out.reliable)
     clear(&rem.out.unreliable)
+    player_record_note(srv, slot, write = true)
+    srv.kept_known[slot] = false
     srv.sim.players[slot].active = false
     server_broadcast(srv, .Player_Gone, u8(slot))
     server_notice(srv, fmt.tprintf("%s left", server_player_name(srv, slot)))
-    server_note_place(srv, slot)
     srv.names[slot] = {}
     fmt.printf("Host: player %d left\n", slot)
 }
@@ -305,15 +304,17 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
             server_broadcast(srv, .Player_Name, Msg_Player_Name{slot = u8(player), name = name})
             if first && player != srv.local_player {
                 server_notice(srv, fmt.tprintf("%s joined", server_player_name(srv, player)))
-                // Been here before: back where they were.
-                if place, ok := srv.places[string(name.text[:name.len])]; ok {
-                    outbox_put(server_outbox(srv, player), .Move_To, Msg_Move_To{pos = place.pos, yaw = place.yaw})
-                }
+                // Been here before: back as they were; else a fresh start.
+                rec, known := player_record_find(srv, string(name.text[:name.len]))
+                outbox_put(server_outbox(srv, player), .Restore, Msg_Restore{known = known, move = known, record = rec})
             }
+        case .Keep:
+            m := msg_get(&r, Player_Kept) or_break
+            srv.kept[player], srv.kept_known[player] = m, true
         case .Say:
             m := msg_get(&r, Msg_Text) or_break
             if len(text_of(&m)) > 0 { server_broadcast(srv, .Chat_Line, Msg_Chat_Line{slot = u8(player), line = m}) }
-        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line, .Move_To:
+        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line, .Restore:
             r.at = len(r.data) // not a connected client's to send: drop the rest
         }
     }

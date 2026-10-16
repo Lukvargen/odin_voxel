@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Move_To), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -48,6 +48,7 @@ Msg_Kind :: enum u8 {
     Set_Name,     // Msg_Text: what this client's player is called
     Say,          // Msg_Text: a chat line
     Column_Request, // [2]i32: an edited column (Edited), please
+    Keep,         // Player_Kept: what this client's player carries, when it changes (player_save.odin)
     // both ways: blocks a player changed (client → server → the others)
     Voxels,       // Msg_Voxels
     Chunk_Voxels, // Msg_Chunk_Voxels: a whole chunk, when an edit changed much of it
@@ -64,7 +65,7 @@ Msg_Kind :: enum u8 {
     Edited,       // Msg_Edited: columns that differ from the generated world (ask for them)
     Column_Data,  // Msg_Column_Data, then `size` bytes: the column, run-length (column_encode)
     Player_Name,  // Msg_Player_Name: what a player is called
-    Move_To,      // Msg_Move_To: you're back: carry on from where you were
+    Restore,      // Msg_Restore: your character here: carry on as you were, or start fresh
     Chat_Line,    // Msg_Chat_Line: a chat line, or the server's news (someone joined, left)
 }
 
@@ -78,9 +79,10 @@ Msg_Text :: struct {
     text: [TEXT_MAX]u8,
 }
 
-Msg_Move_To :: struct {
-    pos: [3]f32, // eye
-    yaw: f32,
+Msg_Restore :: struct {
+    known:  bool, // been here before: record is how they left; else start fresh
+    move:   bool, // to record.pos (not when told where to start: at=)
+    record: Player_Record,
 }
 
 Msg_Player_Name :: struct {

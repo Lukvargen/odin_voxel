@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import "core:time"
 import la "core:math/linalg"
 import enet "vendor:ENet"
 
@@ -49,6 +50,11 @@ Client_Net :: struct {
     enemy_seen: [MAX_ENEMIES]Replica,
     // Names and chat.
     sent_name:  Msg_Text,                 // as last told the server (resent when it changes)
+    // What we carry (Player_Kept), as last told the server: only once it
+    // told us our character here (Restore), so it's never the last world's.
+    restored:     bool,
+    sent_kept:    Player_Kept,
+    kept_sent_at: time.Tick,
     names:      [MAX_PLAYERS]Msg_Text,    // what the players are called, as the server says
     chat:       [CHAT_LINES]Chat_Entry,   // the latest lines, oldest first
 }
@@ -118,10 +124,49 @@ client_join :: proc(gs: ^Game_State, address: string) -> bool {
 client_leave :: proc(gs: ^Game_State) {
     n := &gs.net
     if n.host == nil { return }
-    if n.peer != nil { enet.peer_disconnect(n.peer, 0) }
+    if n.peer != nil {
+        if n.welcomed {
+            client_send_kept(gs, true) // the latest, to be saved
+            outbox_send(&n.out, n.peer)
+        }
+        enet.peer_disconnect(n.peer, 0)
+    }
     enet.host_flush(n.host)
     enet.host_destroy(n.host)
     n.host, n.peer = nil, nil
+}
+
+// What we carry, to the server when it changes: health at most once a
+// second (unless `now`), as it ticks up regenerating.
+@(private="file")
+client_send_kept :: proc(gs: ^Game_State, now: bool) {
+    n := &gs.net
+    if !n.restored { return }
+    k := Player_Kept{hp = gs.combat.hp, glider = gs.glider.equipped, hotbar = gs.hotbar, hotbar_slot = u8(gs.hotbar_slot)}
+    if k == n.sent_kept { return }
+    rest := k
+    rest.hp = n.sent_kept.hp
+    if rest == n.sent_kept && !now && time.tick_since(n.kept_sent_at) < time.Second { return }
+    client_send(gs, .Keep, k)
+    n.sent_kept, n.kept_sent_at = k, time.tick_now()
+}
+
+// Our character on this server: as we left it, or a fresh one.
+@(private="file")
+client_restore :: proc(gs: ^Game_State, m: Msg_Restore) {
+    rec := m.record
+    k := m.known ? rec.kept : PLAYER_FRESH
+    if m.move {
+        client_arrive(gs, rec.pos, rec.yaw)
+        gs.camera.pitch = rec.pitch
+    }
+    gs.camera.fly_mode = m.known && rec.fly_mode && !k.glider
+    gs.combat.sword = m.known && rec.sword
+    gs.combat.hp = k.hp
+    gs.glider.equipped = k.glider
+    gs.hotbar = k.hotbar
+    hotbar_select(gs, int(k.hotbar_slot))
+    gs.net.restored, gs.net.sent_kept = true, {} // and tell the server what we carry
 }
 
 // The server let us go, or never answered: back to our own world, saying why.
@@ -202,6 +247,7 @@ client_send_input :: proc(gs: ^Game_State) {
         client_send(gs, .Set_Name, name)
         n.sent_name = name
     }
+    client_send_kept(gs, false)
 
     if !client_joined(gs) {
         outbox_move(&n.out, &gs.loop.to_server)
@@ -239,9 +285,9 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
                 gs.net.others[slot].active = false
                 gs.net.names[slot] = {}
             }
-        case .Move_To:
-            m := msg_get(&r, Msg_Move_To) or_break
-            client_arrive(gs, m.pos, m.yaw)
+        case .Restore:
+            m := msg_get(&r, Msg_Restore) or_break
+            client_restore(gs, m)
         case .Player_Name:
             m := msg_get(&r, Msg_Player_Name) or_break
             if int(m.slot) < MAX_PLAYERS {

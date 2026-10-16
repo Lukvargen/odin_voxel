@@ -1,10 +1,7 @@
 package main
 
 import "core:fmt"
-import "core:os"
 import "core:slice"
-import "core:strconv"
-import "core:strings"
 import "core:sync"
 import "core:thread"
 import "core:time"
@@ -36,10 +33,7 @@ Server_Loader :: struct {
 // none (saves = false: benches), and start loading.
 server_open :: proc(srv: ^Server, saves: bool) {
     w := &srv.world
-    if saves {
-        w.save_enabled = world_open(w)
-        places_load(srv)
-    }
+    if saves { w.save_enabled = world_open(w) }
     srv.last_autosave = time.tick_now()
     l := &srv.loader
     l.running, l.started = true, true
@@ -66,53 +60,11 @@ server_close :: proc(srv: ^Server) {
     l.started = false
 }
 
-// Every column with unsaved edits, to its save, and where everyone is.
+// Every column with unsaved edits, to its save, and every player's character.
 server_save_all :: proc(srv: ^Server) {
     save_all_modified(&srv.world)
-    for slot in 0 ..< MAX_PLAYERS { server_note_place(srv, slot) }
-    places_save(srv)
+    for slot in 0 ..< MAX_PLAYERS { player_record_note(srv, slot, write = true) }
     srv.last_autosave = time.tick_now()
-}
-
-// Where player `slot` is now, under its name (if it has said one).
-server_note_place :: proc(srv: ^Server, slot: int) {
-    p := &srv.sim.players[slot]
-    n := &srv.names[slot]
-    if !p.active || n.len == 0 { return }
-    name := string(n.text[:n.len])
-    if _, known := srv.places[name]; !known { name = strings.clone(name) }
-    srv.places[name] = {pos = p.pos, yaw = p.yaw}
-}
-
-// players.txt in the world's folder: a line per player, "x y z yaw name".
-@(private="file")
-places_path :: proc() -> string { return fmt.tprintf("%s/players.txt", save_dir) }
-
-@(private="file")
-places_load :: proc(srv: ^Server) {
-    data, err := os.read_entire_file(places_path(), context.temp_allocator)
-    if err != nil { return }
-    for line in strings.split_lines(string(data), context.temp_allocator) {
-        f := strings.split_n(strings.trim_space(line), " ", 5, context.temp_allocator)
-        if len(f) != 5 { continue }
-        x, okx := strconv.parse_f32(f[0])
-        y, oky := strconv.parse_f32(f[1])
-        z, okz := strconv.parse_f32(f[2])
-        yaw, oka := strconv.parse_f32(f[3])
-        name := text_set(f[4], NAME_MAX)
-        if !(okx && oky && okz && oka) || name.len == 0 { continue }
-        srv.places[strings.clone(string(name.text[:name.len]))] = {pos = {x, y, z}, yaw = yaw}
-    }
-}
-
-@(private="file")
-places_save :: proc(srv: ^Server) {
-    if !srv.world.save_enabled || len(srv.places) == 0 { return }
-    b := strings.builder_make(context.temp_allocator)
-    for name, p in srv.places { fmt.sbprintf(&b, "%.2f %.2f %.2f %.1f %s\n", p.pos.x, p.pos.y, p.pos.z, p.yaw, name) }
-    if err := os.write_entire_file(places_path(), transmute([]u8)strings.to_string(b)); err != nil {
-        fmt.eprintln("Save: failed to write", places_path(), err)
-    }
 }
 
 @(private="file")
@@ -225,12 +177,11 @@ server_wants :: proc(srv: ^Server, key: [2]int, radius: int) -> bool {
 
 // The local client's welcome: the columns that differ from the generated
 // world, before it streams in its own (a remote one gets them with its
-// Welcome); and, for a player called `name` who's been here (and `resume`),
-// where they were.
-server_greet_local :: proc(srv: ^Server, name := "", resume := false) {
-    if place, ok := srv.places[name]; ok && resume {
-        outbox_put(&srv.local_out, .Move_To, Msg_Move_To{pos = place.pos, yaw = place.yaw})
-    }
+// Welcome); and its character, the player called `name`: as they left it
+// (back where they were too if `resume`), or fresh.
+server_greet_local :: proc(srv: ^Server, name: string, resume: bool) {
+    rec, known := player_record_find(srv, name)
+    outbox_put(&srv.local_out, .Restore, Msg_Restore{known = known, move = known && resume, record = rec})
     server_send_edited(srv, &srv.local_out)
     outbox_move(&srv.local_out, &srv.link.to_client)
     fmt.printf("Server: %d edited columns in the world\n", len(srv.world.saved_columns))
