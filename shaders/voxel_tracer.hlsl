@@ -406,6 +406,24 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         return saturate(c * (1.0 + vj * 0.06));
     }
 
+    if (block_id == BLOCK_BIRCH_LOG) {
+        float3 c;
+        if (top) {
+            float2 d = float2(txl.xz) - 3.5;
+            float r = length(d);
+            float ring = frac(r * 0.55 + hash31i(vkey) * 0.3);
+            c = float3(0.72, 0.62, 0.44) * (0.88 + 0.12 * smoothstep(0.2, 0.6, ring));
+            if (r > 3.6) c = float3(0.80, 0.78, 0.72);
+        } else {
+            // Papery white bark with dark horizontal marks here and there.
+            float n = tex_noise(fuv, 3.0, 41.0);
+            c = float3(0.80, 0.79, 0.74) * (0.90 + 0.12 * n + (hd - 0.5) * 0.08);
+            float mark = hash31i(int3(tkey.x >> 1, tkey.y, tkey.z >> 1) + 91);
+            if (mark < 0.13) c = lerp(c, float3(0.13, 0.12, 0.11), detail);
+        }
+        return saturate(c * (1.0 + vj * 0.06));
+    }
+
     if (block_id == BLOCK_LOG || block_id == BLOCK_SPRUCE_LOG) {
         bool spruce = block_id == BLOCK_SPRUCE_LOG;
         float3 c;
@@ -435,6 +453,13 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         float cl = tex_noise(fuv, 1.8, spruce ? 21.0 : 23.0);
         float3 dark  = spruce ? float3(0.04, 0.13, 0.07) : float3(0.08, 0.24, 0.06);
         float3 light = spruce ? float3(0.09, 0.24, 0.12) : float3(0.17, 0.38, 0.09);
+        if (block_id == BLOCK_BIRCH_LEAVES) { dark = float3(0.13, 0.28, 0.06); light = float3(0.29, 0.47, 0.11); }
+        if (block_id == BLOCK_AUTUMN_LEAVES) {
+            // Each voxel leans orange, red or gold.
+            float k = hash31i(vkey + 7);
+            float3 hue = k < 0.45 ? float3(0.62, 0.22, 0.04) : k < 0.8 ? float3(0.56, 0.09, 0.04) : float3(0.62, 0.40, 0.05);
+            dark = hue * 0.45; light = hue;
+        }
         float3 c = lerp(dark, light, saturate(cl * 1.3 - 0.15 + (hd - 0.5) * 0.5));
         if (h < 0.06) c *= lerp(1.0, 0.6, detail);
         return saturate(c * (1.0 + vj * 0.20));
@@ -1017,6 +1042,9 @@ float3 far_block_color(uint id, int2 cell, float3 n, float y) {
     // makes it ~0.6x its leaf texture.
     if (id == BLOCK_LEAVES)        return float3(0.087, 0.178, 0.050);
     if (id == BLOCK_SPRUCE_LEAVES) return float3(0.043, 0.122, 0.063);
+    if (id == BLOCK_BIRCH_LEAVES)  return float3(0.132, 0.233, 0.054);
+    if (id == BLOCK_AUTUMN_LEAVES) return float3(0.300, 0.115, 0.030);
+    if (id == BLOCK_BIRCH_LOG)     return float3(0.62, 0.60, 0.55);
     if (id == BLOCK_LOG)           return float3(0.30, 0.20, 0.10);
     if (id == BLOCK_SPRUCE_LOG)    return float3(0.20, 0.13, 0.07);
     if (id == BLOCK_DIRT)          return dirt;

@@ -78,10 +78,13 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_SEAGRASS      25u
 #define BLOCK_CORAL         26u // solid reef block
 #define BLOCK_SEA_PICKLE    27u // glowing water plant
+#define BLOCK_BIRCH_LOG     28u
+#define BLOCK_BIRCH_LEAVES  29u
+#define BLOCK_AUTUMN_LEAVES 30u
 
 #define SEA_LEVEL_Y 24.0 // top of the sea (terrain.odin SEA_LEVEL)
 
-bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES; }
+bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES || id == BLOCK_BIRCH_LEAVES || id == BLOCK_AUTUMN_LEAVES; }
 bool block_is_water_plant(uint id) { return id == BLOCK_KELP || id == BLOCK_SEAGRASS || id == BLOCK_SEA_PICKLE; }
 // Water, or a plant standing in it (the camera is "in water" in either).
 bool block_is_watery(uint id) { return id == BLOCK_WATER || block_is_water_plant(id); }

@@ -69,29 +69,30 @@ bool far_trace_tile(float3 o, float3 d, int slot, int2 tile, float t_in, float t
     [loop] for (int k = 0; k < 2 * FAR_TILE_CELLS; k++) {
         float t_exit = min(min(tmax.x, tmax.y), t_out);
         int2 l = c - base;
-        // Cell: ground top (9 bits) | block (5) | canopy bottom (9) |
-        // canopy height (6, 0 = none) | canopy is spruce (1).
+        // Cell: ground top (10 bits) | block (5) | canopy bottom above the
+        // ground (6) | canopy height (6, 0 = none) | canopy kind (2).
         uint cell = far_data[FAR_CELLS_BASE + slot * FAR_TILE_CELLS * FAR_TILE_CELLS + l.x + l.y * FAR_TILE_CELLS];
         float y0     = float(WORLD_CHUNK_Y_MIN * BRICK_CHUNK_SIZE);
-        float ground = float(cell & 0x1FFu) + y0;
-        uint  clo    = (cell >> 14) & 0x1FFu;
-        uint  chi    = (cell >> 23) & 0x3Fu; // canopy height
+        float ground = float(cell & 0x3FFu) + y0;
+        uint  clo    = (cell >> 15) & 0x3Fu; // canopy bottom, above the ground
+        uint  chi    = (cell >> 21) & 0x3Fu; // canopy height
         float ya = o.y + d.y * t_enter;
         float yb = o.y + d.y * t_exit;
         float3 side_n = axis == 0 ? float3(-(float)st.x, 0, 0) : float3(0, 0, -(float)st.y);
         float3 ng, nc;
         float tg = far_span_hit(o, d, t_enter, t_exit, ya, yb, -1e30, ground, side_n, ng);
         float tc = chi != 0u
-            ? far_span_hit(o, d, t_enter, t_exit, ya, yb, float(clo) + y0, float(clo + chi) + y0, side_n, nc)
+            ? far_span_hit(o, d, t_enter, t_exit, ya, yb, float(clo) + ground, float(clo + chi) + ground, side_n, nc)
             : 1e30;
         if (min(tg, tc) < 1e29) {
             h.hit  = true;
             h.cell = c;
             if (tc < tg) {
                 h.t = tc; h.normal = nc;
-                h.block_id = ((cell >> 29) & 1u) != 0u ? BLOCK_SPRUCE_LEAVES : BLOCK_LEAVES;
+                uint kind = (cell >> 27) & 3u;
+                h.block_id = kind == 1u ? BLOCK_SPRUCE_LEAVES : kind == 2u ? BLOCK_BIRCH_LEAVES : kind == 3u ? BLOCK_AUTUMN_LEAVES : BLOCK_LEAVES;
             } else {
-                h.t = tg; h.normal = ng; h.block_id = (cell >> 9) & 31u;
+                h.t = tg; h.normal = ng; h.block_id = (cell >> 10) & 31u;
                 h.under_canopy = chi != 0u;
             }
             h.hit_pos = o + d * h.t;
