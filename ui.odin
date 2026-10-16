@@ -1631,7 +1631,7 @@ menu_multiplayer :: proc(gs: ^Game_State) {
             text(fmt.tprintf("Not connected to %s.", address), COLOR_BAD, 15)
         }
         if button(clay.ID("Leave"), "Leave: back to your own world") { session_leave(gs) }
-        text("Building and slimes don't reach other players yet.", COLOR_TEXT_FAINT, 12)
+        text("Slimes and enemies don't reach other players yet.", COLOR_TEXT_FAINT, 12)
         return
     }
 
