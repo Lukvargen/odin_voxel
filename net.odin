@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), size_of(Msg_Rules), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), size_of(Msg_Rules), size_of(Net_Player), size_of(Net_Slime), size_of(Net_Enemy), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -173,10 +173,10 @@ Msg_Welcome :: struct {
     yaw:  f32,
 }
 
-Msg_Player_View :: struct {
+Msg_Player_View :: struct #packed {
     slot:   u8,
     ping:   u16, // ms, its connection's round trip (0: the server's own player)
-    player: Player,
+    player: Net_Player,
 }
 
 Msg_Clock :: struct {
@@ -200,8 +200,9 @@ MONSTER_VIEW_RANGE :: ENTITY_CULL_RADIUS
 #assert(MAX_SLIMES <= 64 && MAX_ENEMIES <= 32)
 
 Msg_Monsters :: struct {
-    slimes:  u64, // bit i: slime slot i is taken
+    slimes:  u64,    // bit i: slime slot i is taken
     enemies: u32,
+    origin:  [3]i32, // the block the views after it are placed from (Net_Slime.pos)
 }
 
 Msg_Slime_View :: struct {

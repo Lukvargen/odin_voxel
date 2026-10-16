@@ -286,7 +286,8 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
     for kind in msg_next(&r) {
         switch kind {
         case .Player_State:
-            p := msg_get(&r, Player) or_break
+            n := msg_get(&r, Net_Player) or_break
+            p := player_unpack(n)
             p.active = true
             sim.players[player] = p
         case .Hit:
@@ -463,7 +464,7 @@ server_send_monsters :: proc(srv: ^Server, o: ^Outbox, eye: [3]f32) {
         d := p - eye
         return d.x * d.x + d.y * d.y + d.z * d.z < MONSTER_VIEW_RANGE * MONSTER_VIEW_RANGE
     }
-    m: Msg_Monsters
+    m := Msg_Monsters{origin = {i32(math.floor(eye.x)), i32(math.floor(eye.y)), i32(math.floor(eye.z))}}
     for &sl, i in sim.slimes.list {
         if !sl.alive || !near(sl.pos, eye) { continue }
         m.slimes |= 1 << u64(i)
@@ -475,20 +476,11 @@ server_send_monsters :: proc(srv: ^Server, o: ^Outbox, eye: [3]f32) {
     outbox_put(o, .Monsters, m)
     for &sl, i in sim.slimes.list {
         if m.slimes & (1 << u64(i)) == 0 { continue }
-        outbox_put(o, .Slime_View, Msg_Slime_View{
-            index = u8(i), size = sl.size, state = sl.state, on_ground = sl.on_ground, uid = sl.uid,
-            pos = sl.pos, vel = sl.vel, color = sl.color,
-            yaw = sl.yaw, squash = sl.squash, flash = sl.flash, freeze = sl.freeze, bar = sl.bar, hp = sl.hp, age = sl.age,
-        })
+        outbox_put(o, .Slime_View, slime_pack(i, &sl, m.origin))
     }
     for &e, i in sim.enemies.list {
         if m.enemies & (1 << u32(i)) == 0 { continue }
-        outbox_put(o, .Enemy_View, Msg_Enemy_View{
-            index = u8(i), kind = e.kind, state = e.state, swing = e.swing, on_ground = e.on_ground, uid = e.uid,
-            pos = e.pos, vel = e.vel, tint = e.tint,
-            yaw = e.yaw, timer = e.timer, flash = e.flash, freeze = e.freeze, bar = e.bar, hp = e.hp,
-            death = e.death, rising = e.rising, walk_phase = e.walk_phase, speed = e.speed, age = e.age,
-        })
+        outbox_put(o, .Enemy_View, enemy_pack(i, &e, m.origin))
     }
 }
 
@@ -519,7 +511,7 @@ server_flush :: proc(srv: ^Server, dt: f32) {
         server_broadcast(srv, .Clock, Msg_Clock{hour = sim.day.hour, paused = sim.day.paused, time = time.duration_seconds(time.tick_since(srv.started))})
         for &p, slot in sim.players {
             if !p.active { continue }
-            view := Msg_Player_View{slot = u8(slot), player = p}
+            view := Msg_Player_View{slot = u8(slot), player = player_pack(p)}
             if peer := srv.remotes[slot].peer; peer != nil { view.ping = u16(min(peer.roundTripTime, 65535)) }
             if slot != srv.local_player { outbox_put(&srv.local_out, .Player_View, view) }
             for &rem, rs in srv.remotes {

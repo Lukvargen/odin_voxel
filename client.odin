@@ -48,7 +48,8 @@ Client_Net :: struct {
     // gs.enemies as replicas, easing toward where they were last seen.
     slime_seen: [MAX_SLIMES]Replica(Msg_Slime_View),
     enemy_seen: [MAX_ENEMIES]Replica(Msg_Enemy_View),
-    clock:      Replica_Clock, // the server's time, to draw what it moves a little in the past (replica.odin)
+    clock:      Replica_Clock,
+    monster_origin: [3]i32, // the monster views' positions are from here (Msg_Monsters) // the server's time, to draw what it moves a little in the past (replica.odin)
     // Names and chat.
     sent_name:  Msg_Text,                 // as last told the server (resent when it changes)
     // What we carry (Player_Kept), as last told the server: only once it
@@ -229,13 +230,13 @@ client_send_input :: proc(gs: ^Game_State) {
     cam := &gs.camera
     c := &gs.combat
     g := &gs.glider
-    client_send(gs, .Player_State, Player{
+    client_send(gs, .Player_State, player_pack(Player{
         active = true, pos = cam.pos, velocity = cam.velocity, yaw = cam.yaw, pitch = cam.pitch,
         on_ground = cam.on_ground, fly_mode = cam.fly_mode, sneaking = cam.sneaking, sprinting = cam.sprinting,
         sword = c.sword, sword_pose = c.pose, swing_id = c.attack_id, invuln = c.invuln, blocking = c.blocking, block_time = c.block_time,
         gliding = g.deployed, glide_heading = g.heading, glide_pitch = g.path_angle + g.aoa,
         glide_bank = g.bank, glide_unfold = g.deploy_t,
-    })
+    }))
     client_send(gs, .Set_Monsters, gs.entities_enabled)
 
     n := &gs.net
@@ -273,8 +274,9 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             v := msg_get(&r, Msg_Player_View) or_break
             if int(v.slot) >= MAX_PLAYERS || int(v.slot) == gs.net.slot { break }
             o := &gs.net.others[v.slot]
-            if !o.active { o^ = {active = true, latest = v.player, pos = v.player.pos, anim = {body_yaw = -math.to_radians(v.player.yaw)}, pose = v.player.sword_pose} }
-            replica_push(&o.views, v.player, gs.net.clock.stamp)
+            p := player_unpack(v.player)
+            if !o.active { o^ = {active = true, latest = p, pos = p.pos, anim = {body_yaw = -math.to_radians(p.yaw)}, pose = p.sword_pose} }
+            replica_push(&o.views, p, gs.net.clock.stamp)
             o.ping = int(v.ping)
         case .Player_Gone:
             slot := msg_get(&r, u8) or_break
@@ -339,14 +341,15 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
         case .Monsters:
             m := msg_get(&r, Msg_Monsters) or_break
             if !client_joined(gs) { break }
+            gs.net.monster_origin = m.origin
             for &sl, i in gs.slimes.list { if m.slimes & (1 << u64(i)) == 0 { sl.alive = false } }
             for &e, i in gs.enemies.list { if m.enemies & (1 << u32(i)) == 0 { e.alive = false } }
         case .Slime_View:
-            v := msg_get(&r, Msg_Slime_View) or_break
-            if client_joined(gs) && int(v.index) < MAX_SLIMES { client_slime_view(gs, v) }
+            v := msg_get(&r, Net_Slime) or_break
+            if client_joined(gs) && int(v.index) < MAX_SLIMES { client_slime_view(gs, slime_unpack(v, gs.net.monster_origin)) }
         case .Enemy_View:
-            v := msg_get(&r, Msg_Enemy_View) or_break
-            if client_joined(gs) && int(v.index) < MAX_ENEMIES { client_enemy_view(gs, v) }
+            v := msg_get(&r, Net_Enemy) or_break
+            if client_joined(gs) && int(v.index) < MAX_ENEMIES { client_enemy_view(gs, enemy_unpack(v, gs.net.monster_origin)) }
         case .Edited:
             m := msg_get(&r, Msg_Edited) or_break
             for k in m.keys[:min(int(m.count), len(m.keys))] {
