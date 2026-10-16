@@ -62,6 +62,7 @@ Other_Player :: struct {
     age:    f32,     // seconds since
     pos:    [3]f32,  // drawn here (eye), easing after latest
     anim:   Player_Anim,
+    pose:   Sword_Pose, // drawn so, easing after latest.sword_pose
 }
 
 OTHER_TIMEOUT :: 3 // seconds without word before another player is no longer drawn
@@ -131,7 +132,7 @@ client_send_input :: proc(gs: ^Game_State) {
     client_send(gs, .Player_State, Player{
         active = true, pos = cam.pos, velocity = cam.velocity, yaw = cam.yaw, pitch = cam.pitch,
         on_ground = cam.on_ground, fly_mode = cam.fly_mode, sneaking = cam.sneaking, sprinting = cam.sprinting,
-        sword = c.sword, invuln = c.invuln, blocking = c.blocking, block_time = c.block_time,
+        sword = c.sword, sword_pose = c.pose, invuln = c.invuln, blocking = c.blocking, block_time = c.block_time,
         gliding = g.deployed, glide_heading = g.heading, glide_pitch = g.path_angle + g.aoa,
         glide_bank = g.bank, glide_unfold = g.deploy_t,
     })
@@ -163,7 +164,7 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             v := msg_get(&r, Msg_Player_View) or_break
             if int(v.slot) >= MAX_PLAYERS || int(v.slot) == gs.net.slot { break }
             o := &gs.net.others[v.slot]
-            if !o.active { o^ = {active = true, pos = v.player.pos, anim = {body_yaw = -math.to_radians(v.player.yaw)}} }
+            if !o.active { o^ = {active = true, pos = v.player.pos, anim = {body_yaw = -math.to_radians(v.player.yaw)}, pose = v.player.sword_pose} }
             o.latest, o.age = v.player, 0
         case .Player_Gone:
             slot := msg_get(&r, u8) or_break
@@ -452,6 +453,11 @@ others_update :: proc(gs: ^Game_State, dt: f32) {
             o.pos += d * min(dt * 12, 1)
         }
         anim_step(&o.anim, p.velocity, p.yaw, p.sword, p.on_ground || p.fly_mode, dt)
+        // The sword swings smoothly between views (a swing is a few of them).
+        k := min(dt * 30, 1)
+        o.pose.grip += (p.sword_pose.grip - o.pose.grip) * k
+        o.pose.blade += (p.sword_pose.blade - o.pose.blade) * k
+        o.pose.back += (p.sword_pose.back - o.pose.back) * k
     }
 }
 
@@ -469,7 +475,16 @@ others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
             glider_wing_parts(f, o.pos, p.glide_heading, p.glide_pitch, p.glide_bank, p.glide_unfold, player_tint(slot), pilot = true)
         } else {
             feet := o.pos - {0, PLAYER_EYE_HEIGHT, 0}
-            humanoid_add_parts(f, feet, &o.anim, p.yaw, p.pitch, player_tint(slot), right_arm = true)
+            tint := player_tint(slot)
+            hips := humanoid_add_parts(f, feet, &o.anim, p.yaw, p.pitch, tint, right_arm = !p.sword)
+            if p.sword {
+                // As the player's own sword arm (creatures.odin), from its view.
+                fwd, right, up := camera_basis(Camera{yaw = p.yaw, pitch = p.pitch})
+                eye := feet + [3]f32{0, 1.5, 0} + fwd * 0.15
+                shoulder := feet + basis_yaw(o.anim.body_yaw) * (hips + [3]f32{-0.27, 0.52, 0})
+                grip, blade, edge, flat := sword_place(o.pose, eye, fwd, right, up, shoulder)
+                sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, tint = tint)
+            }
         }
         ent_end(f)
     }

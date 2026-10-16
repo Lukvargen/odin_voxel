@@ -736,7 +736,13 @@ sword_pose :: proc(gs: ^Game_State, run: f32) -> Sword_Pose {
 // it with the wrist toward the shoulder, so edge (the knuckles' way) points
 // away from the shoulder and flat is the back of the hand.
 sword_world :: proc(gs: ^Game_State, eye, fwd, right, up, shoulder: [3]f32) -> (grip, blade, edge, flat: [3]f32) {
-    p := gs.combat.pose
+    return sword_place(gs.combat.pose, eye, fwd, right, up, shoulder)
+}
+
+// A sword pose (view space) in the world, for a viewpoint at `eye` looking
+// along fwd, with the sword arm's shoulder there: the grip, the blade's
+// direction, and the hand's edge and flat axes.
+sword_place :: proc(p: Sword_Pose, eye, fwd, right, up, shoulder: [3]f32) -> (grip, blade, edge, flat: [3]f32) {
     to_world :: proc(v, fwd, right, up: [3]f32) -> [3]f32 { return right * v.x + up * v.y + fwd * v.z }
     grip = eye + to_world(p.grip, fwd, right, up)
     blade = la.normalize0(to_world(p.blade, fwd, right, up))
@@ -778,12 +784,12 @@ two_bone_ik :: proc(shoulder, target, pole: [3]f32, upper, lower: f32) -> (elbow
 // The sword in a fist at the end of an arm from `shoulder`: upper arm and
 // forearm meeting at an elbow bent toward `pole`. Out of reach, hand and
 // sword come back to where the straight arm ends.
-sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: [3]f32, scale: f32 = 1) {
+sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: [3]f32, scale: f32 = 1, tint := PLAYER_TINT) {
     wrist := grip - edge * 0.075 * scale - blade * 0.012 * scale
     elbow, w := two_bone_ik(shoulder, wrist, pole, UPPER_ARM_LEN * scale, FOREARM_LEN * scale)
     g := grip + (w - wrist)
-    ent_segment(f, .Arm_Upper, shoulder, elbow, pole, PLAYER_TINT)
-    ent_segment(f, .Arm_Fore, elbow, w, pole, PLAYER_TINT)
+    ent_segment(f, .Arm_Upper, shoulder, elbow, pole, tint)
+    ent_segment(f, .Arm_Fore, elbow, w, pole, tint)
     rot := basis_from_axes(edge, flat, blade)
     ent_part(f, .Fist, g, rot, {scale, scale, scale})
     ent_part(f, .Sword, g, rot)

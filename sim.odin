@@ -28,6 +28,7 @@ Player :: struct {
     sneaking:   bool,
     sprinting:  bool,
     sword:      bool,   // drawn: slimes only come for an armed player
+    sword_pose: Sword_Pose, // where it is in the hand, view space (combat.odin), for the others to draw
     // Hang gliding (glider.odin): how the wing sits, for the others to draw.
     gliding:       bool,
     glide_heading: f32, // degrees

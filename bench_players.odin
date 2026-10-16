@@ -5,8 +5,8 @@ import "core:math"
 
 // `bench players [dir]`: other players as this client draws them (as if
 // heard from over the network), a few steps ahead on open plains: one
-// standing, one walking with its sword drawn, one gliding toward the
-// camera; each tinted by its slot. Writes players.bmp.
+// standing, one walking with its sword drawn, one mid-swing, one gliding
+// toward the camera; each tinted by its slot. Writes players.bmp.
 bench_players: bool
 
 bench_players_run :: proc(gs: ^Game_State) {
@@ -24,13 +24,22 @@ bench_players_run :: proc(gs: ^Game_State) {
     others := &gs.net.others
     others^ = {}
     put :: proc(o: ^Other_Player, p: Player) {
-        o^ = {active = true, latest = p, pos = p.pos, anim = {body_yaw = -math.to_radians(p.yaw)}}
+        o^ = {active = true, latest = p, pos = p.pos, anim = {body_yaw = -math.to_radians(p.yaw)}, pose = p.sword_pose}
     }
     // Standing, facing the camera.
     put(&others[1], {active = true, pos = eye_at(gs, x - 2, z + 6), yaw = 180, on_ground = true})
-    // Walking across, sword drawn, mid-stride.
-    put(&others[2], {active = true, pos = eye_at(gs, x + 2, z + 7), yaw = 270, velocity = {-4, 0, 0}, on_ground = true, sword = true})
+    // Walking across, sword drawn and carried, mid-stride.
+    put(&others[2], {active = true, pos = eye_at(gs, x + 2, z + 7), yaw = 270, velocity = {-4, 0, 0}, on_ground = true,
+        sword = true, sword_pose = gs.combat.pose}) // the carry pose, as combat_init leaves it
     others[2].anim.amp, others[2].anim.walk_phase = 0.9, 1.2
+    // Mid-swing (a finisher, posed by the combat code itself), facing the camera.
+    c := &gs.combat
+    saved := c^
+    c.sword, c.attack = true, .Finisher
+    c.attack_time = ATTACKS[.Finisher].windup + ATTACKS[.Finisher].strike * 0.5
+    swing := sword_pose(gs, 0)
+    c^ = saved
+    put(&others[4], {active = true, pos = eye_at(gs, x + 4, z + 5), yaw = 200, on_ground = true, sword = true, sword_pose = swing})
     // Gliding in toward the camera, banking.
     glide := cam.pos + {0, 4, 10}
     put(&others[3], {active = true, pos = glide, yaw = 180, velocity = {0, -1, -9},
