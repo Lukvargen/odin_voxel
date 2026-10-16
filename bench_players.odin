@@ -26,8 +26,9 @@ bench_players_run :: proc(gs: ^Game_State) {
     put :: proc(o: ^Other_Player, p: Player) {
         o^ = {active = true, latest = p, pos = p.pos, anim = {body_yaw = -math.to_radians(p.yaw)}, pose = p.sword_pose}
     }
-    // Standing, facing the camera.
+    // Standing, facing the camera, just struck (flashing red).
     put(&others[1], {active = true, pos = eye_at(gs, x - 2, z + 6), yaw = 180, on_ground = true})
+    others[1].hurt = 0.8
     // Walking across, sword drawn and carried, mid-stride.
     put(&others[2], {active = true, pos = eye_at(gs, x + 2, z + 7), yaw = 270, velocity = {-4, 0, 0}, on_ground = true,
         sword = true, sword_pose = gs.combat.pose}) // the carry pose, as combat_init leaves it

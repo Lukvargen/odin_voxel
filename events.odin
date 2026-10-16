@@ -60,7 +60,21 @@ sim_event_play :: proc(gs: ^Game_State, ev: Sim_Event) {
         splat(fx, c + {0, 0.2, 0}, {0.36, 0.27, 0.18}, {0, 1, 0}, 8, 0.4)
 
     case .Player_Hurt:
-        if int(ev.player) == gs.net.slot { combat_take_hurt(gs, ev.result, ev.amount, ev.vec) }
+        if int(ev.player) == gs.net.slot {
+            combat_take_hurt(gs, ev.result, ev.amount, ev.vec)
+        } else if int(ev.player) < MAX_PLAYERS && gs.net.others[ev.player].active {
+            // Another player struck: their body flashes, we hear it land.
+            o := &gs.net.others[ev.player]
+            chest := o.pos - {0, 0.5, 0}
+            switch ev.result {
+            case .Missed:
+            case .Hit:
+                o.hurt = 1
+                play_at(.Hurt, chest, 0.7, vary(0.06), 16)
+            case .Blocked, .Parried:
+                play_at(.Clang, chest, ev.result == .Parried ? 0.9 : 0.7, (ev.result == .Parried ? 1.25 : 1) * vary(0.05), 18)
+            }
+        }
     }
 }
 
