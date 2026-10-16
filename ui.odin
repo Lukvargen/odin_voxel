@@ -35,7 +35,7 @@ Menu_Tab  :: enum u8 { Graphics, Sound, Controls, Multiplayer }
 
 // A one-line text box's contents (text_field).
 Text_Field :: struct {
-    buf:    [64]u8,
+    buf:    [TEXT_MAX]u8,
     len:    int,
     submit: bool, // Enter was pressed in it
 }
@@ -52,7 +52,9 @@ UI_State :: struct {
     typing:         ^Text_Field, // the text box keys go to, nil if none
     field_hovered:  bool,        // a text box is under the pointer this frame
     join_field:     Text_Field,  // Multiplayer tab: address to join...
-    port_field:     Text_Field,  // ...and port to host on
+    port_field:     Text_Field,  // ...port to host on...
+    name_field:     Text_Field,  // ...and what you're called (client_name)
+    chat_field:     Text_Field,  // the chat line being typed (Enter)
     debug_open:     bool, // F3
     hud_hidden:     bool, // F1
     help_open:      bool, // H
@@ -260,6 +262,12 @@ ui_type_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) {
             }
         }
     }
+}
+
+// Enter while playing: type a chat line (chat_layout sends it).
+ui_open_chat :: proc(gs: ^Game_State) {
+    gs.ui.chat_field.len = 0
+    ui_type_into(gs, &gs.ui.chat_field)
 }
 
 // Esc: open the pause menu, or close whatever screen is open.
@@ -665,6 +673,8 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
         if playing { build_hud_layout(gs, w) }
     }
     if playing { combat_hud_layout(gs, w, h) }
+    name_tags_layout(gs, w, h)
+    chat_layout(gs, h)
 
     // Toast.
     if ui.toast_t > 0 {
@@ -676,6 +686,78 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     }
 
     if ui.help_open { help_card(gs, 1) }
+}
+
+// Other players' names over their heads, fading with distance.
+@(private="file")
+name_tags_layout :: proc(gs: ^Game_State, w, h: f32) {
+    cam := gs.camera
+    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
+    for &o, slot in gs.net.others {
+        if !o.active { continue }
+        over := o.pos + {0, o.latest.gliding ? 1.9 : 0.75, 0}
+        d := over - eye
+        dist := math.sqrt(d.x * d.x + d.y * d.y + d.z * d.z)
+        if dist > 64 { continue }
+        x, y, ok := glider_project(cam, d, w, h)
+        if !ok { continue }
+        a := clamp((64 - dist) / 16, 0, 1)
+        tint := player_tint(slot)
+        if clay.UI(clay.ID("NameTag", u32(slot)))({
+            layout = {padding = {7, 7, 3, 4}},
+            floating = {attachTo = .Root, offset = {x, y}, zIndex = 6, attachment = {.CenterBottom, .LeftTop}, pointerCaptureMode = .Passthrough},
+            backgroundColor = fade({17, 17, 27, 170}, a),
+            cornerRadius = clay.CornerRadiusAll(4),
+        }) {
+            text(client_player_name(gs, slot), fade({min(tint.r * 255 + 90, 255), min(tint.g * 255 + 90, 255), min(tint.b * 255 + 90, 255), 255}, a), 13, FONT_ID_TITLE)
+        }
+    }
+}
+
+// The chat: recent lines fading out at the bottom left, all of them and
+// the line being typed while chatting (Enter sends, Esc drops it).
+@(private="file")
+chat_layout :: proc(gs: ^Game_State, h: f32) {
+    ui := &gs.ui
+    typing := ui.typing == &ui.chat_field
+    if ui.chat_field.submit {
+        ui.chat_field.submit = false
+        line := text_set(string(ui.chat_field.buf[:ui.chat_field.len]))
+        if line.len > 0 { client_send(gs, .Say, line) }
+        ui_type_into(gs, nil)
+        typing = false
+    }
+    any := typing
+    for e in gs.net.chat { if e.len > 0 && e.t > 0 { any = true } }
+    if !any { return }
+    if clay.UI(clay.ID("Chat"))({
+        layout = {layoutDirection = .TopToBottom, childGap = 3, sizing = {clay.SizingFixed(420), clay.SizingFit()}},
+        floating = anchored(.LeftBottom, {14, -150}),
+    }) {
+        for &e, i in gs.net.chat {
+            if e.len == 0 || (!typing && e.t <= 0) { continue }
+            a := typing ? 1 : clamp(e.t / 1.5, 0, 1)
+            col := e.slot == SERVER_SLOT ? COLOR_ACCENT : COLOR_TEXT
+            if clay.UI(clay.ID("ChatLine", u32(i)))({
+                layout = {padding = {8, 8, 3, 4}},
+                backgroundColor = fade({17, 17, 27, 150}, a),
+                cornerRadius = clay.CornerRadiusAll(4),
+            }) {
+                text(string(e.text[:e.len]), fade(col, a), 14)
+            }
+        }
+        if typing {
+            f := &ui.chat_field
+            caret := (SDL.GetTicks() / 500) % 2 == 0
+            if clay.UI(clay.ID("ChatInput"))({
+                layout = {padding = {8, 8, 5, 6}, sizing = {clay.SizingGrow(), clay.SizingFit()}},
+                custom = deco(.Button_On, radius = 6),
+            }) {
+                s := string(f.buf[:f.len])
+                text(fmt.tprintf("> %s%s", s, caret ? "|" : ""), COLOR_TEXT, 14)
+            }
+        }
+    }
 }
 
 // A ribbon along the top: the winds and ticks between, turning with you.
@@ -1618,6 +1700,11 @@ menu_sound :: proc(gs: ^Game_State) {
 menu_multiplayer :: proc(gs: ^Game_State) {
     ui := &gs.ui
     n := &gs.net
+    if clay.UI()(setting_row()) {
+        row_label("Your name")
+        text_field(gs, clay.ID("Name"), &ui.name_field, "Player")
+    }
+    divider()
     if client_joined(gs) {
         address := string(n.address[:n.address_len])
         if n.welcomed {
@@ -1715,7 +1802,7 @@ menu_controls :: proc(gs: ^Game_State) {
     tools    := Group{"Area and shape", {"Area: hold L / R", "drag a box, let go", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "area height; shape size", "Shift+wheel", "shape height", "Alt+wheel", "turn the shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V", "cycle back"}}
     fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll", "F (hold)", "guard; parry just in time"}}
     gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
-    other    := Group{"Other", {"F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)"}}
+    other    := Group{"Other", {"Enter", "chat", "F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)"}}
     cols := controls_columns(gs) == 3 ? [][]Group{{moving, building}, {tools, gliding}, {fighting, other}} : [][]Group{{moving, building, fighting}, {tools, gliding, other}}
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 22}}) {
         for col in cols {

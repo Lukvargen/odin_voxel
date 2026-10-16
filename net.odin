@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -45,6 +45,8 @@ Msg_Kind :: enum u8 {
     Set_Monsters, // bool: slimes and enemies on or off (options)
     Spawn,        // Msg_Spawn: debug F6 / F8
     Clear,        // no body: every slime and enemy gone (debug F7)
+    Set_Name,     // Msg_Text: what this client's player is called
+    Say,          // Msg_Text: a chat line
     Column_Request, // [2]i32: an edited column (Edited), please
     // both ways: blocks a player changed (client → server → the others)
     Voxels,       // Msg_Voxels
@@ -61,6 +63,47 @@ Msg_Kind :: enum u8 {
     Enemy_View,   // Msg_Enemy_View
     Edited,       // Msg_Edited: columns that differ from the generated world (ask for them)
     Column_Data,  // Msg_Column_Data, then `size` bytes: the column, run-length (column_encode)
+    Player_Name,  // Msg_Player_Name: what a player is called
+    Chat_Line,    // Msg_Chat_Line: a chat line, or the server's news (someone joined, left)
+}
+
+TEXT_MAX    :: 96   // bytes of a chat line
+NAME_MAX    :: 20   // bytes of a name
+SERVER_SLOT :: 0xff // Chat_Line from the server itself
+
+// A short piece of text: printable ASCII only (text_set), so it draws.
+Msg_Text :: struct {
+    len:  u8,
+    text: [TEXT_MAX]u8,
+}
+
+Msg_Player_Name :: struct {
+    slot: u8,
+    name: Msg_Text,
+}
+
+Msg_Chat_Line :: struct {
+    slot: u8, // who said it, or SERVER_SLOT
+    line: Msg_Text,
+}
+
+// s as a Msg_Text, at most max bytes, unprintable bytes dropped and the
+// ends trimmed.
+text_set :: proc(s: string, max := TEXT_MAX) -> (t: Msg_Text) {
+    for c in transmute([]u8)s {
+        if c < 0x20 || c > 0x7e || int(t.len) >= min(max, TEXT_MAX) { continue }
+        if c == ' ' && t.len == 0 { continue }
+        t.text[t.len] = c
+        t.len += 1
+    }
+    for t.len > 0 && t.text[t.len - 1] == ' ' { t.len -= 1 }
+    return
+}
+
+// A received Msg_Text, checked: its length in bounds, printable only.
+text_of :: proc(t: ^Msg_Text) -> string {
+    t^ = text_set(string(t.text[:min(int(t.len), TEXT_MAX)]))
+    return string(t.text[:t.len])
 }
 
 VOXEL_BATCH :: 32 // single voxels per Voxels message; a chunk with more goes whole

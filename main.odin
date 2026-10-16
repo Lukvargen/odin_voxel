@@ -136,6 +136,13 @@ main :: proc() {
     gs: Game_State
     // (the server points the simulation at its own world: server_init)
     net_host, net_port, join_to := false, NET_PORT, ""
+    {
+        // Called by your user name, until you say otherwise (name=, or the
+        // Multiplayer tab).
+        user := text_set(os.get_env("USERNAME", context.temp_allocator), NAME_MAX)
+        if user.len == 0 { user = text_set("Player") }
+        gs.ui.name_field.len = copy(gs.ui.name_field.buf[:], user.text[:user.len])
+    }
     start_yaw: f32
     server_init(&gs.server, &gs.sim, &gs.loop)
     bench := len(os.args) > 1 && os.args[1] == "bench"
@@ -202,6 +209,7 @@ main :: proc() {
         // [host] [port=<n>]: let players elsewhere join (UDP port, default NET_PORT).
         // [join=<address>[:<port>]]: play on someone's server instead.
         // [at=<x>,<z>] [yaw=<degrees>]: start there, facing that way. [hour=<h>]: at that time.
+        // [name=<name>]: what other players see you called (else your user name).
         for a in os.args[1:] {
             switch {
             case strings.has_prefix(a, "at="):
@@ -216,6 +224,9 @@ main :: proc() {
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
                 day_set_hour(&gs, clamp(h, 0, 23.99), settle = true)
+            case strings.has_prefix(a, "name="):
+                t := text_set(a[5:], NAME_MAX)
+                gs.ui.name_field.len = copy(gs.ui.name_field.buf[:], t.text[:t.len])
             case strings.has_prefix(a, "world="):
                 save_dir = strings.concatenate({"saves/", a[6:]})
             case a == "host":
@@ -389,6 +400,8 @@ main :: proc() {
                 }
                 if build_key(&gs, key, mods) || !plain { break }
                 switch key {
+                case SDL.K_RETURN, SDL.K_KP_ENTER:
+                    ui_open_chat(&gs)
                 case SDL.K_F1:
                     gs.ui.hud_hidden = !gs.ui.hud_hidden
                 case SDL.K_F2:
@@ -472,7 +485,7 @@ main :: proc() {
         sprint := ctrl_held || gs.sprint_latched
         sneak  := bool(kb[SDL.Scancode.LSHIFT]) && !gs.combat.sword // drawn, Shift dodges
         ultra  := bool(kb[SDL.Scancode.LALT])
-        if !gs.mouse_locked { move_fwd, move_back, move_left, move_right, sneak = false, false, false, false, false }
+        if !gs.mouse_locked || gs.ui.typing != nil { move_fwd, move_back, move_left, move_right, sneak = false, false, false, false, false }
 
         // In fly mode, Space held moves up
         if gs.camera.fly_mode && kb[SDL.Scancode.SPACE] && gs.mouse_locked {

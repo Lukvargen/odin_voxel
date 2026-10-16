@@ -44,6 +44,20 @@ Client_Net :: struct {
     // gs.enemies as replicas, easing toward where they were last seen.
     slime_seen: [MAX_SLIMES]Replica,
     enemy_seen: [MAX_ENEMIES]Replica,
+    // Names and chat.
+    sent_name:  Msg_Text,                 // as last told the server (resent when it changes)
+    names:      [MAX_PLAYERS]Msg_Text,    // what the players are called, as the server says
+    chat:       [CHAT_LINES]Chat_Entry,   // the latest lines, oldest first
+}
+
+CHAT_LINES   :: 8
+CHAT_SECONDS :: 12 // a chat line shows this long (all of them while typing)
+
+Chat_Entry :: struct {
+    text:   [TEXT_MAX + NAME_MAX + 2]u8,
+    len:    int,
+    slot:   int, // who said it, or SERVER_SLOT
+    t:      f32, // seconds left to show
 }
 
 // Where a replicated monster was last seen, how fast it was going, and how
@@ -103,6 +117,26 @@ client_leave :: proc(gs: ^Game_State) {
     n.host, n.peer = nil, nil
 }
 
+// What this player is called: the Multiplayer tab's name box.
+client_name :: proc(gs: ^Game_State) -> string {
+    f := &gs.ui.name_field
+    return string(f.buf[:f.len])
+}
+
+client_player_name :: proc(gs: ^Game_State, slot: int) -> string {
+    n := &gs.net.names[slot]
+    return n.len > 0 ? string(n.text[:n.len]) : fmt.tprintf("Player %d", slot)
+}
+
+// A line into the chat log, the oldest dropping off.
+chat_add :: proc(gs: ^Game_State, s: string, slot: int) {
+    log := &gs.net.chat
+    copy(log[:], log[1:])
+    e := &log[len(log) - 1]
+    e^ = {slot = slot, t = CHAT_SECONDS}
+    e.len = copy(e.text[:], s)
+}
+
 // What the startup loading waits on (generate_world): with our own server,
 // a round trip over the loopback, so the edited columns asked for arrive.
 client_pump :: proc(gs: ^Game_State) {
@@ -139,6 +173,14 @@ client_send_input :: proc(gs: ^Game_State) {
     client_send(gs, .Set_Monsters, gs.entities_enabled)
 
     n := &gs.net
+    // Our name, when it changes (and to every new server: sent_name is
+    // forgotten when we switch).
+    name := text_set(client_name(gs), NAME_MAX)
+    if name.len > 0 && name != n.sent_name && (!client_joined(gs) || n.welcomed) {
+        client_send(gs, .Set_Name, name)
+        n.sent_name = name
+    }
+
     if !client_joined(gs) {
         outbox_move(&n.out, &gs.loop.to_server)
     } else if n.welcomed && n.peer != nil {
@@ -168,9 +210,24 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             o.latest, o.age = v.player, 0
         case .Player_Gone:
             slot := msg_get(&r, u8) or_break
-            if int(slot) < MAX_PLAYERS && gs.net.others[slot].active {
+            if int(slot) < MAX_PLAYERS {
                 gs.net.others[slot].active = false
-                ui_toast(gs, fmt.tprintf("Player %d left", slot))
+                gs.net.names[slot] = {}
+            }
+        case .Player_Name:
+            m := msg_get(&r, Msg_Player_Name) or_break
+            if int(m.slot) < MAX_PLAYERS {
+                text_of(&m.name)
+                gs.net.names[m.slot] = m.name
+            }
+        case .Chat_Line:
+            m := msg_get(&r, Msg_Chat_Line) or_break
+            line := text_of(&m.line)
+            slot := int(m.slot)
+            if slot == SERVER_SLOT {
+                chat_add(gs, line, slot)
+            } else if slot < MAX_PLAYERS {
+                chat_add(gs, fmt.tprintf("%s: %s", client_player_name(gs, slot), line), slot)
             }
         case .Clock:
             c := msg_get(&r, Msg_Clock) or_break
@@ -233,6 +290,7 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
     clear(&gs.loop.to_client)
     others_update(gs, dt)
     if client_joined(gs) { replicas_update(gs, dt) }
+    for &e in gs.net.chat { e.t = max(e.t - dt, 0) }
     monsters_push_player(gs)
     client_hold_arrival(gs)
 }

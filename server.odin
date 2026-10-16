@@ -38,6 +38,7 @@ Server :: struct {
     view_timer:   f32,
     local_out:    Outbox,    // to the local client, moved to link.to_client at the flush
     away:         map[[2]int]^Column, // columns edited this step that aren't loaded: saved, then freed
+    names:        [MAX_PLAYERS]Msg_Text, // what each player is called (empty: not said yet)
 }
 
 // A player connected over ENet.
@@ -141,6 +142,9 @@ server_greet :: proc(srv: ^Server, peer: ^enet.Peer, data: []u8) {
         pos, yaw := arrival_point(srv)
         outbox_put(&rem.out, .Welcome, Msg_Welcome{slot = u8(slot), pos = pos, yaw = yaw})
         server_send_edited(srv, &rem.out)
+        for &name, s in srv.names {
+            if name.len > 0 { outbox_put(&rem.out, .Player_Name, Msg_Player_Name{slot = u8(s), name = name}) }
+        }
         fmt.printf("Host: player %d joined from %v\n", slot, peer.address)
         return
     }
@@ -175,6 +179,8 @@ server_drop :: proc(srv: ^Server, slot: int) {
     clear(&rem.out.unreliable)
     srv.sim.players[slot].active = false
     server_broadcast(srv, .Player_Gone, u8(slot))
+    server_notice(srv, fmt.tprintf("%s left", server_player_name(srv, slot)))
+    srv.names[slot] = {}
     fmt.printf("Host: player %d left\n", slot)
 }
 
@@ -182,6 +188,16 @@ server_drop :: proc(srv: ^Server, slot: int) {
 server_broadcast :: proc(srv: ^Server, kind: Msg_Kind, body: $T) {
     outbox_put(&srv.local_out, kind, body)
     for &rem in srv.remotes { if rem.peer != nil { outbox_put(&rem.out, kind, body) } }
+}
+
+// News for everyone's chat.
+server_notice :: proc(srv: ^Server, s: string) {
+    server_broadcast(srv, .Chat_Line, Msg_Chat_Line{slot = SERVER_SLOT, line = text_set(s)})
+}
+
+server_player_name :: proc(srv: ^Server, slot: int) -> string {
+    n := &srv.names[slot]
+    return n.len > 0 ? string(n.text[:n.len]) : fmt.tprintf("Player %d", slot)
 }
 
 // Messages for every client but player `from`'s.
@@ -251,7 +267,18 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
         case .Column_Request:
             key := msg_get(&r, [2]i32) or_break
             server_send_column(srv, server_outbox(srv, player), {int(key.x), int(key.y)})
-        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View:
+        case .Set_Name:
+            m := msg_get(&r, Msg_Text) or_break
+            name := text_set(text_of(&m), NAME_MAX)
+            if name.len == 0 { break }
+            first := srv.names[player].len == 0
+            srv.names[player] = name
+            server_broadcast(srv, .Player_Name, Msg_Player_Name{slot = u8(player), name = name})
+            if first && player != srv.local_player { server_notice(srv, fmt.tprintf("%s joined", server_player_name(srv, player))) }
+        case .Say:
+            m := msg_get(&r, Msg_Text) or_break
+            if len(text_of(&m)) > 0 { server_broadcast(srv, .Chat_Line, Msg_Chat_Line{slot = u8(player), line = m}) }
+        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line:
             r.at = len(r.data) // not a connected client's to send: drop the rest
         }
     }
