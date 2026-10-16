@@ -6,6 +6,7 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import win "core:sys/windows"
 
 // Player edits are kept by saving every edited column to its own file under
 // save_dir. Unedited columns are never saved: generation is deterministic, so
@@ -27,9 +28,15 @@ column_path :: proc(buf: []u8, key: [2]int) -> string {
     return fmt.bprintf(buf, "%s/c.%d.%d.bin", save_dir, key.x, key.y)
 }
 
+// Another game has this world open: this one plays it without saving, so
+// the two never write the same files (save_lock).
+world_in_use: bool
+
 // Note which columns have save files. Call before the first enqueue.
 save_init :: proc(gs: ^Game_State) {
-    gs.save_enabled = true
+    world_in_use = !save_lock()
+    gs.save_enabled = !world_in_use
+    if world_in_use { fmt.eprintln("Save: this world is open in another game; playing it without saving") }
     files, err := os.read_all_directory_by_path(save_dir, context.temp_allocator)
     if err != nil { return } // no saves yet
     for f in files {
@@ -125,6 +132,24 @@ autosave_tick :: proc(gs: ^Game_State) {
     if gs.save_enabled && time.tick_since(gs.last_autosave) >= AUTOSAVE_INTERVAL {
         save_all_modified(gs)
     }
+}
+
+// Hold the world's lock file for as long as this game runs (the system lets
+// go of it when the game ends, however it ends). False if another game
+// holds it.
+@(private="file")
+save_lock :: proc() -> bool {
+    @(static) held: bool
+    if held { return true }
+    when ODIN_OS == .Windows {
+        _ = os.make_directory_all(save_dir)
+        path := win.utf8_to_wstring(fmt.tprintf("%s/session.lock", save_dir))
+        h := win.CreateFileW(path, win.GENERIC_WRITE, 0, nil, win.OPEN_ALWAYS, win.FILE_ATTRIBUTE_NORMAL, nil)
+        if h == win.INVALID_HANDLE_VALUE { return false }
+        // Kept open on purpose: closing it is what frees the world.
+    }
+    held = true
+    return true
 }
 
 // Worker side: read a saved column, or nil if it is missing or corrupt (the

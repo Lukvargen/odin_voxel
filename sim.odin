@@ -28,6 +28,12 @@ Player :: struct {
     sneaking:   bool,
     sprinting:  bool,
     sword:      bool,   // drawn: slimes only come for an armed player
+    // Hang gliding (glider.odin): how the wing sits, for the others to draw.
+    gliding:       bool,
+    glide_heading: f32, // degrees
+    glide_pitch:   f32, // radians
+    glide_bank:    f32, // radians
+    glide_unfold:  f32, // 0..1
     ignored:    bool,   // monsters leave it be (server.odin: a remote player can't see them yet)
     // Defence, as its client last reported it (hurt_outcome).
     invuln:     f32,    // dodging or just hurt: blows miss

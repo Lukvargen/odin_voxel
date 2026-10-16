@@ -489,11 +489,18 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
 glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     g := &gs.glider
     if !g.deployed || !ent_begin(f) { return }
-    fwd, up := glider_axes(g.heading, g.path_angle + g.aoa, g.bank)
+    // The whole pilot in the chase view; from the eyes, just the arms.
+    glider_wing_parts(f, gs.camera.pos, g.heading, g.path_angle + g.aoa, g.bank, g.deploy_t, PLAYER_TINT, pilot = g.chase_dist > 1.5)
+    ent_end(f)
+}
+
+// A glider with its pilot at the eye p: heading (degrees), pitch and bank
+// (radians), unfolded 0..1. Inside an ent_begin / ent_end.
+glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy_t: f32, tint: [3]f32, pilot: bool) {
+    fwd, up := glider_axes(heading, pitch, bank)
     left := la.cross(up, fwd)
     rot := basis_from_axes(left, up, fwd)
-    p := gs.camera.pos
-    unfold := 0.12 + 0.88 * math.smoothstep(f32(0), 1, g.deploy_t)
+    unfold := 0.12 + 0.88 * math.smoothstep(f32(0), 1, deploy_t)
     ent_part(f, .Glider_Wing, p, rot, {unfold, 1, 1})
     // A-frame (two downtubes and the base bar) and the arms holding the bar.
     at := proc(p: [3]f32, rot: Basis, b: [3]f32) -> [3]f32 { return p + rot * b }
@@ -503,13 +510,12 @@ glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     ent_segment(f, .Rod, apex, bar_l, up)
     ent_segment(f, .Rod, apex, bar_r, up)
     ent_segment(f, .Rod, bar_l, bar_r, up)
-    if g.chase_dist > 1.5 {
-        pilot_add_parts(f, p, rot) // whole body in the chase view
+    if pilot {
+        pilot_add_parts(f, p, rot, tint)
     } else {
-        ent_segment(f, .Arm, at(p, rot, {0.2, -0.16, -0.05}), at(p, rot, {0.48, -0.42, 0.72}), up, PLAYER_TINT)
-        ent_segment(f, .Arm, at(p, rot, {-0.2, -0.16, -0.05}), at(p, rot, {-0.48, -0.42, 0.72}), up, PLAYER_TINT)
+        ent_segment(f, .Arm, at(p, rot, {0.2, -0.16, -0.05}), at(p, rot, {0.48, -0.42, 0.72}), up, tint)
+        ent_segment(f, .Arm, at(p, rot, {-0.2, -0.16, -0.05}), at(p, rot, {-0.48, -0.42, 0.72}), up, tint)
     }
-    ent_end(f)
 }
 
 // Screen position (pixels in a w x h window) of a world direction, or false

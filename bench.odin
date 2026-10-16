@@ -132,6 +132,10 @@ bench_run :: proc(gs: ^Game_State) {
         bench_landmarks_run(gs)
         return
     }
+    if bench_players {
+        bench_players_run(gs)
+        return
+    }
     if bench_water {
         bench_water_run(gs)
         return

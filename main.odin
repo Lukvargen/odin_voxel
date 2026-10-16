@@ -179,6 +179,7 @@ main :: proc() {
             case a == "look": bench_look = true
             case a == "ui": bench_ui = true
             case a == "landmarks": bench_landmarks = true
+            case a == "players": bench_players = true
             case a == "slimes": bench_slimes = true
             case a == "enemies": bench_enemies = true
             case a == "fight": bench_fight = true
@@ -275,6 +276,7 @@ main :: proc() {
 
     ui_init(&gs)
     defer ui_shutdown(&gs)
+    if world_in_use { ui_toast(&gs, "This world is open in another game: playing without saving", 6) }
     audio_init() // after the bench return: bench runs stay silent
     defer audio_shutdown()
 

@@ -102,10 +102,13 @@ client_send_empty :: proc(gs: ^Game_State, kind: Msg_Kind) {
 client_send_input :: proc(gs: ^Game_State) {
     cam := &gs.camera
     c := &gs.combat
+    g := &gs.glider
     client_send(gs, .Player_State, Player{
         active = true, pos = cam.pos, velocity = cam.velocity, yaw = cam.yaw, pitch = cam.pitch,
         on_ground = cam.on_ground, fly_mode = cam.fly_mode, sneaking = cam.sneaking, sprinting = cam.sprinting,
         sword = c.sword, invuln = c.invuln, blocking = c.blocking, block_time = c.block_time,
+        gliding = g.deployed, glide_heading = g.heading, glide_pitch = g.path_angle + g.aoa,
+        glide_bank = g.bank, glide_unfold = g.deploy_t,
     })
     client_send(gs, .Set_Monsters, gs.entities_enabled)
 
@@ -342,7 +345,8 @@ others_update :: proc(gs: ^Game_State, dt: f32) {
     }
 }
 
-// Each other player's body (creatures.odin), tinted by slot.
+// Each other player's body (creatures.odin), or glider and pilot
+// (glider.odin), tinted by slot.
 others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     eye := gs.camera.pos
     for &o, slot in gs.net.others {
@@ -350,8 +354,13 @@ others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         d := o.pos - eye
         if d.x * d.x + d.y * d.y + d.z * d.z > ENTITY_CULL_RADIUS * ENTITY_CULL_RADIUS { continue }
         if !ent_begin(f) { return }
-        feet := o.pos - {0, PLAYER_EYE_HEIGHT, 0}
-        humanoid_add_parts(f, feet, &o.anim, o.latest.yaw, o.latest.pitch, player_tint(slot), right_arm = true)
+        p := &o.latest
+        if p.gliding {
+            glider_wing_parts(f, o.pos, p.glide_heading, p.glide_pitch, p.glide_bank, p.glide_unfold, player_tint(slot), pilot = true)
+        } else {
+            feet := o.pos - {0, PLAYER_EYE_HEIGHT, 0}
+            humanoid_add_parts(f, feet, &o.anim, p.yaw, p.pitch, player_tint(slot), right_arm = true)
+        }
         ent_end(f)
     }
 }
