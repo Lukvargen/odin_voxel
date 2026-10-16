@@ -153,7 +153,7 @@ ui_init :: proc(gs: ^Game_State) {
 
     // Wrap the compute-output GPU texture as an SDL.Texture so the Renderer
     // can sample it as a fullscreen quad each frame. Lives in its own proc so
-    // gpu_set_render_scale can rebuild it when the render resolution changes.
+    // gpu_fit_render_size can rebuild it when the render resolution changes.
     ui_rewrap_out_texture(gs)
 
     clay.SetMaxElementCount(8192)
@@ -173,9 +173,9 @@ ui_init :: proc(gs: ^Game_State) {
 }
 
 // (Re)wrap the GPU out_texture as an SDL.Texture sized to the current render
-// resolution, with nearest-neighbor upscale (crisp pixel-art look — switch to
-// .LINEAR for a smoothed upscale). Destroys any previous wrap first, so this is
-// safe to call after gpu_set_render_scale recreates out_texture.
+// resolution, upscaled nearest-neighbor (crisp pixel-art look) or linearly
+// (gs.upscale_smooth). Destroys any previous wrap first, so this is safe to
+// call after gpu_fit_render_size recreates out_texture.
 ui_rewrap_out_texture :: proc(gs: ^Game_State) {
     ui := &gs.ui
     if ui.out_tex != nil {
@@ -192,7 +192,7 @@ ui_rewrap_out_texture :: proc(gs: ^Game_State) {
     if ui.out_tex == nil {
         fmt.eprintln("CreateTextureWithProperties(gpu_texture) failed:", SDL.GetError())
     } else {
-        SDL.SetTextureScaleMode(ui.out_tex, .NEAREST)
+        SDL.SetTextureScaleMode(ui.out_tex, gs.upscale_smooth ? .LINEAR : .NEAREST)
     }
 }
 
@@ -1142,7 +1142,7 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
     CLEAR_COL :: [3]u8{255, 110, 95}
     eye := gs.camera.pos + gs.camera.view_offset
     eye.y += gs.camera.step_visual_offset
-    fwd, right, up := camera_view_basis(gs.camera)
+    fwd, right, up := camera_view_basis(gs.camera, w / h)
     // Point -> pixels; the edge is clipped against a near plane first.
     project :: proc(p: [3]f32, fwd, right, up: [3]f32, w, h: f32) -> [2]f32 {
         d := la.dot(p, fwd)
@@ -1386,17 +1386,19 @@ debug_layout :: proc(gs: ^Game_State) {
         }
         heading("Debug (F3)")
         line("fps", fmt.tprintf("%.1f  (%.2f ms)", ui.fps, ui.frame_ms))
+        // Ray tracing alone, and its share of a 60 fps frame: the headroom.
+        line("gpu", gs.gpu_ms > 0 ? fmt.tprintf("%.2f ms  (%.0f%% of 60 fps)", gs.gpu_ms, gs.gpu_ms / (1000.0 / 60.0) * 100) : "...")
         p := gs.camera.pos
         line("pos", fmt.tprintf("%.1f  %.1f  %.1f", p.x, p.y, p.z))
         line("look", fmt.tprintf("yaw %.0f  pitch %.0f", gs.camera.yaw, gs.camera.pitch))
         line("chunk", fmt.tprintf("%d  %d  %d", gs.player_chunk.x, gs.player_chunk.y, gs.player_chunk.z))
-        if hit, _, ok := raycast_voxel(gs, p, camera_forward(gs.camera), REACH); ok {
+        if hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH); ok {
             b := Block_Type(u8(get_voxel(gs, hit.x, hit.y, hit.z)))
             line("target", fmt.tprintf("%s  %d %d %d", block_name(b), hit.x, hit.y, hit.z))
         }
         line("columns", fmt.tprintf("%d loaded, %d pending", len(gs.columns), worker_pool_pending_count(&gs.pool)))
         line("entities", fmt.tprintf("%d drawn", gs.entity_count))
-        line("render", fmt.tprintf("%dx%d  aa%d  %s", gs.render_w, gs.render_h, gs.aa_samples, gs.shadow_rays == 1 ? "hard" : "soft"))
+        line("render", fmt.tprintf("%dx%d (%.0f%%)  aa%d  %s", gs.render_w, gs.render_h, gs.render_scale * 100, gs.aa_samples, gs.shadow_rays == 1 ? "hard" : "soft"))
         line("cave", fmt.tprintf("%.2f", gs.cave_factor))
         alive := 0
         for sl in gs.slimes.list { if sl.alive { alive += 1 } }
@@ -1669,9 +1671,26 @@ menu_layout :: proc(gs: ^Game_State) {
 menu_graphics :: proc(gs: ^Game_State) {
     if clay.UI()(setting_row()) {
         row_label("Render scale")
-        if i := segmented("Rs", {"Full", "1/2", "1/4"}, gs.render_scale == 1 ? 0 : (gs.render_scale == 2 ? 1 : 2)); i >= 0 {
-            gpu_set_render_scale(gs, i32(1) << uint(i))
+        scales := [?]f32{1, 0.75, 0.5, 0.33, 0.25}
+        cur := 0
+        for s, i in scales { if abs(s - gs.render_scale) < 0.01 { cur = i } }
+        if i := segmented("Rs", {"100%", "75%", "50%", "33%", "25%"}, cur); i >= 0 {
+            gs.render_scale = scales[i] // applied next frame (gpu_fit_render_size)
         }
+    }
+    if clay.UI()(setting_row()) {
+        row_label("Upscaling")
+        if i := segmented("Up", {"Sharp", "Smooth"}, gs.upscale_smooth ? 1 : 0); i >= 0 {
+            gs.upscale_smooth = i == 1
+            if gs.ui.out_tex != nil { SDL.SetTextureScaleMode(gs.ui.out_tex, gs.upscale_smooth ? .LINEAR : .NEAREST) }
+        }
+    }
+    if clay.UI()(setting_row()) {
+        row_label("Field of view")
+        fovs := [?]f32{60, 70, 80, 90}
+        cur := 1
+        for f, i in fovs { if gs.camera.fov == f { cur = i } }
+        if i := segmented("Fov", {"60", "70", "80", "90"}, cur); i >= 0 { gs.camera.fov = fovs[i] }
     }
     if clay.UI()(setting_row()) {
         row_label("Anti-aliasing")

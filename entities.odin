@@ -275,11 +275,12 @@ entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
     t1 := time.tick_now()
     defer profile_add(.Ent_Upload, t1)
     // Fixed layout, mirrored by the ENT_*_OFS constants in entity_voxel.hlsl.
-    size := int(offset_of(Ent_Frame, n_ents))
+    // The screen tiles come last, and only the ones this frame's size uses.
+    size := int(offset_of(Ent_Frame, tiles)) + int(frame.hdr.tiles_x * frame.hdr.tiles_y) * size_of(Ent_Mask)
     #assert(offset_of(Ent_Frame, ents)  == 4 * 16)
     #assert(offset_of(Ent_Frame, parts) == (4 + MAX_ENTITIES * 2) * 16)
-    #assert(offset_of(Ent_Frame, tiles) == (4 + MAX_ENTITIES * 2 + MAX_ENT_PARTS * 6) * 16)
-    #assert(offset_of(Ent_Frame, sun)   == (4 + MAX_ENTITIES * 2 + MAX_ENT_PARTS * 6) * 16 + ENT_TILES_X * ENT_TILES_Y * 16)
+    #assert(offset_of(Ent_Frame, sun)   == (4 + MAX_ENTITIES * 2 + MAX_ENT_PARTS * 6) * 16)
+    #assert(offset_of(Ent_Frame, tiles) == (4 + MAX_ENTITIES * 2 + MAX_ENT_PARTS * 6) * 16 + ENT_SUN_GRID * ENT_SUN_GRID * 16)
     dst := SDL.MapGPUTransferBuffer(gs.gpu_device, gs.ent_transfer, true)
     mem.copy(dst, frame, size)
     SDL.UnmapGPUTransferBuffer(gs.gpu_device, gs.ent_transfer)

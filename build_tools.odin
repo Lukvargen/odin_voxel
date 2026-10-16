@@ -259,7 +259,7 @@ build_block_update :: proc(gs: ^Game_State) {
     placing  := gs.right_pressed || (gs.right_held && gs.edit_timer <= 0)
     if !breaking && !placing { return }
     gs.edit_timer = EDIT_REPEAT
-    hit, nrm, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH, plants = true)
+    hit, nrm, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH, plants = true)
     if !ok { return }
     target := hit
     block  := Block_Type.Air
@@ -296,7 +296,7 @@ build_area_update :: proc(gs: ^Game_State) {
     b := &gs.build
     if !b.dragging {
         if !gs.left_pressed && !gs.right_pressed { return }
-        hit, nrm, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH)
+        hit, nrm, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH)
         if !ok { return }
         b.dragging  = true
         b.drag_fill = gs.right_pressed
@@ -324,7 +324,7 @@ area_drag_corner :: proc(gs: ^Game_State) -> [3]int {
     n := [3]f32{f32(b.drag_n.x), f32(b.drag_n.y), f32(b.drag_n.z)}
     a := b.drag_a
     plane := [3]f32{f32(a.x), f32(a.y), f32(a.z)} + 0.5
-    eye, fwd := gs.camera.pos, camera_forward(gs.camera)
+    eye, fwd := camera_aim_eye(gs.camera), camera_forward(gs.camera)
     denom := la.dot(fwd, n)
     if abs(denom) < 1e-4 { return b.drag_b }
     t := la.dot(plane - eye, n) / denom
@@ -351,7 +351,7 @@ area_region :: proc(b: ^Build) -> Edit_Region {
 // carving, it's centered on the voxel.
 build_shape_target :: proc(gs: ^Game_State, place: bool) -> (Edit_Region, bool) {
     b := &gs.build
-    hit, nrm, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH)
+    hit, nrm, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH)
     if !ok { return {}, false }
     center := hit
     if place {
@@ -642,7 +642,7 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
     eye := gs.camera.pos
     switch b.tool {
     case .Block:
-        hit, _, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH, plants = true)
+        hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH, plants = true)
         if !ok { return }
         lo := [3]f32{f32(hit.x), f32(hit.y), f32(hit.z)}
         wire_box(&pv.segs, lo + 0.5, {0.502, 0.502, 0.502}, 1, 0)
@@ -656,7 +656,7 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
             r = area_region(b)
             pv.fill = b.drag_fill
         } else {
-            hit, _, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH)
+            hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH)
             if !ok { return }
             r = {lo = hit, hi = hit}
         }

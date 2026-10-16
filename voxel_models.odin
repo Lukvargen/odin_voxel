@@ -349,8 +349,8 @@ Part_Gpu :: struct #packed {
 // Most pixels are nowhere near an entity, so they pay one load, not a
 // traversal — that per-pixel cost was most of the entity GPU time.
 ENT_TILE        :: 16
-ENT_TILES_X     :: (TEX_W + ENT_TILE - 1) / ENT_TILE
-ENT_TILES_Y     :: (TEX_H + ENT_TILE - 1) / ENT_TILE
+ENT_TILES_X     :: (MAX_RENDER_W + ENT_TILE - 1) / ENT_TILE
+ENT_TILES_Y     :: (MAX_RENDER_H + ENT_TILE - 1) / ENT_TILE
 ENT_SUN_GRID    :: 64
 ENT_SUN_CELL    :: f32(4)
 
@@ -369,8 +369,8 @@ Ent_Frame :: struct {
     hdr:    Ent_Header,
     ents:   [MAX_ENTITIES]Ent_Gpu,
     parts:  [MAX_ENT_PARTS]Part_Gpu,
-    tiles:  [ENT_TILES_X * ENT_TILES_Y]Ent_Mask,
     sun:    [ENT_SUN_GRID * ENT_SUN_GRID]Ent_Mask,
+    tiles:  [ENT_TILES_X * ENT_TILES_Y]Ent_Mask, // last: only tiles_x * tiles_y are uploaded
     // CPU only below
     n_ents, n_parts: int,
     no_shadow: [MAX_ENTITIES]bool,
@@ -431,9 +431,9 @@ part_screen_rect :: proc(f: ^Ent_Frame, p: int, eye, fwd, right, up: [3]f32, w, 
 // Fill the screen-tile and sun-grid masks for this frame's camera.
 ent_build_masks :: proc(f: ^Ent_Frame, gs: ^Game_State) {
     cam := gs.camera
-    fwd, right, up := camera_view_basis(cam)
-    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
     w, h := f32(gs.render_w), f32(gs.render_h)
+    fwd, right, up := camera_view_basis(cam, w / h)
+    eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
     tx := (int(gs.render_w) + ENT_TILE - 1) / ENT_TILE
     ty := (int(gs.render_h) + ENT_TILE - 1) / ENT_TILE
     f.hdr.tiles_x, f.hdr.tiles_y = u32(tx), u32(ty)

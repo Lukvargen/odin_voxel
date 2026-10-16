@@ -20,8 +20,8 @@
 //  dynamic base:          header (Ent_Header): (tiles x, tiles y, -, -), (sun u axis, u0), (sun v axis, v0), -
 //  + ENT_ENTS_OFS:        MAX_ENTITIES x 2: (box min, first part), (box max, part count)
 //  + ENT_PARTS_OFS:       parts, 6 each: 3 rows world->grid, (box min, model), (box max, flags), (tint, -)
-//  + ENT_TILES_OFS:       128-bit entity mask per 16x16 screen tile (one uint4)
 //  + ENT_SUN_OFS:         128-bit shadow-caster mask per sun-grid cell (one uint4)
+//  + ENT_TILES_OFS:       128-bit entity mask per 16x16 screen tile (one uint4)
 // See ent_build_masks in voxel_models.odin for how the masks are built.
 #define ENT_PAL_BASE    1
 #define ENT_MODEL_BASE  65
@@ -29,13 +29,12 @@
 #define ENT_PART_STRIDE 6
 #define ENT_MAX_PARTS   1024
 #define ENT_TILE        16
-#define ENT_TILE_COUNT  2500  // (TEX_W / 16) * (TEX_H / 16), TEX_W = TEX_H = 800
 #define ENT_SUN_GRID    64
 #define ENT_SUN_CELL    4.0
 #define ENT_ENTS_OFS    4
 #define ENT_PARTS_OFS   (ENT_ENTS_OFS + ENT_MAX * 2)
-#define ENT_TILES_OFS   (ENT_PARTS_OFS + ENT_MAX_PARTS * ENT_PART_STRIDE)
-#define ENT_SUN_OFS     (ENT_TILES_OFS + ENT_TILE_COUNT)
+#define ENT_SUN_OFS     (ENT_PARTS_OFS + ENT_MAX_PARTS * ENT_PART_STRIDE)
+#define ENT_TILES_OFS   (ENT_SUN_OFS + ENT_SUN_GRID * ENT_SUN_GRID) // tiles_x * tiles_y (header)
 
 // This pixel's screen-tile mask; the tracer sets it before tracing view rays.
 static uint4 g_ent_tile_mask;

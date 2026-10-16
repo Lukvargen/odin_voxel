@@ -47,9 +47,20 @@ Camera :: struct {
 
     // View-only effects (glider.odin): never affect physics or aiming.
     roll:        f32,    // radians, positive = rolled left
-    fov_scale:   f32,    // 1 = default 90 degree view, >1 wider
+    fov:         f32,    // vertical field of view, degrees (options screen); 0 = DEFAULT_FOV
+    fov_scale:   f32,    // 1 = the fov setting, >1 wider
     shake:       [2]f32, // yaw/pitch jitter, degrees
     view_offset: [3]f32, // render position offset (chase camera, landing dip)
+}
+
+CROUCH_VIEW_DROP :: f32(0.3) // how far sneaking lowers the view
+
+// Where aiming (block targeting, picking) starts: the eye the first-person
+// view is drawn from, so what's under the crosshair is what gets hit even
+// while crouched or easing up a step. Not the chase camera's position: in
+// third person you still aim from the player's own eye.
+camera_aim_eye :: proc(cam: Camera) -> [3]f32 {
+    return cam.pos + [3]f32{0, cam.step_visual_offset - cam.crouch * CROUCH_VIEW_DROP, 0}
 }
 
 camera_forward :: proc(cam: Camera) -> [3]f32 {
@@ -69,9 +80,13 @@ camera_basis :: proc(cam: Camera) -> (fwd, right, up: [3]f32) {
     return
 }
 
+DEFAULT_FOV :: 70
+
 // Basis the renderer uses: camera_basis plus shake, roll and FOV. right/up
-// are scaled by the FOV (the shaders build rays as fwd + nx*right + ny*up).
-camera_view_basis :: proc(cam: Camera) -> (fwd, right, up: [3]f32) {
+// are scaled by the FOV (the shaders build rays as fwd + nx*right + ny*up,
+// nx and ny -1..1 across the screen): the vertical FOV is fixed and the
+// horizontal one follows the screen's aspect (width / height).
+camera_view_basis :: proc(cam: Camera, aspect: f32) -> (fwd, right, up: [3]f32) {
     c := cam
     c.yaw  += cam.shake.x
     c.pitch = clamp(c.pitch + cam.shake.y, -89.9, 89.9)
@@ -79,7 +94,8 @@ camera_view_basis :: proc(cam: Camera) -> (fwd, right, up: [3]f32) {
     cr, sr := math.cos(cam.roll), math.sin(cam.roll)
     right, up = right * cr + up * sr, up * cr - right * sr
     s := cam.fov_scale > 0 ? cam.fov_scale : 1
-    return fwd, right * s, up * s
+    s *= math.tan(math.to_radians(cam.fov > 0 ? cam.fov : DEFAULT_FOV) * 0.5)
+    return fwd, right * (s * aspect), up * s
 }
 
 // Flat forward (XZ only, for walk movement).

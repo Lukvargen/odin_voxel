@@ -476,7 +476,7 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
     }
     rate: f32 = want < g.chase_dist ? 12 : 4 // pull in fast, ease out slowly
     g.chase_dist += (want - g.chase_dist) * min(dt * rate, 1)
-    cam.view_offset = {0, g.land_dip - cam.crouch * 0.3, 0}
+    cam.view_offset = {0, g.land_dip - cam.crouch * CROUCH_VIEW_DROP, 0}
     if g.chase_dist > 0.05 {
         cam.view_offset += back * g.chase_dist + [3]f32{0, 1.2 * clamp(g.chase_dist / 3, 0, 1), 0}
     }
@@ -522,7 +522,7 @@ glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy
 // Screen position (pixels in a w x h window) of a world direction, or false
 // when it's behind the view.
 glider_project :: proc(cam: Camera, dir: [3]f32, w, h: f32) -> (x, y: f32, ok: bool) {
-    fwd, right, up := camera_view_basis(cam)
+    fwd, right, up := camera_view_basis(cam, w / h)
     d := la.dot(dir, fwd)
     if d < 0.05 { return }
     nx := la.dot(dir, right) / d / la.length2(right)

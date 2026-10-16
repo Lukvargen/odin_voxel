@@ -872,12 +872,38 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
 // ---- Voxel light (light.odin) ---------------------------------------------
 // Only for shaders that declare `light_index` (StructuredBuffer<int>) and
 // `light_pool` (StructuredBuffer<uint>) — define HAS_VOXEL_LIGHT first.
-// One byte per voxel: sky light << 4 | block light, both 0..15.
+// A u16 per voxel: block light tint << 12 | sky light (0..15) << 8 |
+// block light (0..BLOCK_LIGHT_MAX).
 #ifdef HAS_VOXEL_LIGHT
 
-#define LIGHT_SKY_FULL 0xF0u
+#define LIGHT_SKY_FULL 0xF00u
+#define BLOCK_LIGHT_MAX 24.0 // light.odin
 
-// Light byte of world voxel v. Outside the resident world reads as open sky,
+uint light_sky(uint l)   { return (l >> 8) & 15u; }
+uint light_block(uint l) { return l & 0xFFu; }
+uint light_tint(uint l)  { return l >> 12; }
+
+#define TORCH_LIGHT_COLOR float3(1.6, 0.95, 0.45) // block light at BLOCK_LIGHT_MAX
+
+// Colour of block light by tint (Light_Tint in light.odin), at about the
+// torch's brightness so a glow's level alone sets how bright it is.
+float3 light_tint_color(uint tint) {
+    if (tint == 1u) return float3(1.45, 1.10, 0.65); // crystal: pale amber
+    if (tint == 2u) return float3(0.95, 1.35, 0.60); // sea pickle: lime
+    if (tint == 3u) return float3(0.50, 1.10, 1.50); // glow mushroom: cyan
+    if (tint == 4u) return float3(0.45, 1.35, 0.95); // glow moss: teal
+    return TORCH_LIGHT_COLOR;
+}
+
+// Torch light wavers: slow value noise over space and time, so nearby
+// voxels (lit by the same torch) brighten and dim together. p: world pos.
+float torch_flicker(float3 p) {
+    float n = vnoise3(p * 0.12 + float3(0.0, u_time * 3.1, 0.0)) * 0.65
+            + vnoise3(p * 0.21 + float3(u_time * 7.3, 0.0, 0.0)) * 0.35;
+    return 0.86 + 0.24 * n;
+}
+
+// Light value of world voxel v. Outside the resident world reads as open sky,
 // so the far edge of the loaded area never turns black.
 uint sample_light(int3 v) {
     int3 cc = v >> 3; // arithmetic shift: floor division by 8
@@ -893,16 +919,42 @@ uint sample_light(int3 v) {
     if (li < 0) return uint(-1 - li); // whole chunk has one light value
     int3 l  = v & 7;
     int idx = li * 512 + l.x + l.y * 8 + l.z * 64;
-    return (light_pool[idx >> 2] >> ((uint(idx) & 3u) * 8u)) & 0xFFu;
+    return (light_pool[idx >> 1] >> ((uint(idx) & 1u) * 16u)) & 0xFFFFu;
 }
 
-// Smooth (sky, block) light, each 0..15, at hit_pos on the face of voxel
-// vkey with normal nrm: bilinear over the four voxels in front of the face
-// nearest the point. Unlit samples (solid blocks) are left out so a wall
-// beside the face doesn't darken it (AO does contact shadow), and the
-// diagonal is skipped when both edge samples are blocked so light can't leak
-// around a corner.
-float2 face_light(int3 vkey, float3 nrm, float3 hit_pos) {
+// Light level (0..15) to brightness: each level is 20% dimmer, as in
+// Minecraft, so light falls off smoothly instead of linearly.
+float light_curve(float level) {
+    return level > 0.0 ? pow(0.8, 15.0 - level) : 0.0;
+}
+
+// Block light (torches, glows) by level: it loses a level a block, so with
+// blocks of 2/3 m (TERRAIN_SCALE) the falloff is stretched to fade over as
+// many metres as it was designed to, easing out over the last few levels
+// instead of stopping at a hard edge.
+float block_light_curve(float level) {
+    if (level <= 0.0) return 0.0;
+    return pow(0.8, (BLOCK_LIGHT_MAX - level) / TERRAIN_SCALE) * saturate(level / 6.0);
+}
+
+// The block light of light value l, as colour; flicker: torch_flicker
+// where it lands (only torch light wavers).
+float3 block_radiance(uint l, float flicker) {
+    uint level = light_block(l);
+    if (level == 0u) return 0.0;
+    uint tint = light_tint(l);
+    float3 c = light_tint_color(tint) * block_light_curve(float(level));
+    return tint == 0u ? c * flicker : c;
+}
+
+// Smooth light at hit_pos on the face of voxel vkey with normal nrm:
+// returns the sky light level, and block light (coloured, flickering) in
+// `block`. Bilinear over the four voxels in front of the face nearest the
+// point; block light is blended as colour, so tints meet in a gradient.
+// Unlit samples (solid blocks) are left out so a wall beside the face
+// doesn't darken it (AO does contact shadow), and the diagonal is skipped
+// when both edge samples are blocked so light can't leak around a corner.
+float face_light(int3 vkey, float3 nrm, float3 hit_pos, out float3 block) {
     int3 n = int3(round(nrm));
     int3 f = vkey + n;
     int3 t = (n.x != 0) ? int3(0, 0, 1) : int3(1, 0, 0);
@@ -924,22 +976,10 @@ float2 face_light(int3 vkey, float3 nrm, float3 hit_pos) {
     w *= float4(1.0, l10 != 0u ? 1.0 : 0.0, l01 != 0u ? 1.0 : 0.0, l11 != 0u ? 1.0 : 0.0);
     uint4 l = uint4(l00, l10, l01, l11);
     float inv = 1.0 / (w.x + w.y + w.z + w.w);
-    return float2(dot(w, float4(l >> 4)), dot(w, float4(l & 15u))) * inv;
-}
-
-// Light level (0..15) to brightness: each level is 20% dimmer, as in
-// Minecraft, so light falls off smoothly instead of linearly.
-float light_curve(float level) {
-    return level > 0.0 ? pow(0.8, 15.0 - level) : 0.0;
-}
-
-// Block light (torches, glows) by level: it loses a level a block, so with
-// blocks of 2/3 m (TERRAIN_SCALE) the falloff is stretched to fade over as
-// many metres as it was designed to, easing out over the last few levels
-// instead of stopping at a hard edge.
-float block_light_curve(float level) {
-    if (level <= 0.0) return 0.0;
-    return pow(0.8, (15.0 - level) / TERRAIN_SCALE) * saturate(level / 4.0);
+    float fl = torch_flicker(hit_pos);
+    block = (w.x * block_radiance(l00, fl) + w.y * block_radiance(l10, fl)
+           + w.z * block_radiance(l01, fl) + w.w * block_radiance(l11, fl)) * inv;
+    return dot(w, float4((l >> 8) & 15u)) * inv;
 }
 
 #endif // HAS_VOXEL_LIGHT

@@ -121,7 +121,6 @@ float3 sky_ambient() {
     return lerp(day, float3(0.036, 0.052, 0.100), u_sun_true.w);
 }
 
-#define TORCH_LIGHT_COLOR float3(1.6, 0.95, 0.45) // block light at level 15
 #define MIN_AMBIENT       0.015                   // so pitch-black caves keep a hint of shape
 
 // Fixed per-face dimming of the sky/torch light (as in Minecraft): tops get
@@ -131,6 +130,24 @@ float face_shade(float3 n) {
     if (n.y > 0.5)  return 1.0;
     if (n.y < -0.5) return 0.5;
     return abs(n.x) > 0.5 ? 0.8 : 0.65;
+}
+
+// The torch in the player's hand (u_hand_light, gpu.odin): a point light
+// that falls off with distance as block light does with levels, with a
+// shadow ray so it doesn't shine through walls. two_sided: thin plant
+// blades, lit from either side.
+float3 hand_light(float3 p, float3 n, bool two_sided) {
+    if (u_hand_light.w <= 0.0) return 0.0;
+    float3 to = u_hand_light.xyz - p;
+    float d = length(to);
+    float level = u_hand_light.w - d;
+    if (level <= 0.0) return 0.0;
+    float3 l = to / max(d, 1e-4);
+    float ndl = dot(n, l);
+    if (two_sided) ndl = abs(ndl) * 0.7 + 0.3;
+    if (ndl <= 0.0) return 0.0;
+    float sh = trace_shadow_transmittance(p + n * 0.01, l, max(d - 0.3, 0.0));
+    return TORCH_LIGHT_COLOR * (block_light_curve(level) * ndl * sh);
 }
 
 // Sun bounced off sunlit ground (mostly grass, rock, sand): reaches faces
@@ -924,10 +941,10 @@ float4 shade_entity(EntityHit ehit, float3 dir, float t_off) {
 
     // Sky + torch light of the voxel just off the surface.
     uint   lv    = sample_light(int3(floor(P + N * 0.6)));
-    float3 ambient = sky_ambient() * light_curve(float(lv >> 4)) * underwater_light(P + N * 0.3) + MIN_AMBIENT;
-    float3 torch   = TORCH_LIGHT_COLOR * block_light_curve(float(lv & 15u));
+    float3 ambient = sky_ambient() * light_curve(float(light_sky(lv))) * underwater_light(P + N * 0.3) + MIN_AMBIENT;
+    float3 torch   = block_radiance(lv, torch_flicker(P));
 
-    float3 col = albedo * (ambient + sun + torch);
+    float3 col = albedo * (ambient + sun + torch + hand_light(so, N, false));
 
     // Thin fabric (glider sail): lit from behind, the sun glows through it.
     if ((flags & PAL_THIN) != 0u && ndl < 0.0) {
@@ -1224,17 +1241,18 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     // sun can reach at all) and block light (torches). A water plant's
     // planes cut through its own voxel, which holds the light.
     bool   plant = block_is_cutout(hit.block_id);
-    float2 lv;
+    float  sky_level;
+    float3 block_light;
     if (plant) {
         uint pl = sample_light(hit.vkey);
-        lv = float2(float(pl >> 4), float(pl & 15u));
+        sky_level   = float(light_sky(pl));
+        block_light = block_radiance(pl, torch_flicker(hit_point));
     } else {
-        lv = face_light(hit.vkey, surf_normal, hit_point);
+        sky_level = face_light(hit.vkey, surf_normal, hit_point, block_light);
     }
-    float  sky_level = lv.x;
     float3 uw = underwater_light(hit_point + surf_normal * 0.05);
     float3 lighting = (sky_ambient() * light_curve(sky_level) * uw + MIN_AMBIENT
-                    + TORCH_LIGHT_COLOR * block_light_curve(lv.y)) * face_shade(surf_normal);
+                    + block_light) * face_shade(surf_normal);
 
     // Sun. No sky light means sealed off from the sky (caves), so the
     // shadow ray is skipped there.
@@ -1277,6 +1295,7 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     // or down, so shadowed walls and overhangs keep some warmth and
     // shape instead of flat sky blue.
     lighting += bounce_light(surf_normal) * light_curve(sky_level) * uw;
+    lighting += hand_light(hit_point + surf_normal * epsilon, surf_normal, plant);
 
     // Leaf backlit glow: sun behind the leaves tints them warm
     // yellow-green, scaled by how open to the sky they are.

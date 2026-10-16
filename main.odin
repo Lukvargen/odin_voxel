@@ -101,9 +101,12 @@ Game_State :: struct {
     shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
     vol_enabled:    bool,  // volumetric god rays on/off (F4)
     vol_steps:      i32,   // volumetric march steps: 16/24/32 (F5 cycles)
-    render_scale:   i32,   // internal-resolution divisor (1/2/4); pixel-art look
-    render_w:       i32,   // = TEX_W / render_scale  (current scene texture size)
-    render_h:       i32,   // = TEX_H / render_scale
+    render_scale:   f32,   // scene resolution / window resolution (options screen)
+    upscale_smooth: bool,  // scene upscaled to the window linearly, else nearest (pixel look)
+    render_w:       i32,   // current scene texture size (gpu_fit_render_size)
+    render_h:       i32,
+    gpu_ms:         f32,   // GPU time of a frame's ray tracing, smoothed (gpu_render_timed)
+    gpu_time_wait:  int,   // frames until the next timed one
     exposure:       f32,   // pre-tonemap multiplier (options panel)
     fog_density:    f32,   // base distance-fog density (options panel)
     cave_factor:    f32,   // 0 surface .. 1 deep underground, smoothed per frame
@@ -172,9 +175,7 @@ main :: proc() {
     gs.shadow_rays    = 1     // F3 toggles 1<->3 (1=hard, 3=soft near)
     gs.vol_enabled    = false // F4 toggles volumetric god rays
     gs.vol_steps      = 16    // F5 cycles 16/24/32
-    gs.render_scale   = RENDER_SCALE // 1 = full-res, 2/4 = pixel-art (options screen)
-    gs.render_w       = TEX_W / gs.render_scale
-    gs.render_h       = TEX_H / gs.render_scale
+    gs.render_scale   = 1 // full resolution; less = faster, blockier (options screen)
     gs.exposure       = 1.0
     gs.fog_density    = 0.0006 // far terrain reaches ~1900 voxels; haze starts showing past ~600
     gs.sun_intensity  = 1.9
@@ -270,6 +271,7 @@ main :: proc() {
     gs.camera.pitch   = -20
     gs.camera.fly_mode = false // start in walk mode
     gs.camera.fov_scale = 1
+    if bench { gs.camera.fov = 90 } // the square view benches were tuned on
     combat_init(&gs.combat)
     build_init(&gs.build)
     defer build_destroy(&gs.build)
@@ -283,12 +285,16 @@ main :: proc() {
 
     // Bench runs hidden and unfocusable so it never interrupts the user.
     window_flags: SDL.WindowFlags = bench ? {.HIDDEN, .NOT_FOCUSABLE} : {.RESIZABLE}
-    gs.window = SDL.CreateWindow("Voxel Raytracer", TEX_W, TEX_H, window_flags)
+    // The bench keeps a fixed square view so its timings and shots compare.
+    win_w, win_h := i32(WINDOW_W), i32(WINDOW_H)
+    if bench { win_w, win_h = BENCH_RENDER_W, BENCH_RENDER_H }
+    gs.window = SDL.CreateWindow("Voxel Raytracer", win_w, win_h, window_flags)
     if gs.window == nil {
         fmt.eprintln("CreateWindow failed:", SDL.GetError())
         return
     }
     defer SDL.DestroyWindow(gs.window)
+    gs.render_w, gs.render_h = render_size(&gs)
 
     // GPU + world setup
     worker_pool_start(&gs.pool)
@@ -603,9 +609,10 @@ main :: proc() {
         build_update(&gs, play_dt)
 
         flush_gpu_uploads(&gs)
+        gpu_fit_render_size(&gs) // before the entity masks, which are per screen tile
         entities_update(&gs, fx_dt)
         audio_update(&gs, dt)
-        gpu_render(&gs)
+        gpu_render_timed(&gs)
         ui_build_and_render(&gs, dt)
 
         free_all(context.temp_allocator)
@@ -644,7 +651,7 @@ hotbar_select :: proc(gs: ^Game_State, slot: int) {
 // Middle click: the block you're looking at into your hand. Already on the
 // hotbar? Select it; otherwise it replaces the selected slot.
 pick_block :: proc(gs: ^Game_State) {
-    hit, _, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH, plants = true)
+    hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH, plants = true)
     if !ok { return }
     b := Block_Type(u8(get_voxel(gs, hit.x, hit.y, hit.z)))
     if b == .Air || b == .Water { return }

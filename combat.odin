@@ -800,7 +800,7 @@ combat_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     c := &gs.combat
     if !c.sword || gs.glider.deployed || gs.glider.chase_dist > 1.5 || !ent_begin(f) { return }
     cam := gs.camera
-    fwd, right, up := camera_view_basis(cam)
+    fwd, right, up := camera_view_basis(cam, 1)
     right, up = la.normalize(right), la.normalize(up)
     eye := cam.pos + cam.view_offset + [3]f32{0, cam.step_visual_offset, 0}
     ent_scale_about(f, eye, world_scale)

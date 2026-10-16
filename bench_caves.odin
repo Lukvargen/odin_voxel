@@ -5,7 +5,8 @@ import "core:math"
 
 // `bench caves [hour=h] [dir]`: inside a cave of each zone (lush, dripstone,
 // plain) and at an entrance: the open stretch nearest the zone's middle,
-// looked along as it is (dark but for what glows), and again by a torch.
+// looked along as it is (dark but for what glows), with a torch in hand,
+// and by torches placed ahead.
 bench_caves: bool
 
 bench_caves_run :: proc(gs: ^Game_State) {
@@ -24,8 +25,14 @@ bench_caves_run :: proc(gs: ^Game_State) {
         cam.yaw = math.to_degrees(math.atan2(f32(dir.x), f32(dir.y)))
         cam.pitch = -8
         gs.cave_factor = cave_factor_target(gs)
-        bench_measure(gs)
+        dark_ms := bench_measure(gs)
         bench_screenshot(gs, fmt.tprintf("%s/cave_%v.bmp", bench_shot_dir, zone))
+        // A torch in hand.
+        held := gs.selected_block
+        gs.selected_block = .Torch
+        hand_ms := bench_measure(gs)
+        bench_screenshot(gs, fmt.tprintf("%s/cave_%v_hand.bmp", bench_shot_dir, zone))
+        gs.selected_block = held
         // By torchlight: one on the floor a few steps ahead.
         dirty: map[int]bool
         changed: [dynamic][3]int
@@ -37,8 +44,9 @@ bench_caves_run :: proc(gs: ^Game_State) {
         light_on_edit(gs, changed[:])
         for slot in dirty { gpu_sync_slot(gs, slot) }
         delete(dirty); delete(changed)
-        bench_measure(gs)
+        torch_ms := bench_measure(gs)
         bench_screenshot(gs, fmt.tprintf("%s/cave_%v_torch.bmp", bench_shot_dir, zone))
+        fmt.printf("caves: %v frame %.2f ms dark, %.2f ms torch in hand, %.2f ms torches placed\n", zone, dark_ms, hand_ms, torch_ms)
     }
     // An entrance: the nearest column open to the sky, looked into from above.
     for r := 0; r < 3000; r += 16 {

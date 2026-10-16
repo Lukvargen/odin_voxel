@@ -55,13 +55,14 @@ set_slot_index :: proc(gs: ^Game_State, slot: int, idx: i32) {
     gs.index_planes[slot / PLANE_SLOTS] = true
 }
 
-// Light bricks (512 bytes each) exist only for chunks whose light varies:
+// Light bricks (1 KB each: a u16 per voxel) exist only for chunks whose light varies:
 // mostly the terrain surface, tree canopies, cave mouths and around torches.
 // gpu_light_index[slot] is a light pool id, or light_index_uniform(v) for a
 // chunk whose every voxel has light v.
 MAX_LIGHT_BRICKS :: 3 << 16 // 196k: caves full of glows need their share
+LIGHT_BRICK_BYTES :: VOXELS_PER_BRICK * size_of(u16)
 
-light_index_uniform :: #force_inline proc(v: u8) -> i32 { return -1 - i32(v) }
+light_index_uniform :: #force_inline proc(v: u16) -> i32 { return -1 - i32(v) }
 
 // Free-list allocator: a stack of free pool ids. free_top is the count of
 // ids available in free_ids[0:free_top]. alloc = pop, free = push. O(1),
@@ -212,8 +213,8 @@ World :: struct {
 Chunk :: struct {
     voxels:     ^[VOXELS_PER_BRICK]u8, // nil = every voxel is `fill`
     fill:       u8,
-    light:      ^[VOXELS_PER_BRICK]u8, // nil = all light_fill (light.odin)
-    light_fill: u8,
+    light:      ^[VOXELS_PER_BRICK]u16, // nil = all light_fill (light.odin)
+    light_fill: u16,
 }
 
 // All CHUNKS_H chunks of one 8x8 footprint: the unit of generation,

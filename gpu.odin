@@ -7,16 +7,15 @@ import "core:slice"
 import "core:time"
 import SDL "vendor:sdl3"
 
-TEX_W :: 800
-TEX_H :: 800
-
-// Default internal render scale (divisor of the window resolution). The scene
-// is ray traced into a (TEX_W/scale)×(TEX_H/scale) texture and upscaled to the
-// window. scale > 1 trades resolution for a large primary-ray-cost saving (and
-// a deliberate pixel-art look with nearest-neighbor display). The live value is
-// gs.render_scale, changeable at runtime via gpu_set_render_scale (1/2/4 only,
-// so render_w stays a multiple of the 16-wide threadgroup).
-RENDER_SCALE :: 1
+// The window opens at WINDOW_W x WINDOW_H and can be resized; the scene is
+// ray traced at the window's size times gs.render_scale (gpu_fit_render_size),
+// at most MAX_RENDER_W x MAX_RENDER_H, and upscaled to the window.
+WINDOW_W :: 1280
+WINDOW_H :: 720
+BENCH_RENDER_W :: 800
+BENCH_RENDER_H :: 800
+MAX_RENDER_W :: 3840
+MAX_RENDER_H :: 2400
 
 // Matches cbuffer CameraUniforms in shaders/camera_uniforms.hlsl.
 // Each float3 is padded to float4 (cbuffer std140 rules).
@@ -49,12 +48,33 @@ Camera_Uniform :: struct #packed {
     thermals:       [MAX_SKY_THERMALS][4]f32, // cumulus over thermals: XZ centre at cloud base, radius, strength
     thermal_count:  [4]i32, // x = count
     cloud_puffs:    [MAX_SKY_THERMALS * 4][4]f32, // per thermal 4 towers: offset (cloud radii), radius
+    hand_light:     [4]f32, // torch in hand: xyz = position, w = light level (0 = none)
+}
+
+// A held torch lights the world around the player as a point light in the
+// shader (it moves every frame, so it stays out of the CPU voxel light).
+// It sits low and to the right of the eye, where the hand is, unless that
+// is inside a block.
+HAND_TORCH_LIGHT :: BLOCK_LIGHT_MAX // as bright as a placed torch, fading out ~24 blocks away
+
+// Width over height of the scene (and the window, give or take a pixel).
+render_aspect :: proc(gs: ^Game_State) -> f32 {
+    return gs.render_h > 0 ? f32(gs.render_w) / f32(gs.render_h) : 1
+}
+
+hand_light :: proc(gs: ^Game_State, eye, fwd, right, up: [3]f32) -> [4]f32 {
+    if gs.selected_block != .Torch || gs.combat.sword { return {} }
+    p := eye + right * 0.35 - up * 0.3 + fwd * 0.3
+    if solid_at(gs, int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z))) { p = eye }
+    t := f32(SDL.GetTicks()) / 1000.0
+    flicker := 0.6 * math.sin(t * 9.3) + 0.4 * math.sin(t * 23.1 + 1.7)
+    return {p.x, p.y, p.z, HAND_TORCH_LIGHT + flicker * 0.35}
 }
 
 // (Re)create the scene color, depth, and half-res volumetric textures at the
 // current internal render resolution (gs.render_w/h). The caller owns the
 // lifetime of any previous textures (release them first, or use
-// gpu_set_render_scale which does). Buffers and pipelines are untouched.
+// gpu_fit_render_size which does). Buffers and pipelines are untouched.
 gpu_create_scene_textures :: proc(gs: ^Game_State) {
     // Output storage texture (compute writes here each frame). Allocated at the
     // internal render resolution; the SDL renderer upscales it to the window.
@@ -112,13 +132,23 @@ gpu_create_scene_textures :: proc(gs: ^Game_State) {
     }
 }
 
-// Switch the internal render resolution at runtime. `scale` must be 1/2/4 so
-// render_w stays a multiple of the 16-wide threadgroup. Waits for the GPU to
-// idle, releases the old scene textures + the wrapped SDL texture, recreates
-// them at the new size, and rebuilds the UI texture wrap. No-op if unchanged.
-gpu_set_render_scale :: proc(gs: ^Game_State, scale: i32) {
-    if scale == gs.render_scale { return }
-    if scale != 1 && scale != 2 && scale != 4 { return }
+// Scene texture size for the window's size in pixels and gs.render_scale:
+// the window's aspect, shrunk to fit MAX_RENDER_W x MAX_RENDER_H.
+render_size :: proc(gs: ^Game_State) -> (w, h: i32) {
+    pw, ph: i32
+    SDL.GetWindowSizeInPixels(gs.window, &pw, &ph)
+    if pw <= 0 || ph <= 0 { return gs.render_w, gs.render_h } // minimized
+    fw, fh := f32(pw) * gs.render_scale, f32(ph) * gs.render_scale
+    k := min(1, f32(MAX_RENDER_W) / fw, f32(MAX_RENDER_H) / fh)
+    return max(i32(fw * k + 0.5), 16), max(i32(fh * k + 0.5), 16)
+}
+
+// Match the scene textures to the window (resized, or the render scale
+// changed): waits for the GPU to idle, recreates the scene textures and
+// re-points the UI's SDL texture at them. No-op if the size is unchanged.
+gpu_fit_render_size :: proc(gs: ^Game_State) {
+    w, h := render_size(gs)
+    if w == gs.render_w && h == gs.render_h { return }
 
     _ = SDL.WaitForGPUIdle(gs.gpu_device)
 
@@ -128,10 +158,7 @@ gpu_set_render_scale :: proc(gs: ^Game_State, scale: i32) {
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[0])
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.bloom_texture[1])
 
-    gs.render_scale = scale
-    gs.render_w     = TEX_W / scale
-    gs.render_h     = TEX_H / scale
-
+    gs.render_w, gs.render_h = w, h
     gpu_create_scene_textures(gs)
     ui_rewrap_out_texture(gs) // re-point the SDL texture at the new out_texture
 }
@@ -145,7 +172,7 @@ gpu_init :: proc(gs: ^Game_State) {
     // Note: window is claimed by SDL.CreateGPURenderer in ui_init (which
     // shares this GPU device). Claiming it here would conflict.
 
-    // SPIR-V embedded at compile time — no runtime file dependency
+    // SPIR-V embedded at compile time â€” no runtime file dependency
     shader_bytes := #load("shaders/voxel_tracer.spv")
 
     pipeline_info := SDL.GPUComputePipelineCreateInfo{
@@ -279,7 +306,7 @@ gpu_init :: proc(gs: ^Game_State) {
     assert(gs.light_index_buf != nil, "Failed to create light index buffer")
     gs.light_pool_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
         usage = {.COMPUTE_STORAGE_READ},
-        size  = MAX_LIGHT_BRICKS * VOXELS_PER_BRICK,
+        size  = MAX_LIGHT_BRICKS * LIGHT_BRICK_BYTES,
     })
     assert(gs.light_pool_buf != nil, "Failed to create light pool buffer")
 
@@ -359,7 +386,7 @@ upload_cmd :: proc(gs: ^Game_State) -> ^SDL.GPUCommandBuffer {
     return gs.upload_cmd
 }
 
-// Everything dirty this frame — light, far terrain, voxels + slot tables —
+// Everything dirty this frame â€” light, far terrain, voxels + slot tables â€”
 // staged and copied in one command buffer.
 flush_gpu_uploads :: proc(gs: ^Game_State) {
     t0 := time.tick_now()
@@ -375,7 +402,7 @@ flush_gpu_uploads :: proc(gs: ^Game_State) {
 
 // Flush all dirty chunk slots accumulated this frame: each mixed chunk's voxels plus its occupancy mask (built here
 // from the voxels), and the slot tables if they changed. Upload cost is
-// dominated by the NUMBER of UploadToGPUBuffer calls (~6.7µs/call driver
+// dominated by the NUMBER of UploadToGPUBuffer calls (~6.7Âµs/call driver
 // overhead), not bytes, so the transfer buffer is packed in destination
 // order and emitted as a few coalesced uploads over contiguous runs.
 flush_voxel_uploads :: proc(gs: ^Game_State) {
@@ -506,13 +533,13 @@ g_light_pool_warned: bool
 
 // Sync the GPU light of every dirty ring slot. A chunk with uniform light is
 // encoded straight into gpu_light_index; one whose light varies gets a light
-// pool brick holding its 512 bytes. Same coalesced upload as the voxels.
+// pool brick holding its 512 u16s. Same coalesced upload as the voxels.
 flush_light_uploads :: proc(gs: ^Game_State) {
     if len(gs.light_dirty) == 0 { return }
 
     seen: map[int]bool
     defer delete(seen)
-    Light_Upload :: struct { pid: int, light: ^[VOXELS_PER_BRICK]u8 }
+    Light_Upload :: struct { pid: int, light: ^[VOXELS_PER_BRICK]u16 }
     ups: [dynamic]Light_Upload
     defer delete(ups)
     for slot in gs.light_dirty {
@@ -548,21 +575,21 @@ flush_light_uploads :: proc(gs: ^Game_State) {
 
     index_plane :: PLANE_SLOTS * size_of(i32)
     planes      := take_planes(&gs.light_planes)
-    index_off   := len(ups) * VOXELS_PER_BRICK
+    index_off   := len(ups) * LIGHT_BRICK_BYTES
     if index_off + len(planes) * index_plane == 0 { return }
     base := uintptr(staging_map(gs, &gs.stage_light, index_off + len(planes) * index_plane))
     transfer := gs.stage_light.buf
     pids := make([]int, len(ups))
     defer delete(pids)
     for u, i in ups {
-        mem.copy(rawptr(base + uintptr(i * VOXELS_PER_BRICK)), u.light, VOXELS_PER_BRICK)
+        mem.copy(rawptr(base + uintptr(i * LIGHT_BRICK_BYTES)), u.light, LIGHT_BRICK_BYTES)
         pids[i] = u.pid
     }
     stage_planes(base, index_off, slice.to_bytes(gs.gpu_light_index), planes, index_plane)
     SDL.UnmapGPUTransferBuffer(gs.gpu_device, transfer)
 
     copy_pass := SDL.BeginGPUCopyPass(upload_cmd(gs))
-    upload_runs(copy_pass, transfer, gs.light_pool_buf, pids, VOXELS_PER_BRICK, 0)
+    upload_runs(copy_pass, transfer, gs.light_pool_buf, pids, LIGHT_BRICK_BYTES, 0)
     upload_runs(copy_pass, transfer, gs.light_index_buf, planes, index_plane, index_off)
     SDL.EndGPUCopyPass(copy_pass)
 }
@@ -588,6 +615,27 @@ gpu_upload_buffer :: proc(gs: ^Game_State, dst: ^SDL.GPUBuffer, data: rawptr, si
     _ = SDL.SubmitGPUCommandBuffer(cmd)
 }
 
+GPU_TIME_EVERY :: 15 // frames between timed frames while the debug panel is open
+
+// gpu_render, timing the GPU now and then for the debug panel (F3). While it
+// is open, every GPU_TIME_EVERY frames one frame runs on an idle GPU: wait
+// for idle, submit, wait for its fence. Exact, where timing frames queued
+// behind others would count their wait too; the stall shows as a slight
+// dip in fps while the panel is open, and costs nothing when it's closed.
+gpu_render_timed :: proc(gs: ^Game_State) {
+    gs.gpu_time_wait -= 1
+    if !gs.ui.debug_open || gs.gpu_time_wait > 0 { gpu_render(gs); return }
+    gs.gpu_time_wait = GPU_TIME_EVERY
+    _ = SDL.WaitForGPUIdle(gs.gpu_device)
+    t := time.tick_now()
+    fence := gpu_render(gs, want_fence = true)
+    if fence == nil { return }
+    _ = SDL.WaitForGPUFences(gs.gpu_device, true, &fence, 1)
+    SDL.ReleaseGPUFence(gs.gpu_device, fence)
+    ms := f32(time.duration_milliseconds(time.tick_since(t)))
+    gs.gpu_ms = gs.gpu_ms == 0 ? ms : gs.gpu_ms + (ms - gs.gpu_ms) * 0.3
+}
+
 // want_fence: return a fence for the submission (bench mode times the GPU
 // with it); the caller must release it. Otherwise returns nil.
 gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
@@ -605,7 +653,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         gs.ent_upload_size = 0
     }
 
-    fwd, right, up := camera_view_basis(gs.camera)
+    fwd, right, up := camera_view_basis(gs.camera, render_aspect(gs))
     render_pos := gs.camera.pos + gs.camera.view_offset
     render_pos.y += gs.camera.step_visual_offset
     // Near region drawn as voxels: only as far out as columns are actually
@@ -651,6 +699,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         for k in 0 ..< 4 { uniform.cloud_puffs[i * 4 + k] = th.puffs[k] }
     }
     uniform.thermal_count.x = i32(gs.sky_thermal_count)
+    uniform.hand_light = hand_light(gs, render_pos, fwd, right, up)
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
     ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}
@@ -659,13 +708,13 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     ro_bufs_tracer := [8]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.light_index_buf, gs.light_pool_buf, gs.entity_buf, gs.far_buf}
 
     // Threadgroup counts at the current render resolution (ceil-divide by the
-    // 16×16 group; shaders guard out-of-range threads so over-dispatch is safe).
+    // 16Ã—16 group; shaders guard out-of-range threads so over-dispatch is safe).
     groups_x  := u32((gs.render_w + 15) / 16)
     groups_y  := u32((gs.render_h + 15) / 16)
     hgroups_x := u32((gs.render_w/2 + 15) / 16)
     hgroups_y := u32((gs.render_h/2 + 15) / 16)
 
-    // --- Pass 1: main raytrace → out_texture (+ depth_texture) ---
+    // --- Pass 1: main raytrace â†’ out_texture (+ depth_texture) ---
     rw_main := [2]SDL.GPUStorageTextureReadWriteBinding{
         { texture = gs.out_texture,   cycle = true },
         { texture = gs.depth_texture, cycle = true },
@@ -677,7 +726,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     SDL.DispatchGPUCompute(p1, groups_x, groups_y, 1)
     SDL.EndGPUComputePass(p1)
 
-    // --- Pass 2: half-res volumetric march → vol_texture ---
+    // --- Pass 2: half-res volumetric march â†’ vol_texture ---
     // Reads depth (RO storage tex, t0) + voxel buffers (t1..t4). Skipped when
     // off: composite then ignores vol_texture.
     if gs.vol_enabled {
@@ -691,8 +740,8 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         SDL.EndGPUComputePass(p2)
     }
 
-    // --- Pass 2b-d: bloom (half-res) — prefilter → blur H → blur V ---------
-    // prefilter: scene → bloom[0]; H: bloom[0] → bloom[1]; V: bloom[1] → bloom[0].
+    // --- Pass 2b-d: bloom (half-res) â€” prefilter â†’ blur H â†’ blur V ---------
+    // prefilter: scene â†’ bloom[0]; H: bloom[0] â†’ bloom[1]; V: bloom[1] â†’ bloom[0].
     {
         bloom_pass :: proc(cmd: ^SDL.GPUCommandBuffer, pipeline: ^SDL.GPUComputePipeline,
             src: ^SDL.GPUTexture, dst: ^SDL.GPUTexture, gx, gy: u32) {
@@ -709,7 +758,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         bloom_pass(cmd, gs.bloom_v_pipeline,   gs.bloom_texture[1], gs.bloom_texture[0], hgroups_x, hgroups_y)
     }
 
-    // --- Pass 3: composite (vol upscale + bloom add + tonemap) → out_texture ---
+    // --- Pass 3: composite (vol upscale + bloom add + tonemap) â†’ out_texture ---
     // Reads vol (t0) + depth (t1) + bloom (t2) as RO storage textures; RW out_texture.
     rw_comp := SDL.GPUStorageTextureReadWriteBinding{ texture = gs.out_texture, cycle = false }
     p3 := SDL.BeginGPUComputePass(cmd, &rw_comp, 1, nil, 0)

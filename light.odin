@@ -3,8 +3,12 @@ package main
 import "core:time"
 
 // Minecraft-style voxel light, computed on the CPU and sampled by the shader
-// instead of tracing light rays. Every non-opaque voxel stores one byte:
-// high nibble = sky light (0..15), low nibble = block light (0..15, torches).
+// instead of tracing light rays. Every non-opaque voxel stores a u16:
+// bits 12..15 = block light tint (Light_Tint of the brightest emitter
+// reaching it), bits 8..11 = sky light (0..LIGHT_MAX), low byte = block
+// light (0..BLOCK_LIGHT_MAX, torches and glows). The tint spreads with the
+// level, so where two colours meet the brighter one wins; the shader blends
+// neighbouring voxels so the seam is soft.
 //
 // Sky light: 15 straight down through open air and water from the top of
 // the world, then flood-filled sideways/down, losing 1 per voxel (leaves
@@ -18,18 +22,35 @@ import "core:time"
 // The main thread then stitches it to already-loaded neighbour columns
 // (light_stitch_column) and relights around block edits (light_on_edit).
 
-LIGHT_MAX   :: 15
-TORCH_LIGHT :: 15
-CRYSTAL_LIGHT :: 9
-SEA_PICKLE_LIGHT :: 7
-GLOW_MUSHROOM_LIGHT :: 8
-GLOW_MOSS_LIGHT :: 6
-LIGHT_SKY   :: u8(LIGHT_MAX << 4) // full sky, no block light
+LIGHT_MAX   :: 15 // sky light
+// Block light has a byte of its own, so torches reach further than the sky
+// light's 15 levels. The shader's block_light_curve is relative to
+// BLOCK_LIGHT_MAX; each emitter keeps its old brightness at the source
+// (15 - old level below the top) and just fades out over more blocks.
+BLOCK_LIGHT_MAX :: 24
+TORCH_LIGHT :: BLOCK_LIGHT_MAX
+CRYSTAL_LIGHT :: 18
+SEA_PICKLE_LIGHT :: 15
+GLOW_MUSHROOM_LIGHT :: 16
+GLOW_MOSS_LIGHT :: 13
+LIGHT_SKY   :: u16(LIGHT_MAX << 8) // full sky, no block light
 
 Light_Channel :: enum { Sky, Block }
 
 block_opaque :: #force_inline proc(b: u8) -> bool {
     return b != u8(Block_Type.Air) && !block_is_leaves(b) && !block_is_watery(b) && !block_is_land_plant(b)
+}
+
+// Colour of a block's light (palette in the shader: light_tint_color).
+// Torch must stay 0: chunks with no block light have tint 0 too.
+Light_Tint :: enum u8 { Torch, Crystal, Sea_Pickle, Glow_Mushroom, Glow_Moss }
+
+block_tint :: #force_inline proc(b: u8) -> u8 {
+    if b == u8(Block_Type.Crystal)       { return u8(Light_Tint.Crystal) }
+    if b == u8(Block_Type.Sea_Pickle)    { return u8(Light_Tint.Sea_Pickle) }
+    if b == u8(Block_Type.Glow_Mushroom) { return u8(Light_Tint.Glow_Mushroom) }
+    if b == u8(Block_Type.Glow_Moss)     { return u8(Light_Tint.Glow_Moss) }
+    return u8(Light_Tint.Torch)
 }
 
 block_emission :: #force_inline proc(b: u8) -> u8 {
@@ -41,12 +62,20 @@ block_emission :: #force_inline proc(b: u8) -> u8 {
     return 0
 }
 
-chan_get :: #force_inline proc(v: u8, ch: Light_Channel) -> u8 {
-    return ch == .Sky ? v >> 4 : v & 0x0F
+chan_get :: #force_inline proc(v: u16, ch: Light_Channel) -> u8 {
+    return ch == .Sky ? u8(v >> 8) & 0x0F : u8(v)
 }
 
-chan_set :: #force_inline proc(v: u8, ch: Light_Channel, l: u8) -> u8 {
-    return ch == .Sky ? (v & 0x0F) | (l << 4) : (v & 0xF0) | l
+// Block light also takes the tint of where it came from (no light, no tint).
+chan_set :: #force_inline proc(v: u16, ch: Light_Channel, l: u8, tint: u8 = 0) -> u16 {
+    if ch == .Sky { return (v & 0xF0FF) | u16(l) << 8 }
+    return (v & 0x0F00) | u16(l) | (l > 0 ? u16(tint) << 12 : 0)
+}
+
+light_tint :: #force_inline proc(v: u16) -> u8 { return u8(v >> 12) }
+
+light_pack :: #force_inline proc(sky, blk, tint: u8) -> u16 {
+    return u16(sky) << 8 | u16(blk) | (blk > 0 ? u16(tint) << 12 : 0)
 }
 
 // Light of the voxel a light level `l` spreads into from direction `d`
@@ -64,17 +93,17 @@ DIR_DOWN :: 3
 
 // ---- Chunk light storage ----------------------------------------------------
 // Most chunks have uniform light (open air = full sky, solid rock = 0), so a
-// chunk only allocates its 512-byte array once its light varies.
+// chunk only allocates its 1 KB array once its light varies.
 
-chunk_light :: #force_inline proc(c: ^Chunk, vi: int) -> u8 {
+chunk_light :: #force_inline proc(c: ^Chunk, vi: int) -> u16 {
     return c.light == nil ? c.light_fill : c.light[vi]
 }
 
 // Returns true if the value changed.
-chunk_set_light :: proc(c: ^Chunk, vi: int, v: u8) -> bool {
+chunk_set_light :: proc(c: ^Chunk, vi: int, v: u16) -> bool {
     if c.light == nil {
         if v == c.light_fill { return false }
-        c.light = new([VOXELS_PER_BRICK]u8)
+        c.light = new([VOXELS_PER_BRICK]u16)
         for &x in c.light { x = c.light_fill }
     }
     if c.light[vi] == v { return false }
@@ -113,9 +142,10 @@ col_step_ok :: #force_inline proc(i, d: int) -> bool {
     }
 }
 
-// Spread one channel's light inside the column from every queued index.
+// Spread one channel's light inside the column from every queued index
+// (block light carries its tint along).
 @(private="file")
-col_flood :: proc(level: []u8, blocks: []u8, queue: ^[dynamic]int, ch: Light_Channel) {
+col_flood :: proc(level: []u8, blocks: []u8, queue: ^[dynamic]int, ch: Light_Channel, tint: []u8 = nil) {
     for head := 0; head < len(queue); head += 1 {
         i := queue[head]
         l := level[i]
@@ -126,6 +156,7 @@ col_flood :: proc(level: []u8, blocks: []u8, queue: ^[dynamic]int, ch: Light_Cha
             nl := spread_level(l, ch, d, blocks[ni])
             if nl > level[ni] {
                 level[ni] = nl
+                if tint != nil { tint[ni] = tint[i] }
                 append(queue, ni)
             }
         }
@@ -140,6 +171,8 @@ light_column_compute :: proc(column: ^Column) {
     blocks := make([]u8, COL_N)
     sky    := make([]u8, COL_N)
     blk    := make([]u8, COL_N)
+    tint   := make([]u8, COL_N)
+    defer delete(tint)
     defer delete(blocks)
     defer delete(sky)
     defer delete(blk)
@@ -205,30 +238,31 @@ light_column_compute :: proc(column: ^Column) {
             for k in 0 ..< 64 {
                 if e := block_emission(blocks[base + k]); e > 0 {
                     blk[base + k] = e
+                    tint[base + k] = block_tint(blocks[base + k])
                     append(&queue, base + k)
                 }
             }
         }
     }
-    col_flood(blk, blocks, &queue, .Block)
+    col_flood(blk, blocks, &queue, .Block, tint)
 
     // Store per chunk: uniform chunks keep no array.
     for iy in 0 ..< CHUNKS_H {
         c := &column.chunks[iy]
-        first := sky[iy * 64] << 4 | blk[iy * 64]
+        first := light_pack(sky[iy * 64], blk[iy * 64], tint[iy * 64])
         uniform := true
         check: for lz in 0 ..< CHUNK_VOXELS {
             base := lz * COL_DZ + iy * 64
             for k in 0 ..< 64 {
-                if sky[base + k] << 4 | blk[base + k] != first { uniform = false; break check }
+                if light_pack(sky[base + k], blk[base + k], tint[base + k]) != first { uniform = false; break check }
             }
         }
         c.light_fill = first
         if uniform { continue }
-        c.light = new([VOXELS_PER_BRICK]u8)
+        c.light = new([VOXELS_PER_BRICK]u16)
         for lz in 0 ..< CHUNK_VOXELS {
             base := lz * COL_DZ + iy * 64
-            for k in 0 ..< 64 { c.light[lz * 64 + k] = sky[base + k] << 4 | blk[base + k] }
+            for k in 0 ..< 64 { c.light[lz * 64 + k] = light_pack(sky[base + k], blk[base + k], tint[base + k]) }
         }
     }
 }
@@ -265,9 +299,9 @@ lw_chunk :: proc(w: ^Light_World, p: [3]int) -> (c: ^Chunk, vi: int, key: [3]int
 }
 
 @(private="file")
-lw_set :: proc(w: ^Light_World, c: ^Chunk, vi: int, key: [3]int, ch: Light_Channel, l: u8) {
+lw_set :: proc(w: ^Light_World, c: ^Chunk, vi: int, key: [3]int, ch: Light_Channel, l: u8, tint: u8 = 0) {
     old := chunk_light(c, vi)
-    if chunk_set_light(c, vi, chan_set(old, ch, l)) && (!w.any_changed || key != w.last_changed) {
+    if chunk_set_light(c, vi, chan_set(old, ch, l, tint)) && (!w.any_changed || key != w.last_changed) {
         w.changed[key] = true
         w.last_changed = key
         w.any_changed  = true
@@ -282,7 +316,8 @@ lw_flood :: proc(w: ^Light_World, queue: ^[dynamic][3]int, ch: Light_Channel) {
         p := queue[head]
         c, vi, _ := lw_chunk(w, p)
         if c == nil { continue }
-        l := chan_get(chunk_light(c, vi), ch)
+        v := chunk_light(c, vi)
+        l := chan_get(v, ch)
         if l <= 1 { continue }
         for d, di in NEIGHBOURS {
             n := p + d
@@ -292,7 +327,7 @@ lw_flood :: proc(w: ^Light_World, queue: ^[dynamic][3]int, ch: Light_Channel) {
             if block_opaque(b) { continue }
             nl := spread_level(l, ch, di, b)
             if nl > chan_get(chunk_light(nc, nvi), ch) {
-                lw_set(w, nc, nvi, nkey, ch, nl)
+                lw_set(w, nc, nvi, nkey, ch, nl, light_tint(v))
                 append(queue, n)
             }
         }
@@ -363,8 +398,8 @@ light_stitch_column :: proc(gs: ^Game_State, wcx, wcz: int) {
             if a == nil || b == nil { continue }
             // Uniform chunks within one level of each other can't exchange light.
             if a.light == nil && b.light == nil {
-                da := int(a.light_fill >> 4) - int(b.light_fill >> 4)
-                db := int(a.light_fill & 15) - int(b.light_fill & 15)
+                da := int(chan_get(a.light_fill, .Sky))   - int(chan_get(b.light_fill, .Sky))
+                db := int(chan_get(a.light_fill, .Block)) - int(chan_get(b.light_fill, .Block))
                 if abs(da) <= 1 && abs(db) <= 1 { continue }
             }
             for ly in 0 ..< CHUNK_VOXELS {
@@ -387,10 +422,12 @@ light_stitch_column :: proc(gs: ^Game_State, wcx, wcz: int) {
                     wy := wcy * CHUNK_VOXELS + ly
                     pa := [3]int{wcx * CHUNK_VOXELS + ax, wy, wcz * CHUNK_VOXELS + az}
                     pb := [3]int{ncx * CHUNK_VOXELS + bx, wy, ncz * CHUNK_VOXELS + bz}
-                    if la >> 4 > (lb >> 4) + 1 { append(&sky_q, pa) }
-                    if lb >> 4 > (la >> 4) + 1 { append(&sky_q, pb) }
-                    if la & 15 > (lb & 15) + 1 { append(&blk_q, pa) }
-                    if lb & 15 > (la & 15) + 1 { append(&blk_q, pb) }
+                    for ch in Light_Channel {
+                        q := ch == .Sky ? &sky_q : &blk_q
+                        ca, cb := chan_get(la, ch), chan_get(lb, ch)
+                        if ca > cb + 1 { append(q, pa) }
+                        if cb > ca + 1 { append(q, pb) }
+                    }
                 }
             }
         }
@@ -421,7 +458,7 @@ light_on_edit :: proc(gs: ^Game_State, changed: [][3]int) {
                 c, vi, key := lw_chunk(&w, p)
                 if c == nil { continue }
                 if e := block_emission(chunk_voxel(c, vi)); e > 0 {
-                    lw_set(&w, c, vi, key, .Block, e)
+                    lw_set(&w, c, vi, key, .Block, e, block_tint(chunk_voxel(c, vi)))
                     append(&add, p)
                 }
             }
