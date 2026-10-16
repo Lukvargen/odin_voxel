@@ -198,8 +198,8 @@ block_material :: proc(b: Block_Type) -> Material {
     case .Sand, .Red_Sand:               return .Sand
     case .Snow:                          return .Snow
     case .Ice:                           return .Ice
-    case .Log, .Spruce_Log, .Cactus, .Torch: return .Wood
-    case .Leaves, .Spruce_Leaves:        return .Leaves
+    case .Log, .Spruce_Log, .Birch_Log, .Cactus, .Torch: return .Wood
+    case .Leaves, .Spruce_Leaves, .Birch_Leaves, .Autumn_Leaves: return .Leaves
     case .Gravel:                        return .Gravel
     }
     return .Stone
@@ -269,7 +269,7 @@ surroundings_update :: proc(gs: ^Game_State, dt: f32) {
         d := [3]f32{rand.float32_range(-1, 1), rand.float32_range(-1, 1), rand.float32_range(-1, 1)}
         if la.dot(d, d) > 1 { continue }
         #partial switch voxel_at(gs, p + d * RADIUS) {
-        case .Leaves, .Spruce_Leaves: audio.leaf_hits += 1
+        case .Leaves, .Spruce_Leaves, .Birch_Leaves, .Autumn_Leaves: audio.leaf_hits += 1
         case .Water, .Kelp, .Seagrass, .Sea_Pickle: audio.water_hits += 1
         }
         audio.samples += 1

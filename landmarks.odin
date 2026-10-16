@@ -206,7 +206,7 @@ clear_vegetation :: proc(t: ^Tree_Target, lm: Landmark, r: int, y1: int) {
             if dx * dx + dz * dz > r * r { continue }
             for y in surface_height_at(wx, wz) ..< y1 {
                 b := col_voxel(t.col, wx - t.ox, y, wz - t.oz)
-                if block_is_leaves(b) || b == u8(Block_Type.Log) || b == u8(Block_Type.Spruce_Log) {
+                if block_is_leaves(b) || block_is_log(b) {
                     set_voxel_world(t, wx, y, wz, .Air)
                 }
             }

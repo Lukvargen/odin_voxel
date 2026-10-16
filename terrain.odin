@@ -363,26 +363,33 @@ surface_layers_design :: proc(s: Terrain_Sample, slope: int) -> Surface_Layers {
 
 // ---- Trees ---------------------------------------------------------------
 
-Tree_Kind :: enum u8 { None, Oak, Small_Oak, Bush, Spruce, Cactus }
+Tree_Kind :: enum u8 { None, Oak, Medium_Oak, Small_Oak, Bush, Spruce, Cactus, Birch, Dead, Fallen_Log }
 
 // Tree densities (trees per voxel of ground) by biome. A candidate spot is
 // rejected by its hash against the densest biome before any terrain is
 // sampled, so sparse biomes cost almost nothing.
-TREE_MAX_DENSITY :: 1.0 / 60.0 / (TERRAIN_SCALE * TERRAIN_SCALE) // per world block
+TREE_MAX_DENSITY :: 1.0 / 50.0 / (TERRAIN_SCALE * TERRAIN_SCALE) // per world block
 
 @(private="file")
 Tree_Rate :: struct { kind: Tree_Kind, density: f64 }
 
+// Per design block of ground; together at most TREE_MAX_DENSITY. Cooler
+// forests are birch woods; a few dead trees and fallen logs about.
 @(private="file")
-biome_trees :: proc(b: Biome, height: int) -> [3]Tree_Rate {
-    #partial switch b {
-    case .Forest:    return {{.Oak, 1.0 / 700}, {.Small_Oak, 1.0 / 110}, {.Bush, 1.0 / 400}}
-    case .Plains:    return {{.Oak, 1.0 / 3500}, {.Small_Oak, 1.0 / 900}, {.Bush, 1.0 / 350}}
-    case .Taiga:     return {{.Spruce, 1.0 / 60}, {}, {}}
-    case .Snowy:     return {{.Spruce, 1.0 / 260}, {}, {}}
-    case .Mountains: if height < world_h(150) { return {{.Spruce, 1.0 / 140}, {}, {}} }
-    case .Desert:    return {{.Cactus, 1.0 / 380}, {}, {}}
-    case .Badlands:  return {{.Cactus, 1.0 / 1600}, {}, {}}
+biome_trees :: proc(s: Terrain_Sample) -> [6]Tree_Rate {
+    #partial switch s.biome {
+    case .Forest:
+        if s.temp < 0 {
+            return {{.Birch, 1.0 / 90}, {.Medium_Oak, 1.0 / 900}, {.Small_Oak, 1.0 / 600}, {.Bush, 1.0 / 700}, {.Oak, 1.0 / 3000}, {.Fallen_Log, 1.0 / 1500}}
+        }
+        return {{.Small_Oak, 1.0 / 200}, {.Medium_Oak, 1.0 / 300}, {.Birch, 1.0 / 300}, {.Bush, 1.0 / 500}, {.Oak, 1.0 / 900}, {.Fallen_Log, 1.0 / 1500}}
+    case .Plains:
+        return {{.Bush, 1.0 / 350}, {.Small_Oak, 1.0 / 900}, {.Medium_Oak, 1.0 / 1800}, {.Oak, 1.0 / 4000}, {s.temp < 0 ? .Birch : .None, 1.0 / 2500}, {.Dead, 1.0 / 6000}}
+    case .Taiga:     return {{.Spruce, 1.0 / 66}, {.Birch, 1.0 / 900}, {.Fallen_Log, 1.0 / 1500}, {.Dead, 1.0 / 3000}, {}, {}}
+    case .Snowy:     return {{.Spruce, 1.0 / 260}, {.Dead, 1.0 / 4000}, {}, {}, {}, {}}
+    case .Mountains: if s.height < world_h(150) { return {{.Spruce, 1.0 / 140}, {.Dead, 1.0 / 5000}, {}, {}, {}, {}} }
+    case .Desert:    return {{.Cactus, 1.0 / 380}, {.Dead, 1.0 / 5000}, {}, {}, {}, {}}
+    case .Badlands:  return {{.Cactus, 1.0 / 1600}, {.Dead, 1.0 / 2500}, {}, {}, {}, {}}
     }
     return {}
 }
@@ -395,10 +402,11 @@ tree_at :: proc(lat: ^Terrain_Lattice, wx, wz: int) -> (kind: Tree_Kind, base_y:
     s := lattice_sample(lat, wx, wz)
     if s.height < SEA_LEVEL + 1 { return .None, 0 }
     acc := 0.0
-    for r in biome_trees(s.biome, s.height) {
+    for r in biome_trees(s) {
         acc += r.density / (TERRAIN_SCALE * TERRAIN_SCALE) // designed per design block of ground
         if h < acc {
             // No trees on cliffs (a probe 2 voxels out is enough).
+            if r.kind == .None { return .None, 0 }
             if r.kind != .Cactus && abs(lattice_sample(lat, wx + 3, wz).height - s.height) >= CLIFF_SLOPE + 2 { return .None, 0 }
             return r.kind, s.height
         }

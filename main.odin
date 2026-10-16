@@ -192,6 +192,7 @@ main :: proc() {
             case a == "look": bench_look = true
             case a == "ui": bench_ui = true
             case a == "landmarks": bench_landmarks = true
+            case a == "trees": bench_trees = true
             case a == "players": bench_players = true
             case a == "slimes": bench_slimes = true
             case a == "enemies": bench_enemies = true

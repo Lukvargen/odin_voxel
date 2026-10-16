@@ -145,6 +145,9 @@ Block_Type :: enum u8 {
     Seagrass      = 25,
     Coral         = 26,  // solid reef block, coloured per reef head (shader)
     Sea_Pickle    = 27,  // glowing plant: a dim light source on warm reefs
+    Birch_Log     = 28,  // white bark, dark marks
+    Birch_Leaves  = 29,
+    Autumn_Leaves = 30,  // oaks and birches in autumn patches of forest
     // Must stay below 32: the far LOD stores block ids in 5 bits.
 }
 
@@ -164,7 +167,11 @@ block_solid :: #force_inline proc(b: u8) -> bool {
 }
 
 block_is_leaves :: #force_inline proc(b: u8) -> bool {
-    return b == u8(Block_Type.Leaves) || b == u8(Block_Type.Spruce_Leaves)
+    return b == u8(Block_Type.Leaves) || b == u8(Block_Type.Spruce_Leaves) || b == u8(Block_Type.Birch_Leaves) || b == u8(Block_Type.Autumn_Leaves)
+}
+
+block_is_log :: #force_inline proc(b: u8) -> bool {
+    return b == u8(Block_Type.Log) || b == u8(Block_Type.Spruce_Log) || b == u8(Block_Type.Birch_Log)
 }
 
 // The voxel world: the resident columns, and which have edits saved. Only
@@ -690,7 +697,7 @@ place_leaves :: proc(t: ^Tree_Target, wx, wy, wz: int, block := Block_Type.Leave
 
 // Fill a filled circle of logs at height wy, centred on (cx, cz) with given radius.
 // noise_amt adds per-voxel hash-based edge roughness.
-fill_trunk_slice :: proc(t: ^Tree_Target, cx, cz: f64, wy: int, radius: f64, seed: int) {
+fill_trunk_slice :: proc(t: ^Tree_Target, cx, cz: f64, wy: int, radius: f64, seed: int, log := Block_Type.Log) {
     ir := int(math.ceil(radius)) + 1
     for dz in -ir ..= ir {
         for dx in -ir ..= ir {
@@ -700,7 +707,7 @@ fill_trunk_slice :: proc(t: ^Tree_Target, cx, cz: f64, wy: int, radius: f64, see
             wobble := tree_hash(wx, wz, seed) * 1.2 - 0.2
             r2 := f64(dx*dx + dz*dz)
             if r2 <= (radius + wobble) * (radius + wobble) {
-                set_voxel_world(t, wx, wy, wz, .Log)
+                set_voxel_world(t, wx, wy, wz, log)
             }
         }
     }
@@ -710,7 +717,7 @@ fill_trunk_slice :: proc(t: ^Tree_Target, cx, cz: f64, wy: int, radius: f64, see
 // start_r and end_r are the radius at each endpoint.
 draw_thick_segment :: proc(tgt: ^Tree_Target,
     ax, ay, az, bx, by, bz: f64,
-    start_r, end_r: f64, seed: int) {
+    start_r, end_r: f64, seed: int, log := Block_Type.Log) {
     // Reject the whole segment if its AABB misses this chunk. Pad by the
     // larger radius + wobble slack (fill_trunk_slice adds up to +1.0 wobble
     // and scans ceil(r)+1).
@@ -733,13 +740,13 @@ draw_thick_segment :: proc(tgt: ^Tree_Target,
         // Place a small filled circle perpendicular to the segment direction.
         // For simplicity, fill in XZ plane at each integer Y step.
         wy := int(math.round(py))
-        fill_trunk_slice(tgt, px, pz, wy, r, seed + i)
+        fill_trunk_slice(tgt, px, pz, wy, r, seed + i, log)
     }
 }
 
 // Place an ellipsoidal crown of leaves centred at (cx, cy, cz).
 // rx, ry, rz are the radii on each axis.
-place_crown :: proc(tgt: ^Tree_Target, cx, cy, cz: f64, rx, ry, rz: f64, seed: int) {
+place_crown :: proc(tgt: ^Tree_Target, cx, cy, cz: f64, rx, ry, rz: f64, seed: int, leaves := Block_Type.Leaves) {
     ix := int(math.ceil(rx)) + 1
     iy := int(math.ceil(ry)) + 1
     iz := int(math.ceil(rz)) + 1
@@ -755,7 +762,7 @@ place_crown :: proc(tgt: ^Tree_Target, cx, cy, cz: f64, rx, ry, rz: f64, seed: i
                     place_leaves(tgt,
                         int(math.round(cx)) + dx,
                         int(math.round(cy)) + dy,
-                        int(math.round(cz)) + dz)
+                        int(math.round(cz)) + dz, leaves)
                 }
             }
         }
@@ -763,6 +770,7 @@ place_crown :: proc(tgt: ^Tree_Target, cx, cy, cz: f64, rx, ry, rz: f64, seed: i
 }
 
 generate_tree :: proc(tgt: ^Tree_Target, bx, by, bz: int, rng_seed: int) {
+    leaves := tree_leaves(bx, bz, .Leaves)
     // Whole-tree AABB reject. The RNG is seeded purely from position, so
     // bailing here is deterministic and identical across every chunk that
     // skips this tree. This is the dominant early-out for startup cost.
@@ -867,7 +875,7 @@ generate_tree :: proc(tgt: ^Tree_Target, bx, by, bz: int, rng_seed: int) {
             // Leaf tuft at each sub-branch tip.
             place_crown(tgt, sub_end_x, sub_end_y, sub_end_z,
                 next(&rng, 4, 7), next(&rng, 3, 5), next(&rng, 4, 7),
-                rng_seed + b*111 + s*55)
+                rng_seed + b*111 + s*55, leaves)
         }
     }
 
@@ -875,7 +883,7 @@ generate_tree :: proc(tgt: ^Tree_Target, bx, by, bz: int, rng_seed: int) {
     tip_x := spine_x[2]; tip_y := spine_y[2]; tip_z := spine_z[2]
     crown_r  := next(&rng, 10, 16)
     crown_ry := next(&rng, 7, 11)
-    place_crown(tgt, tip_x, tip_y, tip_z, crown_r, crown_ry, crown_r, rng_seed + 9999)
+    place_crown(tgt, tip_x, tip_y, tip_z, crown_r, crown_ry, crown_r, rng_seed + 9999, leaves)
 }
 
 generate_tree_kind :: proc(tgt: ^Tree_Target, kind: Tree_Kind, bx, by, bz: int) {
@@ -887,7 +895,118 @@ generate_tree_kind :: proc(tgt: ^Tree_Target, kind: Tree_Kind, bx, by, bz: int) 
     case .Bush:      generate_bush(tgt, bx, by, bz, seed)
     case .Spruce:    generate_spruce(tgt, bx, by, bz, seed)
     case .Cactus:    generate_cactus(tgt, bx, by, bz, seed)
+    case .Medium_Oak: generate_medium_oak(tgt, bx, by, bz, seed)
+    case .Birch:     generate_birch(tgt, bx, by, bz, seed)
+    case .Dead:      generate_dead_tree(tgt, bx, by, bz, seed)
+    case .Fallen_Log: generate_fallen_log(tgt, bx, by, bz, seed)
     }
+}
+
+// Broadleaf trees in an autumn patch of forest turn: most of them, so a
+// patch reads as a whole but isn't uniform.
+@(private="file")
+tree_leaves :: proc(bx, bz: int, green: Block_Type) -> Block_Type {
+    p := [2]f64{f64(bx), f64(bz)} / (420 * TERRAIN_SCALE)
+    if n2(61, p) > 0.32 && tree_hash(bx, bz, 62) < 0.85 { return .Autumn_Leaves }
+    return green
+}
+
+// Between the small oak and the giant: a short thick trunk forking into a
+// few limbs under a crown of several lumps.
+generate_medium_oak :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 16, by, bz - 16, bx + 17, by + 32, bz + 17) { return }
+    rng := seed
+    leaves := tree_leaves(bx, bz, .Leaves)
+    h := tree_rand(&rng, 9, 15)
+    cx, cz := f64(bx) + 1, f64(bz) + 1
+    lean := [2]f64{tree_rand(&rng, -1.5, 1.5), tree_rand(&rng, -1.5, 1.5)}
+    draw_thick_segment(tgt, cx, f64(by), cz, cx + lean.x, f64(by) + h, cz + lean.y, 1.6, 1.0, seed)
+    top := [3]f64{cx + lean.x, f64(by) + h, cz + lean.y}
+    // The crown's lumps sit on the ends of the limbs and over the top.
+    place_crown(tgt, top.x, top.y + 2, top.z, tree_rand(&rng, 4.5, 6), tree_rand(&rng, 3.5, 4.5), tree_rand(&rng, 4.5, 6), seed + 1, leaves)
+    n := int(tree_rand(&rng, 3, 6))
+    a0 := tree_rand(&rng, 0, math.TAU)
+    for i in 0 ..< n {
+        a := a0 + f64(i) / f64(n) * math.TAU + tree_rand(&rng, -0.4, 0.4)
+        from := tree_rand(&rng, 0.55, 0.85) * h
+        l := tree_rand(&rng, 5, 9)
+        sx, sy, sz := cx + lean.x * from / h, f64(by) + from, cz + lean.y * from / h
+        ex, ey, ez := sx + math.cos(a) * l, sy + l * tree_rand(&rng, 0.4, 0.8), sz + math.sin(a) * l
+        draw_thick_segment(tgt, sx, sy, sz, ex, ey, ez, 0.9, 0.5, seed + 10 + i)
+        r := tree_rand(&rng, 3.5, 5)
+        place_crown(tgt, ex, ey + 1, ez, r, r * 0.75, r, seed + 20 + i, leaves)
+    }
+}
+
+// Birch: a tall thin white trunk under a narrow crown; often in twos or
+// threes from one spot.
+generate_birch :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 9, by, bz - 9, bx + 10, by + 34, bz + 10) { return }
+    rng := seed
+    leaves := tree_leaves(bx, bz, .Birch_Leaves)
+    stems := tree_rand(&rng, 0, 1) < 0.35 ? int(tree_rand(&rng, 2, 4)) : 1
+    for k in 0 ..< stems {
+        ox, oz := 0, 0
+        if k > 0 { ox, oz = int(tree_rand(&rng, -3, 4)), int(tree_rand(&rng, -3, 4)) }
+        h := int(tree_rand(&rng, 14, 24) * (k > 0 ? 0.8 : 1))
+        x, z := bx + ox, bz + oz
+        for y in 0 ..< h { set_voxel_world(tgt, x, by + y, z, .Birch_Log) }
+        // A twig or two sticking out of the bark.
+        for _ in 0 ..< 2 {
+            ty := by + int(tree_rand(&rng, 0.4, 0.7) * f64(h))
+            d := int(tree_rand(&rng, 0, 4))
+            DX :: [4]int{1, -1, 0, 0}
+            DZ :: [4]int{0, 0, 1, -1}
+            dxs, dzs := DX, DZ
+            dx, dz := dxs[d], dzs[d]
+            set_voxel_world(tgt, x + dx, ty, z + dz, .Birch_Log)
+        }
+        r := tree_rand(&rng, 2.6, 3.6)
+        ry := tree_rand(&rng, 5, 7)
+        place_crown(tgt, f64(x), f64(by + h) - ry * 0.45, f64(z), r, ry, r, seed + 31 + k, leaves)
+        place_crown(tgt, f64(x) + tree_rand(&rng, -1.5, 1.5), f64(by + h) - ry * 1.1, f64(z) + tree_rand(&rng, -1.5, 1.5), r * 0.8, ry * 0.45, r * 0.8, seed + 41 + k, leaves)
+    }
+}
+
+// A dead tree: a bare grey-brown trunk with a few broken limbs.
+generate_dead_tree :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 9, by, bz - 9, bx + 10, by + 24, bz + 10) { return }
+    rng := seed
+    h := tree_rand(&rng, 7, 15)
+    cx, cz := f64(bx) + 0.5, f64(bz) + 0.5
+    lean := [2]f64{tree_rand(&rng, -2, 2), tree_rand(&rng, -2, 2)}
+    draw_thick_segment(tgt, cx, f64(by), cz, cx + lean.x, f64(by) + h, cz + lean.y, h > 11 ? 1.0 : 0.6, 0.45, seed)
+    for i in 0 ..< int(tree_rand(&rng, 2, 4)) {
+        a := tree_rand(&rng, 0, math.TAU)
+        from := tree_rand(&rng, 0.45, 0.9) * h
+        l := tree_rand(&rng, 3, 7)
+        sx, sy, sz := cx + lean.x * from / h, f64(by) + from, cz + lean.y * from / h
+        draw_thick_segment(tgt, sx, sy, sz, sx + math.cos(a) * l, sy + l * tree_rand(&rng, 0.3, 0.9), sz + math.sin(a) * l, 0.45, 0.3, seed + 5 + i)
+    }
+}
+
+// A trunk lying on the forest floor, its root end a broken stump.
+generate_fallen_log :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 15, by, bz - 15, bx + 16, by + 4, bz + 16) { return }
+    rng := seed
+    a := tree_rand(&rng, 0, math.TAU)
+    l := tree_rand(&rng, 7, 14)
+    thick := tree_rand(&rng, 0, 1) < 0.4
+    log: Block_Type = tree_rand(&rng, 0, 1) < 0.3 ? .Birch_Log : .Log
+    dx, dz := math.cos(a), math.sin(a)
+    for i in 0 ..= int(l * 2) {
+        s := f64(i) * 0.5 + 2
+        x := int(math.floor(f64(bx) + 0.5 + dx * s))
+        z := int(math.floor(f64(bz) + 0.5 + dz * s))
+        g := surface_height_at(x, z)
+        if abs(g - by) > 2 { break } // over an edge: it broke off here
+        set_voxel_world(tgt, x, g, z, log)
+        if thick {
+            set_voxel_world(tgt, x, g + 1, z, log)
+            set_voxel_world(tgt, x + int(math.round(-dz)), g, z + int(math.round(dx)), log)
+        }
+    }
+    for y in 0 ..< (thick ? 3 : 2) { set_voxel_world(tgt, bx, by + y, bz, log) }
 }
 
 @(private="file")
@@ -907,9 +1026,10 @@ generate_small_oak :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
         if thick && y < h - 2 { set_voxel_world(tgt, bx + 1, by + y, bz, .Log); set_voxel_world(tgt, bx, by + y, bz + 1, .Log); set_voxel_world(tgt, bx + 1, by + y, bz + 1, .Log) }
     }
     r := tree_rand(&rng, 3.9, 5.4)
-    place_crown(tgt, f64(bx), f64(by + h), f64(bz), r, r * 0.8, r, seed + 5)
+    leaves := tree_leaves(bx, bz, .Leaves)
+    place_crown(tgt, f64(bx), f64(by + h), f64(bz), r, r * 0.8, r, seed + 5, leaves)
     place_crown(tgt, f64(bx) + tree_rand(&rng, -2.2, 2.2), f64(by + h) - 2.2, f64(bz) + tree_rand(&rng, -2.2, 2.2),
-                r * 0.8, r * 0.6, r * 0.8, seed + 6)
+                r * 0.8, r * 0.6, r * 0.8, seed + 6, leaves)
 }
 
 // A low leafy clump around a stub of trunk.
