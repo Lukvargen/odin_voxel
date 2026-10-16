@@ -925,7 +925,7 @@ float4 shade_entity(EntityHit ehit, float3 dir, float t_off) {
     // Sky + torch light of the voxel just off the surface.
     uint   lv    = sample_light(int3(floor(P + N * 0.6)));
     float3 ambient = sky_ambient() * light_curve(float(lv >> 4)) * underwater_light(P + N * 0.3) + MIN_AMBIENT;
-    float3 torch   = TORCH_LIGHT_COLOR * light_curve(float(lv & 15u));
+    float3 torch   = TORCH_LIGHT_COLOR * block_light_curve(float(lv & 15u));
 
     float3 col = albedo * (ambient + sun + torch);
 
@@ -1234,7 +1234,7 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     float  sky_level = lv.x;
     float3 uw = underwater_light(hit_point + surf_normal * 0.05);
     float3 lighting = (sky_ambient() * light_curve(sky_level) * uw + MIN_AMBIENT
-                    + TORCH_LIGHT_COLOR * light_curve(lv.y)) * face_shade(surf_normal);
+                    + TORCH_LIGHT_COLOR * block_light_curve(lv.y)) * face_shade(surf_normal);
 
     // Sun. No sky light means sealed off from the sky (caves), so the
     // shadow ray is skipped there.

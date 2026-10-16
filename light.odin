@@ -19,7 +19,7 @@ import "core:time"
 // (light_stitch_column) and relights around block edits (light_on_edit).
 
 LIGHT_MAX   :: 15
-TORCH_LIGHT :: 14
+TORCH_LIGHT :: 15
 CRYSTAL_LIGHT :: 9
 SEA_PICKLE_LIGHT :: 7
 GLOW_MUSHROOM_LIGHT :: 8

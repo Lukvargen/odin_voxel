@@ -933,6 +933,15 @@ float light_curve(float level) {
     return level > 0.0 ? pow(0.8, 15.0 - level) : 0.0;
 }
 
+// Block light (torches, glows) by level: it loses a level a block, so with
+// blocks of 2/3 m (TERRAIN_SCALE) the falloff is stretched to fade over as
+// many metres as it was designed to, easing out over the last few levels
+// instead of stopping at a hard edge.
+float block_light_curve(float level) {
+    if (level <= 0.0) return 0.0;
+    return pow(0.8, (15.0 - level) / TERRAIN_SCALE) * saturate(level / 4.0);
+}
+
 #endif // HAS_VOXEL_LIGHT
 
 #endif // VOXEL_COMMON_HLSL
