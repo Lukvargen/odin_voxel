@@ -306,12 +306,17 @@ Player_Anim :: struct {
 }
 
 player_anim_update :: proc(gs: ^Game_State, dt: f32) {
-    a := &gs.player_anim
-    v := gs.camera.velocity
+    cam := &gs.camera
+    anim_step(&gs.player_anim, cam.velocity, cam.yaw, gs.combat.sword, cam.on_ground || cam.fly_mode, dt)
+}
+
+// A walking body's turn, stride and airborne tuck, for velocity v and the
+// look yaw (degrees, camera convention).
+anim_step :: proc(a: ^Player_Anim, v: [3]f32, look_yaw: f32, sword, grounded: bool, dt: f32) {
     sp := math.sqrt(v.x * v.x + v.z * v.z)
-    if gs.combat.sword {
+    if sword {
         // Sword drawn: squared up to where you look, strafing.
-        target := -math.to_radians(gs.camera.yaw)
+        target := -math.to_radians(look_yaw)
         d := math.mod(target - a.body_yaw + 3 * math.PI, 2 * math.PI) - math.PI
         a.body_yaw += d * min(dt * 14, 1)
     } else if sp > 0.6 {
@@ -321,7 +326,7 @@ player_anim_update :: proc(gs: ^Game_State, dt: f32) {
     }
     a.walk_phase += sp * dt * 2.4
     a.amp += (clamp(sp / 5, 0, 1.3) - a.amp) * min(dt * 8, 1)
-    air: f32 = gs.camera.on_ground || gs.camera.fly_mode ? 0 : 1
+    air: f32 = grounded ? 0 : 1
     a.air += (air - a.air) * min(dt * 8, 1)
 }
 
@@ -331,6 +336,24 @@ player_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     if gs.glider.deployed || gs.glider.chase_dist < 1.0 || !ent_begin(f) { return }
     feet := gs.camera.pos - [3]f32{0, PLAYER_EYE_HEIGHT, 0}
     feet.y += gs.camera.step_visual_offset
+    sword := gs.combat.sword
+    hips := humanoid_add_parts(f, feet, a, gs.camera.yaw, gs.camera.pitch, PLAYER_TINT, right_arm = !sword)
+    if sword {
+        // The sword arm reaches for the grip, posed as in first person from
+        // a viewpoint at the eyes.
+        fwd, right, up := camera_basis(gs.camera)
+        eye := feet + [3]f32{0, 1.5, 0} + fwd * 0.15
+        shoulder := feet + basis_yaw(a.body_yaw) * (hips + [3]f32{-0.27, 0.52, 0})
+        grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
+        sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4)
+    }
+    ent_end(f)
+}
+
+// A player's body at its feet, posed by its animation, the head turned
+// toward where it looks (degrees, camera convention); the right arm too
+// unless the caller poses it. Returns the hips, in body space.
+humanoid_add_parts :: proc(f: ^Ent_Frame, feet: [3]f32, a: ^Player_Anim, look_yaw, look_pitch: f32, tint: [3]f32, right_arm: bool) -> (hips: [3]f32) {
     rot := basis_yaw(a.body_yaw)
     sw := 0.7 * a.amp * math.sin(a.walk_phase)
     bob := 0.04 * a.amp * math.abs(math.cos(a.walk_phase))
@@ -338,28 +361,20 @@ player_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     leg_l := sw * (1 - a.air) - 0.5 * a.air
     leg_r := -sw * (1 - a.air) + 0.25 * a.air
     arm_out := 0.08 + 0.5 * a.air
-    hips := [3]f32{0, 0.74 + bob, 0}
-    attach(f, .Hum_Leg, feet, rot, 1, hips + {0.1, 0, 0}, basis_rot_x(leg_l), PLAYER_TINT)
-    attach(f, .Hum_Leg, feet, rot, 1, hips + {-0.1, 0, 0}, basis_rot_x(leg_r), PLAYER_TINT)
-    attach(f, .Hum_Torso, feet, rot, 1, hips, basis_rot_x(-0.06 * a.amp), PLAYER_TINT)
-    attach(f, .Hum_Arm, feet, rot, 1, hips + {0.27, 0.52, 0}, basis_rot_z(arm_out) * basis_rot_x(-0.8 * sw), PLAYER_TINT)
-    if gs.combat.sword {
-        // The sword arm reaches for the grip, posed as in first person from
-        // a viewpoint at the eyes.
-        fwd, right, up := camera_basis(gs.camera)
-        eye := feet + [3]f32{0, 1.5, 0} + fwd * 0.15
-        shoulder := feet + rot * (hips + [3]f32{-0.27, 0.52, 0})
-        grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
-        sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4)
-    } else {
-        attach(f, .Hum_Arm, feet, rot, 1, hips + {-0.27, 0.52, 0}, basis_rot_z(-arm_out) * basis_rot_x(0.8 * sw), PLAYER_TINT)
+    hips = {0, 0.74 + bob, 0}
+    attach(f, .Hum_Leg, feet, rot, 1, hips + {0.1, 0, 0}, basis_rot_x(leg_l), tint)
+    attach(f, .Hum_Leg, feet, rot, 1, hips + {-0.1, 0, 0}, basis_rot_x(leg_r), tint)
+    attach(f, .Hum_Torso, feet, rot, 1, hips, basis_rot_x(-0.06 * a.amp), tint)
+    attach(f, .Hum_Arm, feet, rot, 1, hips + {0.27, 0.52, 0}, basis_rot_z(arm_out) * basis_rot_x(-0.8 * sw), tint)
+    if right_arm {
+        attach(f, .Hum_Arm, feet, rot, 1, hips + {-0.27, 0.52, 0}, basis_rot_z(-arm_out) * basis_rot_x(0.8 * sw), tint)
     }
-    // Head follows the camera a little.
-    cam_yaw := -math.to_radians(gs.camera.yaw)
-    look := clamp(math.mod(cam_yaw - a.body_yaw + 3 * math.PI, 2 * math.PI) - math.PI, -0.9, 0.9)
-    pitch := clamp(-math.to_radians(gs.camera.pitch) * 0.6, -0.5, 0.5)
-    attach(f, .Hum_Head, feet, rot, 1, hips + {0, 0.58, 0}, basis_yaw(look) * basis_rot_x(pitch), PLAYER_TINT)
-    ent_end(f)
+    // Head follows the look a little.
+    yaw := -math.to_radians(look_yaw)
+    look := clamp(math.mod(yaw - a.body_yaw + 3 * math.PI, 2 * math.PI) - math.PI, -0.9, 0.9)
+    pitch := clamp(-math.to_radians(look_pitch) * 0.6, -0.5, 0.5)
+    attach(f, .Hum_Head, feet, rot, 1, hips + {0, 0.58, 0}, basis_yaw(look) * basis_rot_x(pitch), tint)
+    return
 }
 
 // A basis whose -y axis points along d (limbs hang along -y).

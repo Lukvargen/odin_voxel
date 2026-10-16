@@ -22,6 +22,8 @@ Player :: struct {
     pos:        [3]f32, // eye, as the camera's
     velocity:   [3]f32,
     yaw:        f32,    // degrees, camera convention
+    pitch:      f32,    // degrees, camera convention
+    on_ground:  bool,
     fly_mode:   bool,   // nothing hunts a flying player
     sneaking:   bool,
     sprinting:  bool,

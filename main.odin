@@ -5,6 +5,7 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import enet "vendor:ENet"
 import SDL "vendor:sdl3"
 
 DOUBLE_TAP_MS :: u64(300)
@@ -14,8 +15,9 @@ Game_State :: struct {
     // The voxels this client sees (world.odin). An in-process server shares
     // them: sim.world points here.
     using voxels: World,
-    server: Server,   // in-process: singleplayer, or hosting (server.odin)
-    loop:   Loopback, // this client's link to it (net.odin)
+    server: Server,     // in-process: singleplayer, or hosting (server.odin)
+    loop:   Loopback,   // this client's link to it (net.odin)
+    net:    Client_Net, // or to a server elsewhere, and the other players (client.odin)
 
     // SDL3
     window:     ^SDL.Window,
@@ -138,6 +140,8 @@ Game_State :: struct {
 main :: proc() {
     gs: Game_State
     gs.sim.world = &gs.voxels // singleplayer: the simulation plays in the client's world
+    net_host, net_port, join_to := false, NET_PORT, ""
+    start_yaw: f32
     server_init(&gs.server, &gs.sim, &gs.loop)
     bench := len(os.args) > 1 && os.args[1] == "bench"
     if len(os.args) > 1 && os.args[1] == "sounds" {
@@ -199,16 +203,35 @@ main :: proc() {
         }
     } else {
         // [world=<name>]: play the world saved in saves/<name> (default "world").
+        // [host] [port=<n>]: let players elsewhere join (UDP port, default NET_PORT).
+        // [join=<address>[:<port>]]: play on someone's server instead.
+        // [at=<x>,<z>] [yaw=<degrees>]: start there, facing that way.
         for a in os.args[1:] {
             switch {
+            case strings.has_prefix(a, "at="):
+                xz := strings.split(a[3:], ",", context.temp_allocator)
+                if len(xz) == 2 {
+                    x, okx := strconv.parse_int(xz[0])
+                    z, okz := strconv.parse_int(xz[1])
+                    if okx && okz { gs.camera.pos = {f32(x) + 0.5, f32(surface_height_at(x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5} }
+                }
+            case strings.has_prefix(a, "yaw="):
+                start_yaw, _ = strconv.parse_f32(a[4:])
             case strings.has_prefix(a, "world="):
                 save_dir = strings.concatenate({"saves/", a[6:]})
+            case a == "host":
+                net_host = true
+            case strings.has_prefix(a, "port="):
+                p, ok := strconv.parse_int(a[5:])
+                if ok && p > 0 && p < 65536 { net_port = p } else { fmt.eprintln("Bad port:", a[5:]) }
+            case strings.has_prefix(a, "join="):
+                join_to = a[5:]
             case:
                 fmt.eprintln("Unknown argument:", a)
             }
         }
     }
-    gs.camera.yaw     = 0
+    gs.camera.yaw     = start_yaw
     gs.camera.pitch   = -20
     gs.camera.fly_mode = false // start in walk mode
     gs.camera.fov_scale = 1
@@ -240,7 +263,7 @@ main :: proc() {
     gs.light_dirty = make([dynamic]int)
     defer delete(gs.light_dirty)
     defer delete(gs.stitch_queue)
-    if !bench { save_init(&gs) }
+    if !bench && join_to == "" { save_init(&gs) } // joined: the world (and its saves) is the server's
     generate_world(&gs)
     gpu_init(&gs)
     defer gpu_destroy(&gs)
@@ -256,6 +279,21 @@ main :: proc() {
     defer ui_shutdown(&gs)
     audio_init() // after the bench return: bench runs stay silent
     defer audio_shutdown()
+
+    // Multiplayer: open our server to others, or join someone else's.
+    networked := net_host || join_to != ""
+    if networked && enet.initialize() != 0 {
+        fmt.eprintln("Network: ENet failed to start")
+        return
+    }
+    defer if networked { enet.deinitialize() }
+    if join_to != "" {
+        if !client_join(&gs, join_to) { return }
+    } else if net_host {
+        server_host(&gs.server, net_port) // can't open the port: play on alone
+    }
+    defer client_leave(&gs)
+    defer server_shutdown(&gs.server)
     gs_ui_left_pressed_state = &gs.ui
 
     // Lock mouse at start
@@ -477,8 +515,8 @@ main :: proc() {
         // (and its sword's hits, sent above), the server steps, and the
         // client plays what happened.
         client_send_input(&gs)
-        server_step(&gs.server, dt)
-        client_receive(&gs)
+        if !client_joined(&gs) { server_step(&gs.server, dt) }
+        client_receive(&gs, dt)
         fx_update(&gs, fx_dt)
         glider_view_update(&gs, dt)
         combat_view_update(&gs, dt)

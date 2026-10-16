@@ -60,7 +60,7 @@ sim_event_play :: proc(gs: ^Game_State, ev: Sim_Event) {
         splat(fx, c + {0, 0.2, 0}, {0.36, 0.27, 0.18}, {0, 1, 0}, 8, 0.4)
 
     case .Player_Hurt:
-        if int(ev.player) == LOCAL_PLAYER { combat_take_hurt(gs, ev.result, ev.amount, ev.vec) }
+        if int(ev.player) == gs.net.slot { combat_take_hurt(gs, ev.result, ev.amount, ev.vec) }
     }
 }
 
