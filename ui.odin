@@ -1619,7 +1619,7 @@ menu_layout :: proc(gs: ^Game_State) {
         custom = deco(.Glass, radius = 12),
     }) {
         if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childAlignment = {y = .Bottom}}}) {
-            text("Paused", COLOR_ACCENT, 28, FONT_ID_TITLE)
+            text(game_paused(gs) ? "Paused" : "Menu", COLOR_ACCENT, 28, FONT_ID_TITLE)
             spacer()
             p := gs.camera.pos
             text(fmt.tprintf("%s   %d m", biome_name(ui.biome), int(p.y - PLAYER_EYE_HEIGHT)), COLOR_TEXT_DIM, 14)

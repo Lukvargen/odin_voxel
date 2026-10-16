@@ -512,44 +512,49 @@ main :: proc() {
             build_wheel(&gs, wheel_dy > 0 ? 1 : -1, held_mods())
         }
 
+        // Playing alone, the pause menu stops everything; with others about
+        // (hosting or joined) nothing stops, and a menu or the inventory only
+        // takes the keys and mouse: the player still falls, glides, is hit.
+        play_dt := game_paused(&gs) ? 0 : dt
+
         // A solid hit freezes the world for a few frames (hit stop); the
         // mouse still looks around.
-        fx_dt := combat_fx_dt(&gs, dt)
+        fx_dt := combat_fx_dt(&gs, play_dt)
         combat_in := Combat_Input{
             attack = gs.left_pressed, attack_held = gs.left_held, special = gs.right_pressed, dodge = dodge_pressed,
             block = bool(kb[SDL.Scancode.F]),
             move = {f32(int(move_right)) - f32(int(move_left)), f32(int(move_fwd)) - f32(int(move_back))},
         }
         if !gs.mouse_locked { combat_in = {} }
-        combat_pre_update(&gs, combat_in, dt)
+        combat_pre_update(&gs, combat_in, play_dt)
 
-        if gs.mouse_locked {
+        if play_dt > 0 {
             if gs.glider.deployed {
                 // W pulls the bar in (fast), S flares (brake), A/D lean, Ctrl looks around.
-                glider_update(&gs, -mouse_dx, mouse_dy, dt,
-                    move_fwd, move_back, move_left, move_right, ctrl_held)
+                glider_update(&gs, -mouse_dx, mouse_dy, play_dt,
+                    move_fwd, move_back, move_left, move_right, ctrl_held && gs.mouse_locked)
             } else {
-                camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, dt,
+                camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, play_dt,
                     move_fwd, move_back, move_left, move_right, gs.jump_pressed,
                     sprint, sneak, ultra)
             }
         }
-        combat_post_update(&gs, dt)
+        combat_post_update(&gs, play_dt)
 
         // The world moves on: this client tells the server about its player
         // (and its sword's hits, sent above), the server steps, and the
         // client plays what happened.
         client_send_input(&gs)
-        if !client_joined(&gs) { server_step(&gs.server, dt) }
-        client_receive(&gs, dt)
+        if !client_joined(&gs) { server_step(&gs.server, play_dt) }
+        client_receive(&gs, play_dt)
         fx_update(&gs, fx_dt)
-        glider_view_update(&gs, dt)
-        combat_view_update(&gs, dt)
+        glider_view_update(&gs, play_dt)
+        combat_view_update(&gs, play_dt)
 
         // Underground-ness (0 surface .. 1 deep below): drives cave darkness
         // and cave fog in the shaders. Smoothed ~0.5 s so moving through a
         // cave mouth reads as eye adaptation instead of a pop.
-        gs.cave_factor += (cave_factor_target(&gs) - gs.cave_factor) * min(1.0, dt * 2.0)
+        gs.cave_factor += (cave_factor_target(&gs) - gs.cave_factor) * min(1.0, play_dt * 2.0)
 
         // Enqueue new chunks when crossing a chunk boundary
         new_pc := [3]int{
@@ -572,7 +577,7 @@ main :: proc() {
         stitch_pending_columns(&gs)
 
         // Edits with the current tool (build_tools.odin).
-        build_update(&gs, dt)
+        build_update(&gs, play_dt)
 
         flush_gpu_uploads(&gs)
         entities_update(&gs, fx_dt)
@@ -592,6 +597,11 @@ main :: proc() {
 }
 
 HOTBAR_SLOTS :: 9
+
+// Whether the game stands still: only playing alone, in the pause menu.
+game_paused :: proc(gs: ^Game_State) -> bool {
+    return gs.ui.screen == .Pause && !client_joined(gs) && !session_hosting(gs)
+}
 // Underground-ness of the camera, 0 at the surface .. 1 from 24 voxels down.
 cave_factor_target :: proc(gs: ^Game_State) -> f32 {
     surface := surface_height_at(int(gs.camera.pos.x), int(gs.camera.pos.z))
