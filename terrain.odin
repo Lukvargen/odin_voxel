@@ -14,16 +14,33 @@ import "core:math/noise"
 // Biomes come from temperature (cooler with altitude) and moisture, plus
 // height (ocean, beach, snow line) and slope (cliffs are bare rock).
 //
+// The shapes are designed in "design blocks" and built TERRAIN_SCALE times
+// finer: a point samples the fields at its position / TERRAIN_SCALE, and
+// heights stretch by TERRAIN_SCALE about the sea (world_height). Slopes
+// come out the same per block; the design's height thresholds (biomes) stay
+// in design blocks, the ones on world heights are converted.
+//
 // Fields that vary over hundreds of voxels are evaluated on a world-aligned
 // lattice of COARSE voxels and bilinearly interpolated (Coarse_Grid): a
 // column needs 9 lattice points instead of 100 full evaluations. The same
 // lattice and weights are used everywhere, so a column, a far tile and a
 // single-point query agree exactly.
 
-SEA_LEVEL   :: 24  // open space below this y is water
-SNOW_LINE   :: 168 // surface at or above this is snow-capped
-TERRAIN_MAX :: 228 // height cap: peak + spruce must fit below WORLD_Y_MAX
-COARSE      :: 8   // coarse lattice spacing in voxels
+SEA_LEVEL     :: 24  // open space below this y is water
+TERRAIN_SCALE :: 1.5 // world blocks per design block (the player is ~2.8 blocks tall)
+SNOW_LINE     :: 168 // design blocks: surface at or above this is snow-capped
+TERRAIN_MAX   :: 470 // world height cap: the highest peaks stay below WORLD_Y_MAX
+COARSE        :: 8   // coarse lattice spacing in voxels
+
+// A design height (blocks, absolute) in world blocks.
+world_height :: #force_inline proc "contextless" (h: f64) -> f64 {
+    return f64(SEA_LEVEL) + (h - f64(SEA_LEVEL)) * TERRAIN_SCALE
+}
+
+// The same for integer thresholds.
+world_h :: #force_inline proc "contextless" (h: int) -> int {
+    return SEA_LEVEL + int(math.floor(f64(h - SEA_LEVEL) * TERRAIN_SCALE))
+}
 
 Biome :: enum u8 {
     Ocean, Beach, River, Plains, Forest, Taiga, Snowy, Desert, Badlands, Mountains, Peaks,
@@ -98,7 +115,7 @@ continent_at :: proc(p: [2]f64) -> (cont: f64, wp: [2]f64) {
 }
 
 coarse_fields :: proc(lx, lz: int) -> Coarse_Fields {
-    p := [2]f64{f64(lx * COARSE), f64(lz * COARSE)}
+    p := [2]f64{f64(lx * COARSE), f64(lz * COARSE)} / TERRAIN_SCALE // design blocks
     c: Coarse_Fields
     wp: [2]f64
     c.cont, wp = continent_at(p)
@@ -155,7 +172,7 @@ coarse_lerp :: proc(cell: ^Coarse_Cell, fx, fz: f64) -> Coarse_Fields {
 terrain_from_cell :: proc(cell: ^Coarse_Cell, wx, wz: int) -> Terrain_Sample {
     lx := wx >> 3; lz := wz >> 3 // COARSE == 8
     f := coarse_lerp(cell, f64(wx - lx * COARSE) / COARSE, f64(wz - lz * COARSE) / COARSE)
-    p := [2]f64{f64(wx), f64(wz)}
+    p := [2]f64{f64(wx), f64(wz)} / TERRAIN_SCALE // design blocks
 
     cont, _ := continent_at(p)
     land   := smooth(-0.05, 0.12, cont)
@@ -166,11 +183,11 @@ terrain_from_cell :: proc(cell: ^Coarse_Cell, wx, wz: int) -> Terrain_Sample {
         // A broad uplift under ridged peaks, so ranges are massifs rather
         // than a web of thin ridges.
         r := ridged(13, p / 700, 4)
-        h += f.mountain * (55 * f.mountain + r * r * 150)
+        h += f.mountain * (55 * f.mountain + r * r * 200)
     }
     h += detail * 1.2
     // Soft cap: the highest peaks are compressed instead of flattened.
-    if h > 180 { h = 180 + (h - 180) * 0.55 }
+    if h > 200 { h = 200 + (h - 200) * 0.8 }
 
     // Badlands: flat-topped mesas with steep terraced sides.
     if f.badlands > 0.001 {
@@ -201,22 +218,23 @@ terrain_from_cell :: proc(cell: ^Coarse_Cell, wx, wz: int) -> Terrain_Sample {
     }
 
     s := Terrain_Sample{
-        height   = clamp(int(math.floor(h)), WORLD_Y_MIN + 8, TERRAIN_MAX),
+        height   = clamp(int(math.floor(world_height(h))), WORLD_Y_MIN + 8, TERRAIN_MAX),
         moist    = f.moist + detail * 0.04,
         mountain = f.mountain,
         detail   = detail,
     }
     s.temp = f.temp + detail * 0.04 - max(0, h - f64(SEA_LEVEL) - 50) / 160
 
-    // Biome.
+    // Biome, by the design height.
+    dh := int(math.floor(h))
     switch {
     case s.height < SEA_LEVEL - 1:
         s.biome = river > 0.5 && land > 0.5 ? .River : .Ocean
-    case s.height <= SEA_LEVEL + 1 && f.mountain < 0.3:
+    case dh <= SEA_LEVEL + 1 && f.mountain < 0.3:
         s.biome = river > 0.5 ? .River : .Beach
-    case s.height >= SNOW_LINE + int(detail * 6):
+    case dh >= SNOW_LINE + int(detail * 6):
         s.biome = .Peaks
-    case f.mountain > 0.45 && s.height > 118:
+    case f.mountain > 0.45 && dh > 118:
         s.biome = .Mountains
     case s.temp < -0.45:
         s.biome = .Snowy
@@ -304,11 +322,19 @@ Surface_Layers :: struct {
 CLIFF_SLOPE :: 3 // height step at which a slope shows bare rock
 
 surface_layers :: proc(s: Terrain_Sample, slope: int) -> Surface_Layers {
+    l := surface_layers_design(s, slope)
+    if l.filler_depth > 1 { l.filler_depth = int(math.round(f64(l.filler_depth) * TERRAIN_SCALE)) }
+    return l
+}
+
+// The layers in design blocks.
+@(private="file")
+surface_layers_design :: proc(s: Terrain_Sample, slope: int) -> Surface_Layers {
     frozen := s.temp < -0.75
     cliff := slope >= CLIFF_SLOPE
     #partial switch s.biome {
     case .Ocean, .River:
-        if s.height >= SEA_LEVEL - 6 || s.biome == .River {
+        if s.height >= world_h(SEA_LEVEL - 6) || s.biome == .River {
             return {top = frozen ? .Gravel : .Sand, filler = .Sand, filler_depth = 3, frozen = frozen}
         }
         return {top = s.detail > 0.1 ? .Sand : .Gravel, filler = .Gravel, filler_depth = 2, frozen = frozen}
@@ -319,7 +345,7 @@ surface_layers :: proc(s: Terrain_Sample, slope: int) -> Surface_Layers {
         if slope >= 5 { return {top = .Weathered_Stone, filler = .Stone, filler_depth = 1} }
         return {top = .Snow, filler = .Stone, filler_depth = 1}
     case .Mountains:
-        if cliff || s.height > 145 { return {top = .Weathered_Stone, filler = .Stone, filler_depth = 1} }
+        if cliff || s.height > world_h(145) { return {top = .Weathered_Stone, filler = .Stone, filler_depth = 1} }
         if s.detail > 0.35 { return {top = .Gravel, filler = .Stone, filler_depth = 1} }
         return {top = .Grass, filler = .Dirt, filler_depth = 2}
     case .Badlands:
@@ -342,7 +368,7 @@ Tree_Kind :: enum u8 { None, Oak, Small_Oak, Bush, Spruce, Cactus }
 // Tree densities (trees per voxel of ground) by biome. A candidate spot is
 // rejected by its hash against the densest biome before any terrain is
 // sampled, so sparse biomes cost almost nothing.
-TREE_MAX_DENSITY :: 1.0 / 60.0
+TREE_MAX_DENSITY :: 1.0 / 60.0 / (TERRAIN_SCALE * TERRAIN_SCALE) // per world block
 
 @(private="file")
 Tree_Rate :: struct { kind: Tree_Kind, density: f64 }
@@ -354,7 +380,7 @@ biome_trees :: proc(b: Biome, height: int) -> [3]Tree_Rate {
     case .Plains:    return {{.Oak, 1.0 / 3500}, {.Small_Oak, 1.0 / 900}, {.Bush, 1.0 / 350}}
     case .Taiga:     return {{.Spruce, 1.0 / 60}, {}, {}}
     case .Snowy:     return {{.Spruce, 1.0 / 260}, {}, {}}
-    case .Mountains: if height < 150 { return {{.Spruce, 1.0 / 140}, {}, {}} }
+    case .Mountains: if height < world_h(150) { return {{.Spruce, 1.0 / 140}, {}, {}} }
     case .Desert:    return {{.Cactus, 1.0 / 380}, {}, {}}
     case .Badlands:  return {{.Cactus, 1.0 / 1600}, {}, {}}
     }
@@ -370,10 +396,10 @@ tree_at :: proc(lat: ^Terrain_Lattice, wx, wz: int) -> (kind: Tree_Kind, base_y:
     if s.height < SEA_LEVEL + 1 { return .None, 0 }
     acc := 0.0
     for r in biome_trees(s.biome, s.height) {
-        acc += r.density
+        acc += r.density / (TERRAIN_SCALE * TERRAIN_SCALE) // designed per design block of ground
         if h < acc {
             // No trees on cliffs (a probe 2 voxels out is enough).
-            if r.kind != .Cactus && abs(lattice_sample(lat, wx + 2, wz).height - s.height) >= CLIFF_SLOPE + 1 { return .None, 0 }
+            if r.kind != .Cactus && abs(lattice_sample(lat, wx + 3, wz).height - s.height) >= CLIFF_SLOPE + 2 { return .None, 0 }
             return r.kind, s.height
         }
     }
@@ -399,9 +425,9 @@ ore_at :: proc(wx, wy, wz: int) -> Block_Type {
     r := f64(h & 0xFFFF) / 65536.0
     kind: Block_Type
     switch {
-    case r < 0.045 && wy < 140: kind = .Coal_Ore
-    case r < 0.062 && wy < 40:  kind = .Iron_Ore
-    case r < 0.068 && wy < -8:  kind = .Gold_Ore
+    case r < 0.045 && wy < world_h(140): kind = .Coal_Ore
+    case r < 0.062 && wy < world_h(40):  kind = .Iron_Ore
+    case r < 0.068 && wy < world_h(-8):  kind = .Gold_Ore
     case: return .Stone
     }
     // Blob centre inside the cell, radius^2 2..3.
@@ -416,13 +442,13 @@ ore_at :: proc(wx, wy, wz: int) -> Block_Type {
 
 // A dry spot near the origin, searched outward in rings.
 find_spawn :: proc() -> [3]f32 {
-    for r := 0; r < 4000; r += 48 {
+    for r := 0; r < 6000; r += 48 {
         steps := max(1, r / 16)
         for i in 0 ..< steps {
             a := f64(i) / f64(steps) * math.TAU
             x := int(math.cos(a) * f64(r)); z := int(math.sin(a) * f64(r))
             s := terrain_at(x, z)
-            if s.height > SEA_LEVEL + 2 && s.height < 110 && s.biome != .Beach {
+            if s.height > SEA_LEVEL + 3 && s.height < world_h(110) && s.biome != .Beach {
                 return {f32(x) + 0.5, f32(s.height) + 3, f32(z) + 0.5}
             }
         }

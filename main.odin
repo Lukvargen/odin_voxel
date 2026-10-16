@@ -147,6 +147,13 @@ main :: proc() {
     start_at: bool // at= given: start there, not where we were last
     server_init(&gs.server, &gs.sim, &gs.loop)
     bench := len(os.args) > 1 && os.args[1] == "bench"
+    if len(os.args) > 1 && os.args[1] == "map" { // terrain from above (terrain_map.odin)
+        size, step := 1024, 8
+        if len(os.args) > 3 { size, _ = strconv.parse_int(os.args[3]) }
+        if len(os.args) > 4 { step, _ = strconv.parse_int(os.args[4]) }
+        terrain_map_export(len(os.args) > 2 ? os.args[2] : "map.png", max(size, 16), max(step, 1))
+        return
+    }
     if len(os.args) > 1 && os.args[1] == "sounds" {
         audio_export(len(os.args) > 2 ? os.args[2] : "sounds")
         return

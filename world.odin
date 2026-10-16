@@ -255,9 +255,9 @@ LOAD_RADIUS_Y   :: 7
 // 3D-noise now runs over a ~160-voxel band instead of ~320, ~halving it,
 // with zero new control flow / streaming risk. Deep digging hits solid stone
 // below -64 (acceptable; deeper caves would need on-demand vertical gen).
-CAVE_FLOOR_Y    :: -64
-CAVE_CEIL_Y     :: 110          // mountains are solid above this (ravines still cut in)
-CAVE_TOP_MARGIN :: 6            // keep caves this far below the surface
+CAVE_FLOOR_Y    :: -104         // = world_h(-61)
+CAVE_CEIL_Y     :: 153          // = world_h(110): mountains are solid above this (ravines still cut in)
+CAVE_TOP_MARGIN :: 9            // keep caves this far below the surface
 CAVE_THRESHOLD  :: 0.32         // higher = fewer/smaller caves
 
 // Floor division — rounds toward -inf, unlike Odin's / which truncates toward zero.
@@ -545,7 +545,7 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
                             b = l.frozen && wy == SEA_LEVEL - 1 ? .Ice : .Water
                         }
                     case wy > CAVE_FLOOR_Y && wy < cave_top &&
-                         noise.noise_3d_improve_xy(7, {f64(gx + x) * 0.04, f64(wy) * 0.05, f64(gz + z) * 0.04}) > CAVE_THRESHOLD:
+                         noise.noise_3d_improve_xy(7, {f64(gx + x) * (0.04 / TERRAIN_SCALE), f64(wy) * (0.05 / TERRAIN_SCALE), f64(gz + z) * (0.04 / TERRAIN_SCALE)}) > CAVE_THRESHOLD:
                         // cave: air
                     case wy == h - 1:
                         b = l.top
@@ -861,34 +861,38 @@ tree_rand :: proc(rng: ^int, lo, hi: f64) -> f64 {
     return lo + tree_hash(rng^, rng^ * 7, 13) * (hi - lo)
 }
 
-// A Minecraft-sized oak: a one-voxel trunk and a lumpy round crown.
+// A small oak: a thin trunk and a lumpy round crown.
 generate_small_oak :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
-    if !aabb_hits_chunk(tgt, bx - 6, by, bz - 6, bx + 6, by + 16, bz + 6) { return }
+    if !aabb_hits_chunk(tgt, bx - 9, by, bz - 9, bx + 9, by + 24, bz + 9) { return }
     rng := seed
-    h := int(tree_rand(&rng, 5, 9))
-    for y in 0 ..< h { set_voxel_world(tgt, bx, by + y, bz, .Log) }
-    r := tree_rand(&rng, 2.6, 3.6)
+    h := int(tree_rand(&rng, 8, 14))
+    thick := tree_rand(&rng, 0, 1) < 0.5
+    for y in 0 ..< h {
+        set_voxel_world(tgt, bx, by + y, bz, .Log)
+        if thick && y < h - 2 { set_voxel_world(tgt, bx + 1, by + y, bz, .Log); set_voxel_world(tgt, bx, by + y, bz + 1, .Log); set_voxel_world(tgt, bx + 1, by + y, bz + 1, .Log) }
+    }
+    r := tree_rand(&rng, 3.9, 5.4)
     place_crown(tgt, f64(bx), f64(by + h), f64(bz), r, r * 0.8, r, seed + 5)
-    place_crown(tgt, f64(bx) + tree_rand(&rng, -1.5, 1.5), f64(by + h) - 1.5, f64(bz) + tree_rand(&rng, -1.5, 1.5),
+    place_crown(tgt, f64(bx) + tree_rand(&rng, -2.2, 2.2), f64(by + h) - 2.2, f64(bz) + tree_rand(&rng, -2.2, 2.2),
                 r * 0.8, r * 0.6, r * 0.8, seed + 6)
 }
 
 // A low leafy clump around a stub of trunk.
 generate_bush :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
-    if !aabb_hits_chunk(tgt, bx - 4, by, bz - 4, bx + 4, by + 4, bz + 4) { return }
+    if !aabb_hits_chunk(tgt, bx - 6, by, bz - 6, bx + 6, by + 6, bz + 6) { return }
     rng := seed
     set_voxel_world(tgt, bx, by, bz, .Log)
-    r := tree_rand(&rng, 1.6, 2.4)
-    place_crown(tgt, f64(bx), f64(by) + 0.8, f64(bz), r, r * 0.65, r, seed + 3)
+    r := tree_rand(&rng, 2.4, 3.6)
+    place_crown(tgt, f64(bx), f64(by) + 1.2, f64(bz), r, r * 0.65, r, seed + 3)
 }
 
 // Spruce: a straight trunk (2x2 when tall) under tiers of needles that
 // narrow toward a pointed top.
 generate_spruce :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
-    if !aabb_hits_chunk(tgt, bx - 7, by, bz - 7, bx + 8, by + 30, bz + 8) { return }
+    if !aabb_hits_chunk(tgt, bx - 10, by, bz - 10, bx + 11, by + 42, bz + 11) { return }
     rng := seed
-    h := int(tree_rand(&rng, 9, 24))
-    thick := h >= 17
+    h := int(tree_rand(&rng, 13, 36))
+    thick := h >= 22
     for y in 0 ..< h {
         set_voxel_world(tgt, bx, by + y, bz, .Spruce_Log)
         if thick {
@@ -899,15 +903,15 @@ generate_spruce :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
     }
     cx := f64(bx) + (thick ? 1.0 : 0.5)
     cz := f64(bz) + (thick ? 1.0 : 0.5)
-    y0   := by + int(tree_rand(&rng, 2, 4))
+    y0   := by + int(tree_rand(&rng, 3, 6))
     top  := by + h + 1
-    rmax := tree_rand(&rng, 3.2, 4.2) + (thick ? 1.5 : 0)
-    tier := tree_rand(&rng, 2.6, 3.6)
+    rmax := tree_rand(&rng, 4.8, 6.3) + (thick ? 2.0 : 0)
+    tier := tree_rand(&rng, 3.9, 5.4)
     for y in y0 ..= top {
         f := f64(y - y0) / f64(top - y0)   // 0 at the lowest tier .. 1 at the tip
         k := f64(top - y) / tier
         in_tier := k - math.floor(k)       // 0 at a tier's top .. 1 at its flared base
-        r  := rmax * (1 - f) * (0.55 + 0.45 * in_tier) + (thick ? 1.1 : 0.6)
+        r  := rmax * (1 - f) * (0.55 + 0.45 * in_tier) + (thick ? 1.4 : 0.9)
         ir := int(math.ceil(r)) + 1
         for dz in -ir ..= ir {
             for dx in -ir ..= ir {
@@ -927,9 +931,9 @@ generate_spruce :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
 
 // Cactus: a green column, sometimes with an arm or two.
 generate_cactus :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
-    if !aabb_hits_chunk(tgt, bx - 3, by, bz - 3, bx + 3, by + 8, bz + 3) { return }
+    if !aabb_hits_chunk(tgt, bx - 4, by, bz - 4, bx + 4, by + 12, bz + 4) { return }
     rng := seed
-    h := int(tree_rand(&rng, 3, 7))
+    h := int(tree_rand(&rng, 5, 11))
     for y in 0 ..< h { set_voxel_world(tgt, bx, by + y, bz, .Cactus) }
     DIRS :: [4][2]int{{1, 0}, {0, 1}, {-1, 0}, {0, -1}}
     dirs := DIRS
@@ -939,7 +943,7 @@ generate_cactus :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
         d := dirs[(first + a * 2) & 3] // arms on opposite sides
         ay := by + int(tree_rand(&rng, 1, f64(h - 2)))
         set_voxel_world(tgt, bx + d.x, ay, bz + d.y, .Cactus)
-        arm := int(tree_rand(&rng, 1, 3))
+        arm := int(tree_rand(&rng, 2, 5))
         for y in 0 ..= arm { set_voxel_world(tgt, bx + 2*d.x, ay + y, bz + 2*d.y, .Cactus) }
     }
 }
