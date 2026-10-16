@@ -177,6 +177,7 @@ Msg_Player_View :: struct {
 Msg_Clock :: struct {
     hour:   f32,
     paused: bool,
+    time:   f64, // seconds the server has run: the views after it in its packet are of this moment (replica.odin)
 }
 
 // Whether a kind goes on the reliable channel; only states go unreliable.

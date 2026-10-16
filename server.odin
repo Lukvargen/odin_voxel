@@ -39,6 +39,7 @@ Server :: struct {
     local_out:    Outbox,    // to the local client, moved to link.to_client at the flush
     away:         map[[2]int]^Column, // columns edited this step that aren't loaded: saved, then freed
     names:        [MAX_PLAYERS]Msg_Text, // what each player is called (empty: not said yet)
+    started:      time.Tick, // Msg_Clock.time counts from here
     // Characters, by name (player_save.odin): those seen this session, and
     // what each slot's client last said it carries.
     records:      map[string]Player_Record,
@@ -53,7 +54,7 @@ Remote :: struct {
 }
 
 server_init :: proc(srv: ^Server, sim: ^Sim, link: ^Loopback) {
-    srv^ = {sim = sim, link = link, local_player = LOCAL_PLAYER}
+    srv^ = {sim = sim, link = link, local_player = LOCAL_PLAYER, started = time.tick_now()}
     sim.world = &srv.world
 }
 
@@ -466,7 +467,7 @@ server_flush :: proc(srv: ^Server, dt: f32) {
     srv.view_timer -= dt
     if srv.view_timer <= 0 {
         srv.view_timer = 1.0 / VIEW_RATE
-        server_broadcast(srv, .Clock, Msg_Clock{hour = sim.day.hour, paused = sim.day.paused})
+        server_broadcast(srv, .Clock, Msg_Clock{hour = sim.day.hour, paused = sim.day.paused, time = time.duration_seconds(time.tick_since(srv.started))})
         for &p, slot in sim.players {
             if !p.active { continue }
             view := Msg_Player_View{slot = u8(slot), player = p}

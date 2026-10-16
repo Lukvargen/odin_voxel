@@ -46,8 +46,9 @@ Client_Net :: struct {
     requested:  map[[2]int]bool,
     // Joined: the server's slimes and enemies near us live in gs.slimes and
     // gs.enemies as replicas, easing toward where they were last seen.
-    slime_seen: [MAX_SLIMES]Replica,
-    enemy_seen: [MAX_ENEMIES]Replica,
+    slime_seen: [MAX_SLIMES]Replica(Msg_Slime_View),
+    enemy_seen: [MAX_ENEMIES]Replica(Msg_Enemy_View),
+    clock:      Replica_Clock, // the server's time, to draw what it moves a little in the past (replica.odin)
     // Names and chat.
     sent_name:  Msg_Text,                 // as last told the server (resent when it changes)
     // What we carry (Player_Kept), as last told the server: only once it
@@ -69,21 +70,14 @@ Chat_Entry :: struct {
     t:      f32, // seconds left to show
 }
 
-// Where a replicated monster was last seen, how fast it was going, and how
-// long ago.
-Replica :: struct {
-    pos, vel: [3]f32,
-    age:      f32,
-}
-
 REPLICA_TIMEOUT :: 1 // seconds without word before a replicated monster is dropped
 
-// Another player, drawn where its client last said it was.
+// Another player, drawn where its client said it was a moment ago.
 Other_Player :: struct {
     active: bool,
-    latest: Player,  // as last heard
-    age:    f32,     // seconds since
-    pos:    [3]f32,  // drawn here (eye), easing after latest
+    views:  Replica(Player), // as the server passed them on (replica.odin)
+    latest: Player,  // as drawn now, between views
+    pos:    [3]f32,  // drawn here (eye) = latest.pos
     anim:   Player_Anim,
     pose:   Sword_Pose, // drawn so, easing after latest.sword_pose
     ping:   int,        // ms, its connection's round trip, as the server measures it
@@ -275,10 +269,8 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             if int(v.slot) >= MAX_PLAYERS || int(v.slot) == gs.net.slot { break }
             o := &gs.net.others[v.slot]
             if !o.active { o^ = {active = true, latest = v.player, pos = v.player.pos, anim = {body_yaw = -math.to_radians(v.player.yaw)}, pose = v.player.sword_pose} }
-            if v.player.swing_id != o.latest.swing_id && v.player.sword {
-                play_at(.Sword_Swing, v.player.pos, 0.6, vary(0.06), 14) // another swing
-            }
-            o.latest, o.age, o.ping = v.player, 0, int(v.ping)
+            replica_push(&o.views, v.player, gs.net.clock.stamp)
+            o.ping = int(v.ping)
         case .Player_Gone:
             slot := msg_get(&r, u8) or_break
             if int(slot) < MAX_PLAYERS {
@@ -305,6 +297,7 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             }
         case .Clock:
             c := msg_get(&r, Msg_Clock) or_break
+            replica_clock_stamp(&gs.net.clock, c.time)
             if client_joined(gs) { // our own server's clock is ours already
                 gs.day.hour, gs.day.paused = c.hour, c.paused
                 day_tick(&gs.sim, 0)
@@ -370,6 +363,7 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
         }
     }
     if gs.net.dropped { client_dropped(gs) }
+    replica_clock_tick(&gs.net.clock)
     others_update(gs, dt)
     if client_joined(gs) { replicas_update(gs, dt) }
     for &e in gs.net.chat { e.t = max(e.t - dt, 0) }
@@ -377,59 +371,71 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
     client_hold_arrival(gs)
 }
 
-// A slime as the server last saw it. A new one (or another in its slot)
-// starts where it is; one we know eases there (replicas_update).
+// A slime as the server saw it, kept for drawing a moment later
+// (replicas_update). A new one (or another in its slot) starts there.
 @(private="file")
 client_slime_view :: proc(gs: ^Game_State, v: Msg_Slime_View) {
     sl := &gs.slimes.list[v.index]
-    if !sl.alive || sl.uid != v.uid { sl^ = {alive = true, uid = v.uid, pos = v.pos} }
-    sl.size, sl.state, sl.on_ground, sl.vel, sl.color = v.size, v.state, v.on_ground, v.vel, v.color
-    sl.yaw, sl.squash, sl.flash, sl.freeze, sl.bar, sl.hp, sl.age = v.yaw, v.squash, v.flash, v.freeze, v.bar, v.hp, v.age
-    gs.net.slime_seen[v.index] = {pos = v.pos, vel = v.vel}
+    rep := &gs.net.slime_seen[v.index]
+    if !sl.alive || sl.uid != v.uid {
+        sl^ = {alive = true, uid = v.uid}
+        rep.count = 0
+    }
+    replica_push(rep, v, gs.net.clock.stamp)
 }
 
 @(private="file")
 client_enemy_view :: proc(gs: ^Game_State, v: Msg_Enemy_View) {
     e := &gs.enemies.list[v.index]
-    if !e.alive || e.uid != v.uid { e^ = {alive = true, uid = v.uid, pos = v.pos} }
-    e.kind, e.state, e.swing, e.on_ground, e.vel, e.tint = v.kind, v.state, v.swing, v.on_ground, v.vel, v.tint
-    e.yaw, e.timer, e.flash, e.freeze, e.bar, e.hp = v.yaw, v.timer, v.flash, v.freeze, v.bar, v.hp
-    e.death, e.rising, e.walk_phase, e.speed, e.age = v.death, v.rising, v.walk_phase, v.speed, v.age
-    gs.net.enemy_seen[v.index] = {pos = v.pos, vel = v.vel}
+    rep := &gs.net.enemy_seen[v.index]
+    if !e.alive || e.uid != v.uid {
+        e^ = {alive = true, uid = v.uid}
+        rep.count = 0
+    }
+    replica_push(rep, v, gs.net.clock.stamp)
 }
 
-// Between views, the replicated monsters glide toward where they were
-// seen, a little ahead by their speed, and keep their clocks running (so a
-// walk keeps striding, a hit flash fades); one not heard of in a while is
+// The replicated monsters as they were at the clock's moment, between the
+// views either side (a walk strides smoothly, a hit flash fades), or a
+// little past the newest by their speed; one not heard of in a while is
 // gone.
 @(private="file")
 replicas_update :: proc(gs: ^Game_State, dt: f32) {
-    ease :: proc(pos: ^[3]f32, rep: ^Replica, dt: f32) -> bool {
-        rep.age += dt
-        if rep.age > REPLICA_TIMEOUT { return false }
-        target := rep.pos + rep.vel * min(rep.age, 0.15)
-        d := target - pos^
-        if d.x * d.x + d.y * d.y + d.z * d.z > 16 { pos^ = target } else { pos^ += d * min(dt * 15, 1) }
-        return true
-    }
+    t := gs.net.clock.now
     for &sl, i in gs.slimes.list {
         if !sl.alive { continue }
-        if !ease(&sl.pos, &gs.net.slime_seen[i], dt) { sl.alive = false; continue }
-        sl.age += dt
-        sl.flash = max(sl.flash - dt * 7, 0)
-        sl.bar = max(sl.bar - dt, 0)
-        sl.freeze = max(sl.freeze - dt, 0)
+        rep := &gs.net.slime_seen[i]
+        rep.age += dt
+        if rep.age > REPLICA_TIMEOUT || rep.count == 0 { sl.alive = false; continue }
+        a, b, k, ahead := replica_at(rep, t)
+        sl.size, sl.state, sl.on_ground, sl.color, sl.hp, sl.freeze = a.size, a.state, a.on_ground, a.color, a.hp, a.freeze
+        sl.pos = replica_lerp_pos(a.pos, b.pos, k) + a.vel * ahead
+        sl.vel = math.lerp(a.vel, b.vel, k)
+        sl.yaw = replica_lerp_angle(a.yaw, b.yaw, k)
+        sl.squash = math.lerp(a.squash, b.squash, k)
+        sl.flash = max(math.lerp(a.flash, b.flash, k) - ahead * 7, 0)
+        sl.bar = max(math.lerp(a.bar, b.bar, k) - ahead, 0)
+        sl.age = math.lerp(a.age, b.age, k) + ahead
     }
     for &e, i in gs.enemies.list {
         if !e.alive { continue }
-        if !ease(&e.pos, &gs.net.enemy_seen[i], dt) { e.alive = false; continue }
-        e.age += dt
-        e.timer -= dt
-        e.flash = max(e.flash - dt * 7, 0)
-        e.bar = max(e.bar - dt, 0)
-        e.freeze = max(e.freeze - dt, 0)
-        if e.state == .Dead { e.death += dt }
-        e.walk_phase += e.speed * dt * 2.6 / ENEMY_SPECS[e.kind].scale
+        rep := &gs.net.enemy_seen[i]
+        rep.age += dt
+        if rep.age > REPLICA_TIMEOUT || rep.count == 0 { e.alive = false; continue }
+        a, b, k, ahead := replica_at(rep, t)
+        e.kind, e.state, e.swing, e.on_ground, e.tint, e.hp, e.freeze, e.speed = a.kind, a.state, a.swing, a.on_ground, a.tint, a.hp, a.freeze, a.speed
+        e.pos = replica_lerp_pos(a.pos, b.pos, k) + a.vel * ahead
+        e.vel = math.lerp(a.vel, b.vel, k)
+        e.yaw = replica_lerp_angle(a.yaw, b.yaw, k)
+        e.flash = max(math.lerp(a.flash, b.flash, k) - ahead * 7, 0)
+        e.bar = max(math.lerp(a.bar, b.bar, k) - ahead, 0)
+        // Clocks that only run forward: between the views, or on past the newest.
+        same := a.state == b.state && a.swing == b.swing
+        e.timer = (same ? math.lerp(a.timer, b.timer, k) : a.timer) - ahead
+        e.death = (same ? math.lerp(a.death, b.death, k) : a.death) + (a.state == .Dead ? ahead : 0)
+        e.rising = same ? math.lerp(a.rising, b.rising, k) : a.rising
+        e.walk_phase = (b.walk_phase >= a.walk_phase ? math.lerp(a.walk_phase, b.walk_phase, k) : a.walk_phase) + a.speed * ahead * 2.6 / ENEMY_SPECS[a.kind].scale
+        e.age = math.lerp(a.age, b.age, k) + ahead
     }
 }
 
@@ -580,19 +586,34 @@ client_poll :: proc(gs: ^Game_State) {
 others_update :: proc(gs: ^Game_State, dt: f32) {
     for &o in gs.net.others {
         if !o.active { continue }
-        o.age += dt
+        o.views.age += dt
         o.hurt = max(o.hurt - dt * 2.5, 0)
-        if o.age > OTHER_TIMEOUT {
+        if o.views.age > OTHER_TIMEOUT {
             o.active = false
             continue
         }
-        p := &o.latest
-        target := p.pos + p.velocity * min(o.age, 0.2)
-        if d := target - o.pos; d.x * d.x + d.y * d.y + d.z * d.z > 64 {
-            o.pos = target // teleported or far behind: no gliding across the map
-        } else {
-            o.pos += d * min(dt * 12, 1)
+        // As it was a moment ago, between the views either side.
+        if o.views.count > 0 {
+            a, b, k, ahead := replica_at(&o.views, gs.net.clock.now)
+            was := o.latest
+            o.latest = a^
+            q := &o.latest
+            q.pos = replica_lerp_pos(a.pos, b.pos, k) + a.velocity * ahead
+            q.velocity = math.lerp(a.velocity, b.velocity, k)
+            q.yaw = replica_lerp_angle(a.yaw, b.yaw, k, 360)
+            q.pitch = math.lerp(a.pitch, b.pitch, k)
+            if a.gliding && b.gliding {
+                q.glide_heading = replica_lerp_angle(a.glide_heading, b.glide_heading, k, 360)
+                q.glide_pitch = math.lerp(a.glide_pitch, b.glide_pitch, k)
+                q.glide_bank = math.lerp(a.glide_bank, b.glide_bank, k)
+            }
+            q.glide_unfold = math.lerp(a.glide_unfold, b.glide_unfold, k)
+            if q.swing_id != was.swing_id && q.sword {
+                play_at(.Sword_Swing, q.pos, 0.6, vary(0.06), 14) // another swing
+            }
         }
+        p := &o.latest
+        o.pos = p.pos
         anim_step(&o.anim, p.velocity, p.yaw, p.sword, p.on_ground || p.fly_mode, dt)
         // The sword swings smoothly between views (a swing is a few of them).
         k := min(dt * 30, 1)
