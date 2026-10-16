@@ -460,6 +460,7 @@ main :: proc() {
         sim_sync_local_player(&gs)
         slimes_update(&gs, dt)
         enemies_update(&gs, dt)
+        sim_events_play(&gs)
         fx_update(&gs, fx_dt)
         glider_view_update(&gs, dt)
         combat_view_update(&gs, dt)

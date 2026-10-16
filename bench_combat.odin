@@ -80,6 +80,7 @@ bench_combat_run :: proc(gs: ^Game_State) {
         combat_post_update(gs, dt)
         sim_sync_local_player(gs)
         slimes_update(gs, dt)
+        sim_events_play(gs)
         fx_update(gs, fx_dt)
         glider_view_update(gs, dt)
         combat_view_update(gs, dt)
@@ -184,6 +185,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
             combat_post_update(gs, dt)
             sim_sync_local_player(gs)
             enemies_update(gs, dt)
+            sim_events_play(gs)
             fx_update(gs, fx_dt)
             combat_view_update(gs, dt)
             if e.state != last {
@@ -209,6 +211,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
             cam.fly_mode = false
             sim_sync_local_player(gs)
             enemies_update(gs, dt)
+            sim_events_play(gs)
             cam.fly_mode = true
         }
         counts: [Enemy_Kind]int
@@ -222,7 +225,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
     day_update(gs, 0)
     cam.fly_mode = false
     gs.enemies.spawn_timer, gs.enemies.site_timer = 0, 1e9
-    for _ in 0 ..< 60 * 20 { sim_sync_local_player(gs); enemies_update(gs, dt) }
+    for _ in 0 ..< 60 * 20 { sim_sync_local_player(gs); enemies_update(gs, dt); sim_events_play(gs) }
     counts: [Enemy_Kind]int
     rising := 0
     for e in gs.enemies.list { if e.alive { counts[e.kind] += 1; if e.nocturnal { rising += 1 } } }
@@ -267,6 +270,7 @@ bench_nav_run :: proc(gs: ^Game_State) {
             combat_post_update(gs, dt)
             sim_sync_local_player(gs)
             enemies_update(gs, dt)
+            sim_events_play(gs)
             closest = min(closest, la.length((e.pos - (cam.pos - {0, PLAYER_EYE_HEIGHT, 0})).xz))
             if e.state != last {
                 fmt.printf("    %5.2fs %v at (%.1f %.1f %.1f)\n", t, e.state, e.pos.x, e.pos.y, e.pos.z)

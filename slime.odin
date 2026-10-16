@@ -239,7 +239,7 @@ slime_think :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
             sl.vel = {w.x * 2, kind.hop_up * 0.7, w.y * 2}
             turn_towards(&sl.yaw, w, 10)
             sl.timer = rand.float32_range(1.2, 3)
-            play_at(.Slime_Hop, sl.pos, 0.35, vary(0.1) / math.sqrt(kind.width), 10)
+            sim_emit(&gs.sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 0})
         }
         if sl.on_ground && sl.timer < 0.12 { squash_target = 0.2 }
     case .Chase:
@@ -254,7 +254,7 @@ slime_think :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
                 hop := [2]f32{dir.x * math.cos(j) - dir.y * math.sin(j), dir.x * math.sin(j) + dir.y * math.cos(j)}
                 sl.vel = {hop.x * kind.hop_speed, kind.hop_up, hop.y * kind.hop_speed}
                 sl.timer = rand.float32_range(kind.hop_every[0], kind.hop_every[1])
-                play_at(.Slime_Hop, sl.pos, 0.45, vary(0.1) / math.sqrt(kind.width), 12)
+                sim_emit(&gs.sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 1})
             }
         }
         if sl.on_ground && sl.timer < 0.12 { squash_target = 0.25 }
@@ -273,7 +273,7 @@ slime_think :: proc(gs: ^Game_State, sl: ^Slime, dt: f32) {
             sl.vel = {v.x, SLIME_LEAP_UP, v.y}
             sl.state, sl.timer = .Leap, 0
             sl.squash_vel -= 8
-            play_at(.Slime_Hop, sl.pos, 0.8, 0.8 * vary(0.05) / math.sqrt(kind.width), 14)
+            sim_emit(&gs.sim, {kind = .Slime_Hop, slime = sl.size, pos = sl.pos, amount = 2})
         }
     case .Leap:
         if sl.on_ground && sl.timer < -0.1 {
@@ -374,7 +374,6 @@ slime_touches_player :: proc(sl: ^Slime, p: ^Player) -> bool {
 // down. Returns true if it died.
 slime_damage :: proc(gs: ^Game_State, sl: ^Slime, damage: f32, knock: [3]f32, boosted: bool) -> bool {
     s := &gs.slimes
-    fx := &gs.fx
     kind := SLIME_KINDS[sl.size]
     sl.hp -= damage
     sl.flash = 1
@@ -386,14 +385,11 @@ slime_damage :: proc(gs: ^Game_State, sl: ^Slime, damage: f32, knock: [3]f32, bo
     sl.state, sl.timer = .Stunned, 0.45
 
     c := slime_center(sl)
-    add_number(fx, c + {0, slime_radius(sl.size) + 0.4, 0}, damage, boosted)
-    splat(fx, c, sl.color, knock, 5, 0.6)
-    play_at(.Slime_Hit, c, 1, vary(0.08) / math.pow(kind.width, 0.3), 16)
+    sim_emit(&gs.sim, {kind = .Slime_Hit, slime = sl.size, pos = c, vec = knock, color = sl.color, amount = damage, boosted = boosted})
 
     if sl.hp > 0 { return false }
     sl.alive = false
-    splat(fx, c, sl.color, knock, 16, 1.2)
-    play_at(.Slime_Pop, c, 1, vary(0.08) / math.pow(kind.width, 0.4), 18)
+    sim_emit(&gs.sim, {kind = .Slime_Pop, slime = sl.size, pos = c, vec = knock, color = sl.color})
     if sl.size > .Small {
         child := Slime_Size(int(sl.size) - 1)
         across := la.normalize0([3]f32{-knock.z, 0, knock.x})

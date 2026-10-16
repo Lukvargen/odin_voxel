@@ -307,7 +307,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
             e.state, e.timer = .Chase, 0
             e.last_seen, e.seen_ago = feet, 0
             e.repath = 0
-            enemy_voice(e, 0.7)
+            enemy_voice(gs, e, 0.7)
             break
         }
         if e.state == .Idle {
@@ -347,7 +347,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
             turn_towards(&e.yaw, dir, dt * 7)
             e.state, e.timer, e.struck = .Windup, sp.windup, false
             e.swing = rand.float32() < OVERHEAD_CHANCE[e.kind] ? .Overhead : .Slash
-            enemy_voice(e, 0.9)
+            enemy_voice(gs, e, 0.9)
         } else {
             // Where they last saw you, by a path round what's in the way.
             goal := e.sees ? feet : e.last_seen
@@ -363,7 +363,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
         }
     case .Windup:
         turn_towards(&e.yaw, dir, dt * 5)
-        if e.timer <= 0 { e.state, e.timer = .Strike, sp.strike; play_at(.Sword_Swing, enemy_center(e), 0.55, 0.75 / sp.scale * vary(0.06), 14) }
+        if e.timer <= 0 { e.state, e.timer = .Strike, sp.strike; sim_emit(&gs.sim, {kind = .Enemy_Swing, enemy = e.kind, pos = enemy_center(e)}) }
     case .Strike:
         // Lunges a step into the swing; hurts once if the player is in front.
         fwd := [2]f32{-math.sin(e.yaw), math.cos(e.yaw)}
@@ -374,7 +374,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
             knock := [3]f32{dir.x * sp.knock[0], sp.knock[1], dir.y * sp.knock[0]}
             switch player_hurt(gs, e.prey, sp.damage, knock, enemy_center(e)) {
             case .Hit:
-                play_at(e.kind == .Skeleton ? .Bone_Hit : .Slam, feet + {0, 1, 0}, 0.5, 1.3 * vary(0.06), 10)
+                sim_emit(&gs.sim, {kind = .Enemy_Struck, enemy = e.kind, pos = feet + {0, 1, 0}})
             case .Blocked:
                 e.vel.xz -= dir * (3 / sp.weight)
                 e.timer = sp.strike * 0.5 // the swing's spent
@@ -384,7 +384,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
                 e.vel = {-dir.x * 5 / sp.weight, 3, -dir.y * 5 / sp.weight}
                 e.on_ground = false
                 e.flash = 1
-                enemy_voice(e, 1)
+                enemy_voice(gs, e, 1)
                 return
             case .Missed:
             }
@@ -419,13 +419,8 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
 
 // Grunts and rattles: noticing the player, winding up.
 @(private="file")
-enemy_voice :: proc(e: ^Enemy, volume: f32) {
-    c := enemy_center(e)
-    switch e.kind {
-    case .Skeleton: play_at(.Bone_Rattle, c, volume * 0.6, vary(0.08), 16)
-    case .Goblin:   play_at(.Hurt, c, volume * 0.45, 1.7 * vary(0.08), 16)
-    case .Orc:      play_at(.Hurt, c, volume * 0.7, 0.55 * vary(0.06), 22)
-    }
+enemy_voice :: proc(gs: ^Game_State, e: ^Enemy, volume: f32) {
+    sim_emit(&gs.sim, {kind = .Enemy_Voice, enemy = e.kind, pos = enemy_center(e), amount = volume})
 }
 
 @(private="file")
@@ -495,14 +490,7 @@ enemy_damage :: proc(gs: ^Game_State, e: ^Enemy, damage: f32, knock: [3]f32, boo
     e.prey = by
     e.last_seen, e.seen_ago = player_feet(&gs.players[by]), 0
     c := enemy_center(e)
-    add_number(&gs.fx, c + {0, sp.height * 0.5, 0}, damage, boosted)
-    splat(&gs.fx, c, sp.gore, knock, 5, 0.5)
-    if e.kind == .Skeleton {
-        play_at(.Bone_Hit, c, 0.9, vary(0.08), 16)
-    } else {
-        play_at(.Slime_Hit, c, 0.5, 0.6 * vary(0.08), 14)
-        play_at(.Hurt, c, 0.5, (e.kind == .Goblin ? 1.6 : 0.6) * vary(0.06), 16)
-    }
+    sim_emit(&gs.sim, {kind = .Enemy_Hit, enemy = e.kind, pos = c, vec = knock, amount = damage, boosted = boosted})
     // Heavy ones shrug off the light hits mid-swing.
     if e.kind != .Orc || damage >= 20 || (e.state != .Windup && e.state != .Strike) {
         e.state, e.timer = .Stagger, 0.45 / math.sqrt(sp.weight)
@@ -514,25 +502,16 @@ enemy_damage :: proc(gs: ^Game_State, e: ^Enemy, damage: f32, knock: [3]f32, boo
 
 @(private="file")
 enemy_die :: proc(gs: ^Game_State, e: ^Enemy, knock: [3]f32) {
-    sp := ENEMY_SPECS[e.kind]
     e.state, e.death = .Dead, 0
     e.bar = 0
-    c := enemy_center(e)
-    splat(&gs.fx, c, sp.gore, knock, 14, 1)
-    if e.kind == .Skeleton {
-        play_at(.Bone_Break, c, 1, vary(0.06), 18)
-    } else {
-        play_at(.Hurt, c, 0.8, (e.kind == .Goblin ? 1.3 : 0.45) * vary(0.05), 20)
-        play_at(.Land, c, 0.7, 0.8, 14)
-    }
+    sim_emit(&gs.sim, {kind = .Enemy_Die, enemy = e.kind, pos = enemy_center(e), vec = knock})
     if e.guard { site_lost_one(&gs.enemies, e.site) }
 }
 
 // Skeletons of the night at dawn: a puff of bone dust, gone.
 @(private="file")
 enemy_crumble :: proc(gs: ^Game_State, e: ^Enemy) {
-    splat(&gs.fx, enemy_center(e), {0.7, 0.66, 0.58}, {0, 1, 0}, 10, 0.5)
-    play_at(.Bone_Break, enemy_center(e), 0.5, 0.8, 14)
+    sim_emit(&gs.sim, {kind = .Enemy_Crumble, enemy = e.kind, pos = enemy_center(e)})
     e.alive = false
 }
 
@@ -585,7 +564,7 @@ enemy_try_spawn :: proc(gs: ^Game_State, feet: [3]f32, night: f32) {
             if kind == .Skeleton && night > 0.6 {
                 e.nocturnal = true
                 e.rising = 1 // claws up out of the ground
-                splat(&gs.fx, e.pos + {0, 0.2, 0}, {0.36, 0.27, 0.18}, {0, 1, 0}, 8, 0.4)
+                sim_emit(&gs.sim, {kind = .Enemy_Rise, enemy = e.kind, pos = e.pos})
             }
         }
         return
