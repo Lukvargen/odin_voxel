@@ -158,6 +158,7 @@ Block_Type :: enum u8 {
     Acacia_Leaves = 36,
     Willow_Leaves = 37,
     Dry_Grass     = 38,  // savanna ground: grass gone yellow
+    Mushroom      = 39,  // a land plant too: red with white spots, or brown
 }
 
 // Plants that live in water and count as water for everything but drawing.
@@ -167,7 +168,7 @@ block_is_water_plant :: #force_inline proc(b: u8) -> bool {
 
 // Grass tufts, flowers, ferns, dry bushes.
 block_is_land_plant :: #force_inline proc(b: u8) -> bool {
-    return b >= u8(Block_Type.Tall_Grass) && b <= u8(Block_Type.Dry_Bush)
+    return b >= u8(Block_Type.Tall_Grass) && b <= u8(Block_Type.Dry_Bush) || b == u8(Block_Type.Mushroom)
 }
 
 // Water, or a plant standing in it: swimming, buoyancy, underwater sound.
@@ -919,6 +920,7 @@ generate_tree_kind :: proc(tgt: ^Tree_Target, kind: Tree_Kind, bx, by, bz: int) 
     case .Dead:      generate_dead_tree(tgt, bx, by, bz, seed)
     case .Fallen_Log: generate_fallen_log(tgt, bx, by, bz, seed)
     case .Acacia:    generate_acacia(tgt, bx, by, bz, seed)
+    case .Boulder:   generate_boulder(tgt, bx, by, bz, seed)
     case .Willow:    generate_willow(tgt, bx, by, bz, seed)
     }
 }
@@ -946,6 +948,35 @@ generate_acacia :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
         place_crown(tgt, ex, ey + 1, ez, r, tree_rand(&rng, 1.2, 1.6), r, seed + 9 + i, .Acacia_Leaves)
     }
     place_crown(tgt, fx, top + 1.5, fz, tree_rand(&rng, 6, 8), 1.4, tree_rand(&rng, 6, 8), seed + 2, .Acacia_Leaves)
+}
+
+// A boulder: a lumpy rock half sunk in the ground (weathered stone, so the
+// shader mosses its lower sides), now and then with a smaller one leaning
+// on it.
+generate_boulder :: proc(tgt: ^Tree_Target, bx, by, bz: int, seed: int) {
+    if !aabb_hits_chunk(tgt, bx - 9, by - 4, bz - 9, bx + 10, by + 10, bz + 10) { return }
+    rng := seed
+    n := tree_rand(&rng, 0, 1) < 0.3 ? 2 : 1
+    for k in 0 ..< n {
+        r := tree_rand(&rng, 1.8, 4.2) * (k > 0 ? 0.6 : 1)
+        cx := f64(bx) + 0.5 + (k > 0 ? tree_rand(&rng, -1, 1) * r * 2.2 : 0)
+        cz := f64(bz) + 0.5 + (k > 0 ? tree_rand(&rng, -1, 1) * r * 2.2 : 0)
+        cy := f64(by) + r * 0.25
+        sx, sy := tree_rand(&rng, 0.8, 1.3), tree_rand(&rng, 0.6, 0.9)
+        ir := int(math.ceil(r * 1.4)) + 1
+        for dy in -ir ..= ir {
+            for dz in -ir ..= ir {
+                for dx in -ir ..= ir {
+                    x, y, z := int(math.floor(cx)) + dx, int(math.floor(cy)) + dy, int(math.floor(cz)) + dz
+                    fx := (f64(x) + 0.5 - cx) / (r * sx)
+                    fy := (f64(y) + 0.5 - cy) / (r * sy)
+                    fz := (f64(z) + 0.5 - cz) / r
+                    lump := tree_hash(x, z + y * 31, seed + 7) * 0.35
+                    if fx * fx + fy * fy + fz * fz <= 1 + lump - 0.15 { set_voxel_world(tgt, x, y, z, .Weathered_Stone) }
+                }
+            }
+        }
+    }
 }
 
 // Willow, by the water: a stout trunk, limbs spreading under a broad crown,
@@ -999,9 +1030,11 @@ ground_plant :: proc(s: Terrain_Sample, top: Block_Type, wx, wz: int) -> Block_T
         if h < 0.38 { return .Tall_Grass }
     case .Forest:
         if h < flowers * 0.4 { return .Flower }
+        if h < flowers * 0.4 + 0.012 { return .Mushroom }
         if h < 0.10 { return .Fern }
         if h < 0.22 { return .Tall_Grass }
     case .Taiga:
+        if h < 0.01 { return .Mushroom }
         if h < 0.12 { return .Fern }
         if h < 0.17 { return .Tall_Grass }
     case .Mountains:
@@ -1225,7 +1258,8 @@ get_voxel :: proc(w: ^World, wx, wy, wz: int) -> u32 {
 
 // CPU-side DDA raycast — mirrors the shader's two-level traversal.
 // Returns the integer world position of the hit voxel and the surface normal.
-raycast_voxel :: proc(w: ^World, origin, dir: [3]f32, max_dist: f32) -> (hit_pos: [3]int, normal: [3]int, ok: bool) {
+// plants: stop at grass, flowers and such too (aiming the block tool at one).
+raycast_voxel :: proc(w: ^World, origin, dir: [3]f32, max_dist: f32, plants := false) -> (hit_pos: [3]int, normal: [3]int, ok: bool) {
     dx := dir[0]; dy := dir[1]; dz := dir[2]
     ox := f64(origin[0]); oy := f64(origin[1]); oz := f64(origin[2])
 
@@ -1250,7 +1284,7 @@ raycast_voxel :: proc(w: ^World, origin, dir: [3]f32, max_dist: f32) -> (hit_pos
     nx, ny, nz := 0, 0, 0
 
     for t := 0.0; t < f64(max_dist); {
-        if block_solid(u8(get_voxel(w, xi, yi, zi))) {
+        if v := u8(get_voxel(w, xi, yi, zi)); block_solid(v) || plants && block_is_land_plant(v) {
             return {xi, yi, zi}, {nx, ny, nz}, true
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {

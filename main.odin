@@ -637,7 +637,7 @@ hotbar_select :: proc(gs: ^Game_State, slot: int) {
 // Middle click: the block you're looking at into your hand. Already on the
 // hotbar? Select it; otherwise it replaces the selected slot.
 pick_block :: proc(gs: ^Game_State) {
-    hit, _, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH)
+    hit, _, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH, plants = true)
     if !ok { return }
     b := Block_Type(u8(get_voxel(gs, hit.x, hit.y, hit.z)))
     if b == .Air || b == .Water { return }

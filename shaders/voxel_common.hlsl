@@ -89,6 +89,7 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_ACACIA_LEAVES 36u
 #define BLOCK_WILLOW_LEAVES 37u
 #define BLOCK_DRY_GRASS     38u // savanna ground
+#define BLOCK_MUSHROOM      39u // a land plant
 
 // World blocks per design block (terrain.odin TERRAIN_SCALE): textures laid
 // out over the world in design sizes use it.
@@ -97,7 +98,7 @@ int region_of(int rx, int ry, int rz) {
 #define SEA_LEVEL_Y 24.0 // top of the sea (terrain.odin SEA_LEVEL)
 
 bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES || id == BLOCK_BIRCH_LEAVES || id == BLOCK_AUTUMN_LEAVES || id == BLOCK_ACACIA_LEAVES || id == BLOCK_WILLOW_LEAVES; }
-bool block_is_land_plant(uint id) { return id >= BLOCK_TALL_GRASS && id <= BLOCK_DRY_BUSH; }
+bool block_is_land_plant(uint id) { return id >= BLOCK_TALL_GRASS && id <= BLOCK_DRY_BUSH || id == BLOCK_MUSHROOM; }
 bool block_is_water_plant(uint id) { return id == BLOCK_KELP || id == BLOCK_SEAGRASS || id == BLOCK_SEA_PICKLE; }
 // Water, or a plant standing in it (the camera is "in water" in either).
 bool block_is_watery(uint id) { return id == BLOCK_WATER || block_is_water_plant(id); }
@@ -575,6 +576,13 @@ bool plant_texel(uint id, int3 vkey, int cu, int cv, int pl) {
         if (cv == 7) return cu == 3 || cu == 4;
         if (cv == 2) return pl == 0 ? (cu == 2 || cu == 3) : (cu == 4 || cu == 5);
         return (cu == 3 || cu == 4) && pl == 0;
+    }
+    if (id == BLOCK_MUSHROOM) {
+        // A short stem under a domed cap.
+        if (cv < 3) return cu == 3 || cu == 4;
+        if (cv == 3 || cv == 4) return cu >= 1 && cu <= 6;
+        if (cv == 5) return cu >= 2 && cu <= 5;
+        return false;
     }
     if (id == BLOCK_DRY_BUSH) {
         // Bare twigs fanning up from the ground.

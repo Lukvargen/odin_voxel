@@ -68,7 +68,7 @@ far_summary_init :: proc(s: ^Far_Summary) {
 far_record :: proc(s: ^Far_Summary, lx, wy, lz: int, b: u8) {
     ci := lx / FAR_CELL + (lz / FAR_CELL) * FAR_TILE_CELLS
     switch b {
-    case u8(Block_Type.Air), u8(Block_Type.Cactus), u8(Block_Type.Tall_Grass), u8(Block_Type.Flower), u8(Block_Type.Fern), u8(Block_Type.Dry_Bush):
+    case u8(Block_Type.Air), u8(Block_Type.Cactus), u8(Block_Type.Tall_Grass), u8(Block_Type.Flower), u8(Block_Type.Fern), u8(Block_Type.Dry_Bush), u8(Block_Type.Mushroom):
         // cacti and plants are too thin to show
     case u8(Block_Type.Leaves), u8(Block_Type.Spruce_Leaves), u8(Block_Type.Birch_Leaves), u8(Block_Type.Autumn_Leaves),
          u8(Block_Type.Acacia_Leaves), u8(Block_Type.Willow_Leaves):

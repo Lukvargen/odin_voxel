@@ -586,6 +586,12 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         if (block_id == BLOCK_DRY_BUSH) {
             return float3(0.36, 0.26, 0.15) * (0.8 + 0.4 * th);
         }
+        if (block_id == BLOCK_MUSHROOM) {
+            if (cv < 3) return float3(0.78, 0.75, 0.66) * (0.9 + 0.1 * th);
+            bool red = hash31i(vkey + int3(9, 1, 4)) < 0.55;
+            if (red) return th < 0.25 ? float3(0.92, 0.90, 0.84) : float3(0.62, 0.08, 0.05);
+            return float3(0.42, 0.28, 0.16) * (0.85 + 0.3 * th);
+        }
         if (block_id == BLOCK_KELP) {
             bool stalk = cu == 3 || cu == 4;
             float3 c = stalk ? float3(0.22, 0.24, 0.07) : float3(0.30, 0.38, 0.09);

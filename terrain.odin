@@ -370,7 +370,7 @@ surface_layers_design :: proc(s: Terrain_Sample, slope: int) -> Surface_Layers {
 
 // ---- Trees ---------------------------------------------------------------
 
-Tree_Kind :: enum u8 { None, Oak, Medium_Oak, Small_Oak, Bush, Spruce, Cactus, Birch, Dead, Fallen_Log, Acacia, Willow }
+Tree_Kind :: enum u8 { None, Oak, Medium_Oak, Small_Oak, Bush, Spruce, Cactus, Birch, Dead, Fallen_Log, Acacia, Willow, Boulder }
 
 // Tree densities (trees per voxel of ground) by biome. A candidate spot is
 // rejected by its hash against the densest biome before any terrain is
@@ -379,6 +379,18 @@ TREE_MAX_DENSITY :: 1.0 / 50.0 / (TERRAIN_SCALE * TERRAIN_SCALE) // per world bl
 
 @(private="file")
 Tree_Rate :: struct { kind: Tree_Kind, density: f64 }
+
+// Boulders per design block of ground: most in the mountains and taiga.
+@(private="file")
+biome_boulders :: proc(s: Terrain_Sample) -> f64 {
+    #partial switch s.biome {
+    case .Mountains: return 1.0 / 500
+    case .Taiga:     return 1.0 / 1400
+    case .Snowy:     return 1.0 / 2200
+    case .Plains, .Savanna, .Forest: return 1.0 / 3500
+    }
+    return 0
+}
 
 // Per design block of ground; together at most TREE_MAX_DENSITY. Cooler
 // forests are birch woods; a few dead trees and fallen logs about.
@@ -414,7 +426,11 @@ tree_at :: proc(lat: ^Terrain_Lattice, wx, wz: int) -> (kind: Tree_Kind, base_y:
     s := lattice_sample(lat, wx, wz)
     if s.height < SEA_LEVEL + 1 { return .None, 0 }
     acc := 0.0
-    for r in biome_trees(s) {
+    rates := biome_trees(s)
+    if b := biome_boulders(s); b > 0 {
+        for &r in rates { if r.kind == .None { r = {.Boulder, b}; break } }
+    }
+    for r in rates {
         acc += r.density / (TERRAIN_SCALE * TERRAIN_SCALE) // designed per design block of ground
         if h < acc {
             // No trees on cliffs (a probe 2 voxels out is enough).

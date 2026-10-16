@@ -259,12 +259,13 @@ build_block_update :: proc(gs: ^Game_State) {
     placing  := gs.right_pressed || (gs.right_held && gs.edit_timer <= 0)
     if !breaking && !placing { return }
     gs.edit_timer = EDIT_REPEAT
-    hit, nrm, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH)
+    hit, nrm, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH, plants = true)
     if !ok { return }
     target := hit
     block  := Block_Type.Air
     if !breaking {
-        target = hit + nrm
+        // On a plant: in its place, as on the ground it grows from.
+        if !block_is_land_plant(u8(get_voxel(gs, hit.x, hit.y, hit.z))) { target = hit + nrm }
         block  = gs.selected_block
     }
     radius := block == .Torch ? 0 : gs.brush_radius
@@ -638,7 +639,7 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
     eye := gs.camera.pos
     switch b.tool {
     case .Block:
-        hit, _, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH)
+        hit, _, ok := raycast_voxel(gs, gs.camera.pos, camera_forward(gs.camera), REACH, plants = true)
         if !ok { return }
         lo := [3]f32{f32(hit.x), f32(hit.y), f32(hit.z)}
         wire_box(&pv.segs, lo + 0.5, {0.502, 0.502, 0.502}, 1, 0)

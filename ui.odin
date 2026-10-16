@@ -1021,6 +1021,7 @@ icon_colors :: proc(b: Block_Type) -> (top, side: [3]f32) {
     case .Fern:          return {0.20, 0.45, 0.18}, {0.18, 0.40, 0.16}
     case .Flower:        return {0.95, 0.80, 0.25}, {0.30, 0.55, 0.20}
     case .Dry_Bush:      return {0.55, 0.42, 0.25}, {0.48, 0.36, 0.22}
+    case .Mushroom:      return {0.80, 0.18, 0.12}, {0.90, 0.88, 0.80}
     case .Snow:       return {0.93, 0.95, 0.98}, {0.90, 0.92, 0.96}
     case .Ice:        return {0.68, 0.80, 0.93}, {0.62, 0.75, 0.90}
     case .Terracotta: return {0.70, 0.40, 0.27}, {0.70, 0.40, 0.27}

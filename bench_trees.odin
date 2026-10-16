@@ -49,14 +49,14 @@ bench_trees_run :: proc(gs: ^Game_State) {
         }
     }
     // Single trees from the side: the nearest of each kind to the origin.
-    for kind in ([]Tree_Kind{.Willow, .Acacia, .Medium_Oak, .Birch, .Dead}) {
+    for kind in ([]Tree_Kind{.Willow, .Acacia, .Medium_Oak, .Birch, .Dead, .Boulder}) {
         x, z, base, found := bench_find_tree(kind)
         if !found { fmt.printf("trees: no %v found\n", kind); continue }
         fmt.printf("trees: a %v at %d,%d\n", kind, x, z)
         at := [3]f32{f32(x) + 0.5, f32(base), f32(z) + 0.5}
-        bench_teleport(gs, at + {-26, 10, -10})
+        bench_teleport(gs, at + (kind == .Boulder ? [3]f32{-9, 5, -4} : [3]f32{-26, 10, -10}))
         bench_clear_view(gs)
-        to := at + {0, 8, 0} - cam.pos
+        to := at + {0, kind == .Boulder ? 1 : 8, 0} - cam.pos
         cam.yaw = math.to_degrees(math.atan2(to.x, to.z))
         cam.pitch = math.to_degrees(math.atan2(to.y, math.sqrt(to.x * to.x + to.z * to.z)))
         bench_measure(gs)
@@ -76,7 +76,12 @@ bench_find_tree :: proc(kind: Tree_Kind) -> (x, z, base: int, ok: bool) {
                 lat := tree_lattice(ox, oz, CELL)
                 for wz in oz ..< oz + CELL {
                     for wx in ox ..< ox + CELL {
-                        if k, b := tree_at(&lat, wx, wz); k == kind { return wx, wz, b, true }
+                        if k, b := tree_at(&lat, wx, wz); k == kind {
+                            // Rocks: one in the open, not hidden in a wood.
+                            bi := terrain_at(wx, wz).biome
+                            if kind == .Boulder && bi != .Mountains && bi != .Plains && bi != .Savanna { continue }
+                            return wx, wz, b, true
+                        }
                     }
                 }
                 free_all(context.temp_allocator)
