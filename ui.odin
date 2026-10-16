@@ -675,6 +675,7 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     if playing { combat_hud_layout(gs, w, h) }
     name_tags_layout(gs, w, h)
     chat_layout(gs, h)
+    if playing && ui.typing == nil && SDL.GetKeyboardState(nil)[SDL.Scancode.TAB] { player_list_layout(gs) }
 
     // Toast.
     if ui.toast_t > 0 {
@@ -686,6 +687,56 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     }
 
     if ui.help_open { help_card(gs, 1) }
+}
+
+// Tab: who's playing here, and how far away their connections are.
+@(private="file")
+player_list_layout :: proc(gs: ^Game_State) {
+    n := &gs.net
+    row :: proc(id: u32, name: string, tint: [3]f32, info: string, info_col: clay.Color) {
+        if clay.UI(clay.ID("PlayerRow", id))({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 10, childAlignment = {y = .Center}}}) {
+            if clay.UI()({layout = {sizing = {clay.SizingFixed(10), clay.SizingFixed(10)}},
+                backgroundColor = {tint.r * 255, tint.g * 255, tint.b * 255, 255}, cornerRadius = clay.CornerRadiusAll(5)}) {}
+            text(name, COLOR_TEXT, 15)
+            spacer()
+            text(info, info_col, 13)
+        }
+    }
+    ping_text :: proc(ms: int) -> (string, clay.Color) {
+        col := ms < 80 ? COLOR_ACCENT : (ms < 200 ? COLOR_TEXT_DIM : COLOR_BAD)
+        return fmt.tprintf("%d ms", ms), col
+    }
+    others := 0
+    for o in n.others { if o.active { others += 1 } }
+    title := "Playing alone"
+    if client_joined(gs) {
+        title = fmt.tprintf("On %s: %d player%s", string(n.address[:n.address_len]), others + 1, others == 0 ? "" : "s")
+    } else if session_hosting(gs) {
+        title = fmt.tprintf("Your world, open: %d player%s", others + 1, others == 0 ? "" : "s")
+    }
+    if clay.UI(clay.ID("PlayerList"))({
+        layout = {layoutDirection = .TopToBottom, padding = clay.PaddingAll(14), childGap = 7, sizing = {clay.SizingFixed(320), clay.SizingFit()}},
+        floating = anchored(.CenterTop, {0, 40}, 25),
+        custom = deco(.Glass, radius = 10),
+    }) {
+        text(title, COLOR_ACCENT, 15, FONT_ID_TITLE)
+        divider()
+        me := n.slot
+        if client_joined(gs) {
+            info := "connecting"
+            col := COLOR_TEXT_DIM
+            if n.welcomed && n.peer != nil { info, col = ping_text(int(n.peer.roundTripTime)) }
+            row(u32(me), fmt.tprintf("%s (you)", client_name(gs)), player_tint(me), info, col)
+        } else {
+            row(u32(me), fmt.tprintf("%s (you)", client_name(gs)), player_tint(me), session_hosting(gs) ? "host" : "", COLOR_TEXT_DIM)
+        }
+        for &o, slot in n.others {
+            if !o.active { continue }
+            info, col := ping_text(o.ping)
+            if slot == 0 && client_joined(gs) { info, col = "host", COLOR_TEXT_DIM } // its own game: no connection to time
+            row(u32(slot), client_player_name(gs, slot), player_tint(slot), info, col)
+        }
+    }
 }
 
 // Other players' names over their heads, fading with distance.
@@ -1802,7 +1853,7 @@ menu_controls :: proc(gs: ^Game_State) {
     tools    := Group{"Area and shape", {"Area: hold L / R", "drag a box, let go", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "area height; shape size", "Shift+wheel", "shape height", "Alt+wheel", "turn the shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V", "cycle back"}}
     fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll", "F (hold)", "guard; parry just in time"}}
     gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
-    other    := Group{"Other", {"Enter", "chat", "F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)"}}
+    other    := Group{"Other", {"Enter", "chat", "Tab (hold)", "players", "F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)"}}
     cols := controls_columns(gs) == 3 ? [][]Group{{moving, building}, {tools, gliding}, {fighting, other}} : [][]Group{{moving, building, fighting}, {tools, gliding, other}}
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 22}}) {
         for col in cols {

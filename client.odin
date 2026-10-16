@@ -80,6 +80,7 @@ Other_Player :: struct {
     pos:    [3]f32,  // drawn here (eye), easing after latest
     anim:   Player_Anim,
     pose:   Sword_Pose, // drawn so, easing after latest.sword_pose
+    ping:   int,        // ms, its connection's round trip, as the server measures it
 }
 
 OTHER_TIMEOUT :: 3 // seconds without word before another player is no longer drawn
@@ -227,7 +228,7 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             if int(v.slot) >= MAX_PLAYERS || int(v.slot) == gs.net.slot { break }
             o := &gs.net.others[v.slot]
             if !o.active { o^ = {active = true, pos = v.player.pos, anim = {body_yaw = -math.to_radians(v.player.yaw)}, pose = v.player.sword_pose} }
-            o.latest, o.age = v.player, 0
+            o.latest, o.age, o.ping = v.player, 0, int(v.ping)
         case .Player_Gone:
             slot := msg_get(&r, u8) or_break
             if int(slot) < MAX_PLAYERS {

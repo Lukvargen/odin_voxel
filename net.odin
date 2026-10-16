@@ -162,6 +162,7 @@ Msg_Welcome :: struct {
 
 Msg_Player_View :: struct {
     slot:   u8,
+    ping:   u16, // ms, its connection's round trip (0: the server's own player)
     player: Player,
 }
 

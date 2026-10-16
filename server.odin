@@ -434,6 +434,7 @@ server_flush :: proc(srv: ^Server, dt: f32) {
         for &p, slot in sim.players {
             if !p.active { continue }
             view := Msg_Player_View{slot = u8(slot), player = p}
+            if peer := srv.remotes[slot].peer; peer != nil { view.ping = u16(min(peer.roundTripTime, 65535)) }
             if slot != srv.local_player { outbox_put(&srv.local_out, .Player_View, view) }
             for &rem, rs in srv.remotes {
                 if rem.peer != nil && rs != slot { outbox_put(&rem.out, .Player_View, view) }
