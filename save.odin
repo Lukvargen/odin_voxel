@@ -8,6 +8,7 @@ import "core:strings"
 import "core:time"
 import win "core:sys/windows"
 
+// The server's world (server_world.odin) is saved; a client's never is.
 // Player edits are kept by saving every edited column to its own file under
 // save_dir. Unedited columns are never saved: generation is deterministic, so
 // they are simply regenerated. A column with a save file is loaded from it
@@ -32,24 +33,25 @@ column_path :: proc(buf: []u8, key: [2]int) -> string {
 // the two never write the same files (save_lock).
 world_in_use: bool
 
-// Note which columns have save files. Call before the first enqueue.
-save_init :: proc(gs: ^Game_State) {
+// Open the world in save_dir: lock it, and note which columns have save
+// files. Whether it may be saved (not if another game has it).
+world_open :: proc(w: ^World) -> (saving: bool) {
     world_in_use = !save_lock()
-    gs.save_enabled = !world_in_use
     if world_in_use { fmt.eprintln("Save: this world is open in another game; playing it without saving") }
     files, err := os.read_all_directory_by_path(save_dir, context.temp_allocator)
-    if err != nil { return } // no saves yet
+    if err != nil { return !world_in_use } // no saves yet
     for f in files {
         // c.<x>.<z>.bin
         parts := strings.split(f.name, ".", context.temp_allocator)
         if len(parts) != 4 || parts[0] != "c" || parts[3] != "bin" { continue }
         x, okx := strconv.parse_int(parts[1])
         z, okz := strconv.parse_int(parts[2])
-        if okx && okz { gs.saved_columns[{x, z}] = true }
+        if okx && okz { w.saved_columns[{x, z}] = true }
     }
-    if len(gs.saved_columns) > 0 {
-        fmt.printf("Save: %d edited columns in %s\n", len(gs.saved_columns), save_dir)
+    if len(w.saved_columns) > 0 {
+        fmt.printf("Save: %d edited columns in %s\n", len(w.saved_columns), save_dir)
     }
+    return !world_in_use
 }
 
 save_column :: proc(w: ^World, key: [2]int, col: ^Column) {
@@ -119,19 +121,13 @@ column_decode :: proc(rle: []u8) -> ^Column {
 }
 
 // Save every resident column with unsaved edits.
-save_all_modified :: proc(gs: ^Game_State) {
+save_all_modified :: proc(w: ^World) {
+    if !w.save_enabled { return }
     n := 0
-    for key, col in gs.columns {
-        if col.modified { save_column(gs, key, col); n += 1 }
+    for key, col in w.columns {
+        if col.modified { save_column(w, key, col); n += 1 }
     }
-    gs.last_autosave = time.tick_now()
     if n > 0 { fmt.printf("Save: wrote %d columns\n", n) }
-}
-
-autosave_tick :: proc(gs: ^Game_State) {
-    if gs.save_enabled && time.tick_since(gs.last_autosave) >= AUTOSAVE_INTERVAL {
-        save_all_modified(gs)
-    }
 }
 
 // Hold the world's lock file for as long as this game runs (the system lets

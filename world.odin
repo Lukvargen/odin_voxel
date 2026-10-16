@@ -166,13 +166,14 @@ block_is_leaves :: #force_inline proc(b: u8) -> bool {
 }
 
 // The voxel world: the resident columns, and which have edits saved. Only
-// voxels, nothing of the GPU: a server keeps one, and the client binds its
-// columns to ring slots (gpu_chunk_owner). Game_State embeds the client's
-// (`using voxels`), so a ^Game_State passes as a ^World.
+// voxels, nothing of the GPU. The server keeps one around its players
+// (server_world.odin), saved; each client one around itself, binding its
+// columns to ring slots (gpu_chunk_owner), never saved. Game_State embeds
+// the client's (`using voxels`), so a ^Game_State passes as a ^World.
 World :: struct {
     columns:       map[[2]int]^Column,
     saved_columns: map[[2]int]bool, // columns with a save file (save.odin)
-    save_enabled:  bool,            // edits are saved (off in benches, and joined to a server)
+    save_enabled:  bool,            // edits are saved: only the server's world, and not in benches
 }
 
 // One 8x8x8 chunk. Uniform chunks (all air, all stone) keep no voxel array.
@@ -317,9 +318,10 @@ generate_world :: proc(gs: ^Game_State) {
     // streams the rest of LOAD_RADIUS_XZ in afterward.
     enqueue_radius(gs, STARTUP_RADIUS_XZ)
     for {
+        client_pump(gs) // edited columns come from the server
         integrate_ready_chunks(gs)
         stitch_pending_columns(gs)
-        if streaming_idle(gs) { break }
+        if streaming_idle(gs) && len(gs.net.requested) == 0 { break }
     }
 
     elapsed := time.duration_seconds(time.since(t0))
@@ -344,11 +346,11 @@ enqueue_radius :: proc(gs: ^Game_State, radius: int) {
             wcx := pcx + dcx; wcz := pcz + dcz
             key := [2]int{wcx, wcz}
             if key in gs.columns { continue }
-            if client_joined(gs) && key in gs.net.edited {
+            if key in gs.net.edited {
                 client_request_column(gs, key) // the server's, not generated
                 continue
             }
-            worker_pool_enqueue(&gs.pool, key, key in gs.saved_columns)
+            worker_pool_enqueue(&gs.pool, key, false)
         }
     }
 }
@@ -437,17 +439,10 @@ integrate_ready_chunks :: proc(gs: ^Game_State) {
             column_free(r.column) // already resident: discard the duplicate
             continue
         }
-        if client_joined(gs) && r.key in gs.net.edited {
+        if r.key in gs.net.edited {
             // Edited on the server while it generated: the server's it is.
             column_free(r.column)
             client_request_column(gs, r.key)
-            continue
-        }
-        if r.from_disk != (r.key in gs.saved_columns) {
-            // Saved, or no longer counted as saved (joining or leaving a
-            // server), while it was on its way: fetch it again the right way.
-            column_free(r.column)
-            worker_pool_enqueue(&gs.pool, r.key, r.key in gs.saved_columns)
             continue
         }
         integrate_column(gs, r.key, r.column)

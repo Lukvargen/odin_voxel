@@ -7,10 +7,10 @@ import enet "vendor:ENet"
 // else's, and coming back to your own world. Used by the pause menu's
 // Multiplayer tab and the host / join= arguments.
 //
-// Joined, the world is the server's: this client keeps no saves, and the
-// columns that came from your own saves make way for freshly generated
-// ones (the server's edits will come over the network). Leaving throws
-// away whatever changed while away and brings your saved world back.
+// The client never saves: the world and its saves are the server's, ours
+// or theirs. Switching server, the client forgets what it saw of the old
+// one's (client_reset_world) and the new one sends its list of edited
+// columns. Our own server rests while we're joined elsewhere.
 
 @(private="file")
 enet_ready: bool
@@ -49,22 +49,17 @@ session_stop_hosting :: proc(gs: ^Game_State) {
 session_join :: proc(gs: ^Game_State, address: string) -> bool {
     if client_joined(gs) || !net_ready() { return false }
     session_stop_hosting(gs)
-    if gs.save_enabled { save_all_modified(gs) }
-
-    // Our own saved columns make way for the plain generated world.
-    gs.save_enabled = false
-    unload_columns(gs, gs.saved_columns)
-    clear(&gs.saved_columns)
-    enqueue_chunks(gs)
-
-    // Our own server stops: its monsters and news are no longer ours.
+    // Our own server rests while we're away (saved first): its world, its
+    // monsters and its news are no longer what we see.
+    server_save_all(&gs.server)
     sim_reset(&gs.sim)
     clear(&gs.loop.to_server)
     clear(&gs.loop.to_client)
+    client_reset_world(gs)
 
     gs.net.home_pos, gs.net.home_yaw = gs.camera.pos, gs.camera.yaw
     if !client_join(gs, address) {
-        session_restore_world(gs)
+        server_greet_local(&gs.server) // still ours, then
         return false
     }
     return true
@@ -79,41 +74,17 @@ session_leave :: proc(gs: ^Game_State) {
     n.remote, n.welcomed, n.slot, n.arriving = false, false, LOCAL_PLAYER, false
     n.home_pos = {}
     for &o in n.others { o.active = false }
-    clear(&n.edited)
-    clear(&n.requested)
     clear(&n.out.reliable)
     clear(&n.out.unreliable)
     clear(&gs.loop.to_server)
     clear(&gs.loop.to_client)
     sim_reset(&gs.sim)
-    session_restore_world(gs)
+    // Our own server's world again: what we saw of theirs goes, and ours
+    // tells us what's edited.
+    client_reset_world(gs)
+    server_greet_local(&gs.server)
     if home != 0 { client_arrive(gs, home, yaw) }
     ui_toast(gs, "Back in your own world", 3)
-}
-
-// Our saves again: what changed while joined goes, the saved columns come
-// back from disk.
-@(private="file")
-session_restore_world :: proc(gs: ^Game_State) {
-    gs.save_enabled = false
-    unload_columns(gs, nil) // changed while away: never saved into our world
-    save_init(gs)
-    unload_columns(gs, gs.saved_columns)
-    enqueue_chunks(gs)
-}
-
-// Unload the resident columns in `keys` (the modified ones if nil) without
-// saving them; streaming fetches them again (enqueue_chunks).
-@(private="file")
-unload_columns :: proc(gs: ^Game_State, keys: map[[2]int]bool) {
-    drop := make([dynamic][2]int, context.temp_allocator)
-    for key, col in gs.columns {
-        if keys == nil ? col.modified : key in keys { append(&drop, key) }
-    }
-    for key in drop {
-        gs.columns[key].modified = false
-        unload_column(gs, key)
-    }
 }
 
 // Close everything at exit.

@@ -4,15 +4,13 @@ import "core:fmt"
 import "core:os"
 import "core:strconv"
 import "core:strings"
-import "core:time"
 import SDL "vendor:sdl3"
 
 DOUBLE_TAP_MS :: u64(300)
 
 Game_State :: struct {
     using sim: Sim, // players, slimes, enemies, the day (sim.odin)
-    // The voxels this client sees (world.odin). An in-process server shares
-    // them: sim.world points here.
+    // The voxels this client sees (world.odin); the server has its own.
     using voxels: World,
     server: Server,     // in-process: singleplayer, or hosting (server.odin)
     loop:   Loopback,   // this client's link to it (net.odin)
@@ -60,7 +58,6 @@ Game_State :: struct {
     light_pool:      Brick_Pool,         // free-list allocator over light pool ids
     light_dirty:     [dynamic]int,       // slots whose light needs GPU upload
     stitch_queue:    [dynamic][2]int,    // integrated columns awaiting light stitching
-    last_autosave:   time.Tick,
     player_chunk:    [3]int,
     prof_frames:     int,
 
@@ -137,7 +134,7 @@ Game_State :: struct {
 
 main :: proc() {
     gs: Game_State
-    gs.sim.world = &gs.voxels // singleplayer: the simulation plays in the client's world
+    // (the server points the simulation at its own world: server_init)
     net_host, net_port, join_to := false, NET_PORT, ""
     start_yaw: f32
     server_init(&gs.server, &gs.sim, &gs.loop)
@@ -265,7 +262,17 @@ main :: proc() {
     gs.light_dirty = make([dynamic]int)
     defer delete(gs.light_dirty)
     defer delete(gs.stitch_queue)
-    if !bench { save_init(&gs) }
+    if bench {
+        // Benches drive the simulation directly, in the world they look at.
+        gs.sim.world = &gs.voxels
+    } else {
+        // Our own server opens the world and tells us which columns differ
+        // from the generated one: we fetch those from it while loading.
+        server_open(&gs.server, saves = true)
+        server_greet_local(&gs.server)
+        client_receive(&gs, 0)
+    }
+    defer server_close(&gs.server)
     generate_world(&gs)
     gpu_init(&gs)
     defer gpu_destroy(&gs)
@@ -450,7 +457,6 @@ main :: proc() {
 
         if gs.ui.quit_requested { quit = true }
         if quit {
-            if gs.save_enabled { save_all_modified(&gs) }
             break
         }
 
@@ -558,7 +564,6 @@ main :: proc() {
         audio_update(&gs, dt)
         gpu_render(&gs)
         ui_build_and_render(&gs, dt)
-        autosave_tick(&gs)
 
         free_all(context.temp_allocator)
 

@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import "core:time"
 import la "core:math/linalg"
 import enet "vendor:ENet"
 
@@ -25,6 +26,10 @@ import enet "vendor:ENet"
 VIEW_RATE :: 30 // player views and the clock sent this many times a second
 
 Server :: struct {
+    world:        World,     // around every player (server_world.odin); the simulation plays in it
+    loader:       Server_Loader,
+    stream_timer: f32,
+    last_autosave: time.Tick,
     sim:          ^Sim,
     link:         ^Loopback, // the local client
     local_player: int,       // its player slot
@@ -43,6 +48,7 @@ Remote :: struct {
 
 server_init :: proc(srv: ^Server, sim: ^Sim, link: ^Loopback) {
     srv^ = {sim = sim, link = link, local_player = LOCAL_PLAYER}
+    sim.world = &srv.world
 }
 
 // Open the server to players elsewhere, on UDP `port`. ENet must be
@@ -68,6 +74,7 @@ server_shutdown :: proc(srv: ^Server) {
 
 server_step :: proc(srv: ^Server, dt: f32) {
     server_receive(srv)
+    server_stream(srv, dt)
     server_simulate(srv, dt)
     server_flush(srv, dt)
 }
@@ -302,7 +309,6 @@ server_save_away :: proc(srv: ^Server) {
 
 // Every column that differs from the generated world: saved, or edited
 // since the last save.
-@(private="file")
 server_send_edited :: proc(srv: ^Server, o: ^Outbox) {
     w := srv.sim.world
     m: Msg_Edited

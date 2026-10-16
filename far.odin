@@ -251,7 +251,9 @@ far_enqueue :: proc(gs: ^Game_State) {
             job := Far_Job{key = key}
             for c in 0 ..< FAR_TILE_COLUMNS * FAR_TILE_COLUMNS {
                 ck := key * FAR_TILE_COLUMNS + {c % FAR_TILE_COLUMNS, c / FAR_TILE_COLUMNS}
-                if ck in gs.saved_columns { job.saved |= 1 << u16(c) }
+                // Edited columns far off: from our own server's saves (a
+                // joined client sees them unedited until near).
+                if !client_joined(gs) && ck in gs.net.edited { job.saved |= 1 << u16(c) }
             }
             append(&jobs, job)
         }

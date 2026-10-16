@@ -35,8 +35,9 @@ Client_Net :: struct {
     arriving:   bool,
     arrive_pos: [3]f32,
     arrive_yaw: f32,
-    // Joined: the columns that differ from the generated world, which come
-    // from the server (client_request_column), and those asked for.
+    // The columns that differ from the generated world, which come from the
+    // server (client_request_column), and those asked for. A client never
+    // reads or writes saves: the world is the server's.
     edited:     map[[2]int]bool,
     requested:  map[[2]int]bool,
     // Joined: the server's slimes and enemies near us live in gs.slimes and
@@ -99,6 +100,17 @@ client_leave :: proc(gs: ^Game_State) {
     enet.host_flush(n.host)
     enet.host_destroy(n.host)
     n.host, n.peer = nil, nil
+}
+
+// What the startup loading waits on (generate_world): with our own server,
+// a round trip over the loopback, so the edited columns asked for arrive.
+client_pump :: proc(gs: ^Game_State) {
+    if !client_joined(gs) {
+        outbox_move(&gs.net.out, &gs.loop.to_server)
+        server_receive(&gs.server)
+        server_flush(&gs.server, 0)
+    }
+    client_receive(gs, 0)
 }
 
 client_send :: proc(gs: ^Game_State, kind: Msg_Kind, body: $T) {
@@ -200,7 +212,6 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             if client_joined(gs) && int(v.index) < MAX_ENEMIES { client_enemy_view(gs, v) }
         case .Edited:
             m := msg_get(&r, Msg_Edited) or_break
-            if !client_joined(gs) { break }
             for k in m.keys[:min(int(m.count), len(m.keys))] {
                 key := [2]int{int(k.x), int(k.y)}
                 gs.net.edited[key] = true
@@ -286,7 +297,10 @@ replicas_update :: proc(gs: ^Game_State, dt: f32) {
 // much of one.
 client_send_voxels :: proc(gs: ^Game_State, changed: [][3]int) {
     per_chunk := make(map[[3]int]int, 16, context.temp_allocator)
-    for p in changed { per_chunk[{p.x >> 3, p.y >> 3, p.z >> 3}] += 1 }
+    for p in changed {
+        per_chunk[{p.x >> 3, p.y >> 3, p.z >> 3}] += 1
+        gs.net.edited[{p.x >> 3, p.z >> 3}] = true // streamed out and back in, it comes from the server
+    }
     m: Msg_Voxels
     for p in changed {
         key := [3]int{p.x >> 3, p.y >> 3, p.z >> 3}
@@ -318,13 +332,28 @@ client_send_voxels :: proc(gs: ^Game_State, changed: [][3]int) {
 client_write :: proc(gs: ^Game_State, p: [3]int, block: u8, changed: ^[dynamic][3]int) {
     if p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX || int(block) >= len(Block_Type) { return }
     key := [2]int{p.x >> 3, p.z >> 3}
-    if client_joined(gs) { gs.net.edited[key] = true }
+    gs.net.edited[key] = true
     col := gs.columns[key]
     if col == nil { return }
     vi := (p.x & 7) + (p.y & 7) * CHUNK_VOXELS + (p.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS
     chunk_set_voxel(&col.chunks[chunk_y_index(p.y >> 3)], vi, block) // already set if the server shares our world
     col.modified = true
     append(changed, p)
+}
+
+// Forget the server's world: the columns it sent and those changed here go
+// (streaming generates or fetches them again), and so does the list of
+// edited ones. Leaving or joining a server; the new one sends its own list.
+client_reset_world :: proc(gs: ^Game_State) {
+    drop := make([dynamic][2]int, context.temp_allocator)
+    for key, col in gs.columns { if col.modified || key in gs.net.edited { append(&drop, key) } }
+    for key in drop {
+        gs.columns[key].modified = false
+        unload_column(gs, key)
+    }
+    clear(&gs.net.edited)
+    clear(&gs.net.requested)
+    enqueue_chunks(gs)
 }
 
 // Ask the server for an edited column (once until it comes).
@@ -340,8 +369,8 @@ client_request_column :: proc(gs: ^Game_State, key: [2]int) {
 @(private="file")
 client_take_column :: proc(gs: ^Game_State, key: [2]int, bytes: []u8) {
     n := &gs.net
+    if !(key in n.requested) { return } // asked of a server we've since left
     delete_key(&n.requested, key)
-    if !client_joined(gs) { return }
     col := len(bytes) > 0 ? column_decode(bytes) : nil
     if col == nil {
         delete_key(&n.edited, key)
