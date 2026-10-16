@@ -1682,6 +1682,13 @@ menu_graphics :: proc(gs: ^Game_State) {
         toggle("Ent", &gs.entities_enabled)
     }
     if clay.UI()(setting_row()) {
+        row_label("View distance")
+        radii := VIEW_RADII
+        cur := 2
+        for r, i in radii { if view_radius == r { cur = i } }
+        if i := segmented("View", {"Short", "Medium", "Far"}, cur); i >= 0 { set_view_radius(gs, radii[i]) }
+    }
+    if clay.UI()(setting_row()) {
         row_label("Far terrain")
         toggle("Far", &gs.far_enabled)
     }

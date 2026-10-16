@@ -5,6 +5,7 @@ import "core:math"
 import la "core:math/linalg"
 import "core:math/noise"
 import "core:slice"
+import "core:sync"
 import "core:time"
 
 CHUNK_VOXELS :: 8
@@ -246,6 +247,27 @@ slot_chunk :: proc(gs: ^Game_State, slot: int) -> ^Chunk {
 }
 
 LOAD_RADIUS_XZ  :: 56   // must stay < CHUNKS_W/2 (=64) so a chunk and its ring-twin never coexist
+
+// Columns loaded around the player (the options' view distance), at most
+// LOAD_RADIUS_XZ; the far terrain stands in past it. Read by the workers.
+view_radius: int = LOAD_RADIUS_XZ
+VIEW_RADII :: [3]int{24, 40, LOAD_RADIUS_XZ} // Short, Medium, Far
+
+// A new view distance: what's now beyond it goes (with a margin, so turning
+// it down doesn't stutter on the edge), what's within comes in.
+set_view_radius :: proc(gs: ^Game_State, r: int) {
+    r := clamp(r, 8, LOAD_RADIUS_XZ)
+    if r == view_radius { return }
+    sync.atomic_store(&view_radius, r)
+    drop := make([dynamic][2]int, context.temp_allocator)
+    pc := [2]int{gs.player_chunk.x, gs.player_chunk.z}
+    for key in gs.columns {
+        d := key - pc
+        if d.x * d.x + d.y * d.y > (r + 2) * (r + 2) { append(&drop, key) }
+    }
+    for key in drop { unload_column(gs, key) }
+    enqueue_chunks(gs)
+}
 LOAD_RADIUS_Y   :: 7
 
 // Cave band. Below CAVE_FLOOR_Y everything is solid stone via the no-noise
@@ -357,7 +379,18 @@ enqueue_radius :: proc(gs: ^Game_State, radius: int) {
 }
 
 enqueue_chunks :: proc(gs: ^Game_State) {
-    enqueue_radius(gs, LOAD_RADIUS_XZ)
+    r := view_radius
+    enqueue_radius(gs, r)
+    if r < LOAD_RADIUS_XZ {
+        // Shorter than the ring holds: what's fallen behind goes.
+        drop := make([dynamic][2]int, context.temp_allocator)
+        pc := [2]int{gs.player_chunk.x, gs.player_chunk.z}
+        for key in gs.columns {
+            d := key - pc
+            if d.x * d.x + d.y * d.y > (r + 2) * (r + 2) { append(&drop, key) }
+        }
+        for key in drop { unload_column(gs, key) }
+    }
 }
 
 // Point a ring slot's GPU index at the chunk it holds: a uniform chunk is
@@ -1100,7 +1133,9 @@ loaded_radius :: proc(gs: ^Game_State) -> int {
         })
     }
     pc := [2]int{gs.player_chunk.x, gs.player_chunk.z}
+    r := view_radius
     for o in g_load_offsets {
+        if o.x * o.x + o.y * o.y > r * r { return r }
         x, z := pc.x + o.x, pc.y + o.y
         owner := gs.gpu_chunk_owner[ring_slot(x, WORLD_CHUNK_Y_MIN, z)]
         if int(owner[0]) != x || int(owner[1]) != z {

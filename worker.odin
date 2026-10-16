@@ -234,7 +234,8 @@ worker_proc :: proc(data: rawptr) {
             k := pool.pending[i].key
             ddx := k[0] - pcx
             ddz := k[1] - pcz
-            if ddx*ddx + ddz*ddz > LOAD_RADIUS_XZ * LOAD_RADIUS_XZ {
+            r := sync.atomic_load(&view_radius)
+            if ddx*ddx + ddz*ddz > r * r {
                 worker_pool_unqueue(pool, k)        // stale: re-enqueueable later
                 n := len(pool.pending)
                 pool.pending[i] = pool.pending[n-1] // swap-remove
