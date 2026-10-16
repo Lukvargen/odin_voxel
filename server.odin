@@ -39,6 +39,13 @@ Server :: struct {
     local_out:    Outbox,    // to the local client, moved to link.to_client at the flush
     away:         map[[2]int]^Column, // columns edited this step that aren't loaded: saved, then freed
     names:        [MAX_PLAYERS]Msg_Text, // what each player is called (empty: not said yet)
+    places:       map[string]Place,      // where each player (by name) was last (server_world.odin)
+}
+
+// Where a player was, to carry on from when they're back.
+Place :: struct {
+    pos: [3]f32, // eye
+    yaw: f32,
 }
 
 // A player connected over ENet.
@@ -180,6 +187,7 @@ server_drop :: proc(srv: ^Server, slot: int) {
     srv.sim.players[slot].active = false
     server_broadcast(srv, .Player_Gone, u8(slot))
     server_notice(srv, fmt.tprintf("%s left", server_player_name(srv, slot)))
+    server_note_place(srv, slot)
     srv.names[slot] = {}
     fmt.printf("Host: player %d left\n", slot)
 }
@@ -274,11 +282,17 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
             first := srv.names[player].len == 0
             srv.names[player] = name
             server_broadcast(srv, .Player_Name, Msg_Player_Name{slot = u8(player), name = name})
-            if first && player != srv.local_player { server_notice(srv, fmt.tprintf("%s joined", server_player_name(srv, player))) }
+            if first && player != srv.local_player {
+                server_notice(srv, fmt.tprintf("%s joined", server_player_name(srv, player)))
+                // Been here before: back where they were.
+                if place, ok := srv.places[string(name.text[:name.len])]; ok {
+                    outbox_put(server_outbox(srv, player), .Move_To, Msg_Move_To{pos = place.pos, yaw = place.yaw})
+                }
+            }
         case .Say:
             m := msg_get(&r, Msg_Text) or_break
             if len(text_of(&m)) > 0 { server_broadcast(srv, .Chat_Line, Msg_Chat_Line{slot = u8(player), line = m}) }
-        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line:
+        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line, .Move_To:
             r.at = len(r.data) // not a connected client's to send: drop the rest
         }
     }

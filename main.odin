@@ -144,6 +144,7 @@ main :: proc() {
         gs.ui.name_field.len = copy(gs.ui.name_field.buf[:], user.text[:user.len])
     }
     start_yaw: f32
+    start_at: bool // at= given: start there, not where we were last
     server_init(&gs.server, &gs.sim, &gs.loop)
     bench := len(os.args) > 1 && os.args[1] == "bench"
     if len(os.args) > 1 && os.args[1] == "sounds" {
@@ -213,6 +214,7 @@ main :: proc() {
         for a in os.args[1:] {
             switch {
             case strings.has_prefix(a, "at="):
+                start_at = true
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 if len(xz) == 2 {
                     x, okx := strconv.parse_int(xz[0])
@@ -280,7 +282,7 @@ main :: proc() {
         // Our own server opens the world and tells us which columns differ
         // from the generated one: we fetch those from it while loading.
         server_open(&gs.server, saves = true)
-        server_greet_local(&gs.server)
+        server_greet_local(&gs.server, client_name(&gs), resume = !start_at)
         client_receive(&gs, 0)
     }
     defer server_close(&gs.server)

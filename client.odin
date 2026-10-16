@@ -235,6 +235,9 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
                 gs.net.others[slot].active = false
                 gs.net.names[slot] = {}
             }
+        case .Move_To:
+            m := msg_get(&r, Msg_Move_To) or_break
+            client_arrive(gs, m.pos, m.yaw)
         case .Player_Name:
             m := msg_get(&r, Msg_Player_Name) or_break
             if int(m.slot) < MAX_PLAYERS {

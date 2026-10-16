@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Move_To), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -64,6 +64,7 @@ Msg_Kind :: enum u8 {
     Edited,       // Msg_Edited: columns that differ from the generated world (ask for them)
     Column_Data,  // Msg_Column_Data, then `size` bytes: the column, run-length (column_encode)
     Player_Name,  // Msg_Player_Name: what a player is called
+    Move_To,      // Msg_Move_To: you're back: carry on from where you were
     Chat_Line,    // Msg_Chat_Line: a chat line, or the server's news (someone joined, left)
 }
 
@@ -75,6 +76,11 @@ SERVER_SLOT :: 0xff // Chat_Line from the server itself
 Msg_Text :: struct {
     len:  u8,
     text: [TEXT_MAX]u8,
+}
+
+Msg_Move_To :: struct {
+    pos: [3]f32, // eye
+    yaw: f32,
 }
 
 Msg_Player_Name :: struct {
