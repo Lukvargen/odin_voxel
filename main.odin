@@ -10,6 +10,8 @@ import SDL "vendor:sdl3"
 DOUBLE_TAP_MS :: u64(300)
 
 Game_State :: struct {
+    using sim: Sim, // players, slimes, enemies, the day (sim.odin)
+
     // SDL3
     window:     ^SDL.Window,
     gpu_device: ^SDL.GPUDevice,
@@ -19,9 +21,7 @@ Game_State :: struct {
     glider: Glider, // hang glider (glider.odin)
     player_anim: Player_Anim, // third-person body animation (creatures.odin)
     combat: Combat, // the sword, health, combos (combat.odin)
-    slimes: Slimes, // (slime.odin)
     fx: Effects, // goo, sparks, dust, damage numbers (fx.odin)
-    enemies: Enemies, // skeletons, goblins, orcs; landmark guards (enemies.odin)
     sky_thermals:      [MAX_SKY_THERMALS]Sky_Thermal, // strong thermals near the player, for cumulus (glider.odin)
     sky_thermal_count: int,
     sky_thermal_cell:  [2]int,
@@ -95,7 +95,6 @@ Game_State :: struct {
 
     // Settings
     light_dir:      [3]f32,
-    day:            Day_Cycle, // time of day: sun, moon, night, mist (daycycle.odin)
     reflect_amount: i32,
     aa_samples:     i32,   // anti-alias samples: 1/2/4 (F2 cycles)
     shadow_rays:    i32,   // near-surface shadow rays: 1 hard / 3 soft (F3)
@@ -458,6 +457,7 @@ main :: proc() {
             }
         }
         combat_post_update(&gs, dt)
+        sim_sync_local_player(&gs)
         slimes_update(&gs, dt)
         enemies_update(&gs, dt)
         fx_update(&gs, fx_dt)

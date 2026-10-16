@@ -78,6 +78,7 @@ bench_combat_run :: proc(gs: ^Game_State) {
         combat_pre_update(gs, in_, dt)
         camera_update(cam, gs, 0, 0, dt, false, false, move_left, false, jump, false, false, false)
         combat_post_update(gs, dt)
+        sim_sync_local_player(gs)
         slimes_update(gs, dt)
         fx_update(gs, fx_dt)
         glider_view_update(gs, dt)
@@ -181,6 +182,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
             combat_pre_update(gs, in_, dt)
             camera_update(cam, gs, 0, 0, dt, false, false, false, false, false, false, false, false)
             combat_post_update(gs, dt)
+            sim_sync_local_player(gs)
             enemies_update(gs, dt)
             fx_update(gs, fx_dt)
             combat_view_update(gs, dt)
@@ -205,6 +207,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
         for _ in 0 ..< 30 {
             gs.enemies.site_timer = 0
             cam.fly_mode = false
+            sim_sync_local_player(gs)
             enemies_update(gs, dt)
             cam.fly_mode = true
         }
@@ -219,7 +222,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
     day_update(gs, 0)
     cam.fly_mode = false
     gs.enemies.spawn_timer, gs.enemies.site_timer = 0, 1e9
-    for _ in 0 ..< 60 * 20 { enemies_update(gs, dt) }
+    for _ in 0 ..< 60 * 20 { sim_sync_local_player(gs); enemies_update(gs, dt) }
     counts: [Enemy_Kind]int
     rising := 0
     for e in gs.enemies.list { if e.alive { counts[e.kind] += 1; if e.nocturnal { rising += 1 } } }
@@ -262,6 +265,7 @@ bench_nav_run :: proc(gs: ^Game_State) {
             combat_pre_update(gs, {}, dt)
             camera_update(cam, gs, 0, 0, dt, false, false, false, false, false, false, false, false)
             combat_post_update(gs, dt)
+            sim_sync_local_player(gs)
             enemies_update(gs, dt)
             closest = min(closest, la.length((e.pos - (cam.pos - {0, PLAYER_EYE_HEIGHT, 0})).xz))
             if e.state != last {

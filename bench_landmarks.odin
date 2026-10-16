@@ -105,7 +105,7 @@ bench_slimes_run :: proc(gs: ^Game_State) {
     }
     // Settle them onto the ground (no hops: the timers stay far off).
     for &sl in gs.slimes.list { sl.timer = 1e9 }
-    for _ in 0 ..< 60 { slimes_update(gs, 1.0 / 60.0) }
+    for _ in 0 ..< 60 { sim_sync_local_player(gs); slimes_update(gs, 1.0 / 60.0) }
     cam.pos = {f32(x) + 0.5, f32(bench_ground(gs, x, z)) + 2.6, f32(z) + 0.5}
     cam.yaw, cam.pitch = 15, -12
     bench_measure(gs)

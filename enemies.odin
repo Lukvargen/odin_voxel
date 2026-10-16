@@ -125,6 +125,7 @@ Enemy :: struct {
     rising:     f32,    // 1 while clawing up out of the ground, to 0
     nocturnal:  bool,   // crumbles at dawn
     // Senses and getting about (enemy_path.odin)
+    prey:       int,    // the player it watches and goes after (sim.odin)
     sees:       bool,   // the player, last time it looked
     see_timer:  f32,    // until it looks again
     last_seen:  [3]f32, // where the player's feet were
@@ -192,33 +193,40 @@ enemies_update :: proc(gs: ^Game_State, dt: f32) {
     if dt <= 0 { return }
     s.time += dt
     enemy_paths_frame()
-    feet := gs.camera.pos - {0, PLAYER_EYE_HEIGHT, 0}
     night := gs.day.night
 
-    // Drop the far ones; count the roaming population.
-    roaming := 0
+    // Drop the ones far from every player.
     for &e in s.list {
         if !e.alive { continue }
-        d := la.length((e.pos - feet).xz)
+        _, d := nearest_player(&gs.sim, e.pos)
         if d > ENEMY_DESPAWN || e.pos.y < -100 {
             e.alive = false
             if e.guard { site_forget(s, e.site) }
-            continue
         }
-        if !e.guard && d < ENEMY_RANGE { roaming += 1 }
     }
 
-    if gs.entities_enabled && !gs.camera.fly_mode {
+    // Each player on foot keeps a roaming population about them, and wakes
+    // the guards of the landmarks they come near.
+    if gs.entities_enabled {
         s.spawn_timer -= dt
-        if s.spawn_timer <= 0 {
-            want := 3 + int(math.round(4 * night))
-            s.spawn_timer = roaming < want ? 2.5 : 6
-            if roaming < want { enemy_try_spawn(gs, feet, night) }
-        }
         s.site_timer -= dt
-        if s.site_timer <= 0 {
-            s.site_timer = 1
-            sites_update(gs, feet)
+        spawn, sites := s.spawn_timer <= 0, s.site_timer <= 0
+        if spawn { s.spawn_timer = 6 }
+        if sites { s.site_timer = 1 }
+        for &p in gs.players {
+            if !p.active || p.fly_mode { continue }
+            feet := player_feet(&p)
+            if spawn {
+                roaming := 0
+                for &e in s.list {
+                    if e.alive && !e.guard && la.length((e.pos - feet).xz) < ENEMY_RANGE { roaming += 1 }
+                }
+                if want := 3 + int(math.round(4 * night)); roaming < want {
+                    s.spawn_timer = 2.5
+                    enemy_try_spawn(gs, feet, night)
+                }
+            }
+            if sites { sites_update(gs, feet) }
         }
     }
 
@@ -232,7 +240,7 @@ enemies_update :: proc(gs: ^Game_State, dt: f32) {
         e.age += dt
         e.timer -= dt
         e.rising = max(e.rising - dt * 0.9, 0)
-        enemy_think(gs, &e, feet, dt)
+        enemy_think(gs, &e, dt)
         if !e.alive { continue }
         for _ in 0 ..< steps { enemy_move(gs, &e, h) }
         sp := la.length(e.vel.xz)
@@ -261,12 +269,19 @@ enemies_update :: proc(gs: ^Game_State, dt: f32) {
 }
 
 @(private="file")
-enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
+enemy_think :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
     sp := ENEMY_SPECS[e.kind]
+    // Unbothered, it keeps an eye on whoever is nearest; once after
+    // someone, it sticks with them.
+    if e.state == .Idle || e.state == .Wander || !gs.players[e.prey].active {
+        if i, _ := nearest_player(&gs.sim, e.pos); i >= 0 { e.prey = i }
+    }
+    p := &gs.players[e.prey]
+    feet := player_feet(p)
     to_player := feet - e.pos
     dist := la.length(to_player.xz)
     dir := dist > 0.01 ? to_player.xz / dist : [2]f32{-math.sin(e.yaw), math.cos(e.yaw)}
-    hunting := !gs.camera.fly_mode && gs.entities_enabled
+    hunting := p.active && !p.fly_mode && gs.entities_enabled
     accel: [2]f32 // wanted ground velocity
     want_speed: f32
 
@@ -282,9 +297,8 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
         e.see_timer = 0.25
         e.sees = dist < 64 && enemy_sees_player(gs, e)
     }
-    cam := &gs.camera
-    sight := sp.aggro * (cam.sneaking ? 0.55 : 1)
-    hear: f32 = cam.sneaking ? 1.5 : (cam.sprinting ? 8 : 4)
+    sight := sp.aggro * (p.sneaking ? 0.55 : 1)
+    hear: f32 = p.sneaking ? 1.5 : (p.sprinting ? 8 : 4)
 
     switch e.state {
     case .Idle, .Wander:
@@ -358,7 +372,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
            la.dot(dir, fwd) > (e.swing == .Slash ? -0.1 : 0.45) {
             e.struck = true
             knock := [3]f32{dir.x * sp.knock[0], sp.knock[1], dir.y * sp.knock[0]}
-            switch combat_hurt(gs, sp.damage, knock, enemy_center(e)) {
+            switch player_hurt(gs, e.prey, sp.damage, knock, enemy_center(e)) {
             case .Hit:
                 play_at(e.kind == .Skeleton ? .Bone_Hit : .Slam, feet + {0, 1, 0}, 0.5, 1.3 * vary(0.06), 10)
             case .Blocked:
@@ -399,9 +413,7 @@ enemy_think :: proc(gs: ^Game_State, e: ^Enemy, feet: [3]f32, dt: f32) {
     if dist < r && to_player.y > -sp.height && to_player.y < PLAYER_EYE_HEIGHT {
         over := r - dist
         e.vel.xz -= dir * over * 30 * dt / sp.weight
-        cam := &gs.camera
-        cam.pos, _ = move_axis(gs, cam.pos, {dir.x * over * 0.5, 0, 0})
-        cam.pos, _ = move_axis(gs, cam.pos, {0, 0, dir.y * over * 0.5})
+        player_push(gs, e.prey, dir, over)
     }
 }
 
@@ -468,8 +480,9 @@ enemy_move :: proc(gs: ^Game_State, e: ^Enemy, dt: f32) {
     }
 }
 
-// Damage and knock it about. True if it died.
-enemy_damage :: proc(gs: ^Game_State, e: ^Enemy, damage: f32, knock: [3]f32, boosted: bool) -> bool {
+// Damage and knock it about; player `by` struck it, and has its attention.
+// True if it died.
+enemy_damage :: proc(gs: ^Game_State, e: ^Enemy, damage: f32, knock: [3]f32, boosted: bool, by := LOCAL_PLAYER) -> bool {
     sp := ENEMY_SPECS[e.kind]
     if e.state == .Dead { return false }
     e.hp -= damage
@@ -479,7 +492,8 @@ enemy_damage :: proc(gs: ^Game_State, e: ^Enemy, damage: f32, knock: [3]f32, boo
     e.vel.y = knock.y / math.sqrt(sp.weight)
     e.on_ground = false
     e.rising = 0
-    e.last_seen, e.seen_ago = gs.camera.pos - {0, PLAYER_EYE_HEIGHT, 0}, 0
+    e.prey = by
+    e.last_seen, e.seen_ago = player_feet(&gs.players[by]), 0
     c := enemy_center(e)
     add_number(&gs.fx, c + {0, sp.height * 0.5, 0}, damage, boosted)
     splat(&gs.fx, c, sp.gore, knock, 5, 0.5)

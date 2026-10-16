@@ -147,10 +147,11 @@ find_path :: proc(gs: ^Game_State, from, to: [3]int, clear: int, out: ^[PATH_MAX
     return n, goal >= 0
 }
 
-// A clear line from the enemy's eyes to the player's head or chest.
+// A clear line from the enemy's eyes to its prey's head or chest.
 enemy_sees_player :: proc(gs: ^Game_State, e: ^Enemy) -> bool {
     eye := e.pos + {0, ENEMY_SPECS[e.kind].height * 0.9, 0}
-    for target in ([2][3]f32{gs.camera.pos, gs.camera.pos - {0, 0.7, 0}}) {
+    head := gs.players[e.prey].pos
+    for target in ([2][3]f32{head, head - {0, 0.7, 0}}) {
         d := target - eye
         l := la.length(d)
         if l < 0.5 { return true }
