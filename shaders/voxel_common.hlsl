@@ -11,8 +11,8 @@
 // ---- World constants (must match world.odin) --------------------------------
 #define BRICK_CHUNK_SIZE     8
 #define CHUNK_COUNT_WIDTH   128
-#define GPU_CHUNKS_HEIGHT   64
-#define WORLD_CHUNK_Y_MIN  (-32)
+#define GPU_CHUNKS_HEIGHT   80
+#define WORLD_CHUNK_Y_MIN  (-16)
 #define RAY_MAX_LENGTH      1024.0
 
 // Coarse occupancy: one counter per 4x4x4 chunks (32^3 voxels) of the ring,

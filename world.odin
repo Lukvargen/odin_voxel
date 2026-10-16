@@ -9,7 +9,7 @@ import "core:time"
 
 CHUNK_VOXELS :: 8
 CHUNKS_W     :: 128   // ring width in chunks (MUST match shader CHUNK_COUNT_WIDTH)
-CHUNKS_H     :: 64    // total Y chunks resident in the ring
+CHUNKS_H     :: 80    // total Y chunks resident in the ring (MUST match shader GPU_CHUNKS_HEIGHT)
 
 // Per-brick occupancy bitmask: 8^3 = 512 voxels = 512 bits = 16 u32.
 MASK_U32_PER_BRICK :: (CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS) / 32
@@ -106,10 +106,11 @@ pool_exhaustion_warn :: proc() {
 // World chunk-Y range. wcy (world chunk Y) is valid in
 // [WORLD_CHUNK_Y_MIN, WORLD_CHUNK_Y_MIN + CHUNKS_H). It maps to a ring Y
 // index in [0, CHUNKS_H) by subtracting WORLD_CHUNK_Y_MIN. World voxel Y
-// thus spans [WORLD_CHUNK_Y_MIN*8, (WORLD_CHUNK_Y_MIN+CHUNKS_H)*8) = [-256, +256).
-WORLD_CHUNK_Y_MIN :: -32
-WORLD_Y_MIN       :: WORLD_CHUNK_Y_MIN * CHUNK_VOXELS                 // -256
-WORLD_Y_MAX       :: (WORLD_CHUNK_Y_MIN + CHUNKS_H) * CHUNK_VOXELS    // +256
+// thus spans [WORLD_CHUNK_Y_MIN*8, (WORLD_CHUNK_Y_MIN+CHUNKS_H)*8) = [-128, +512):
+// below the caves it's solid stone, so the room goes to the mountains.
+WORLD_CHUNK_Y_MIN :: -16 // (MUST match the shader's)
+WORLD_Y_MIN       :: WORLD_CHUNK_Y_MIN * CHUNK_VOXELS                 // -128
+WORLD_Y_MAX       :: (WORLD_CHUNK_Y_MIN + CHUNKS_H) * CHUNK_VOXELS    // +512
 
 Block_Type :: enum u8 {
     Air           = 0,
