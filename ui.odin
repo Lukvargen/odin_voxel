@@ -1361,10 +1361,28 @@ debug_layout :: proc(gs: ^Game_State) {
         line("pos", fmt.tprintf("%.1f  %.1f  %.1f", p.x, p.y, p.z))
         line("look", fmt.tprintf("yaw %.0f  pitch %.0f", gs.camera.yaw, gs.camera.pitch))
         line("chunk", fmt.tprintf("%d  %d  %d", gs.player_chunk.x, gs.player_chunk.y, gs.player_chunk.z))
-        if hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH); ok {
+        if hit, nrm, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH); ok {
             b := Block_Type(u8(get_voxel(gs, hit.x, hit.y, hit.z)))
             line("target", fmt.tprintf("%s  %d %d %d", block_name(b), hit.x, hit.y, hit.z))
+            // The light in front of the face looked at, as the CPU holds it
+            // and as the GPU will read it (light.odin light_probe).
+            if pr, pok := light_probe(gs, hit + nrm); pok {
+                line("light", fmt.tprintf("sky %d  block %d  %s%s", pr.sky, pr.blk, pr.per_voxel ? "per voxel" : "one value",
+                    pr.queued ? "  UNSTITCHED" : ""))
+                mismatch := !pr.gpu_brick && (pr.per_voxel || pr.gpu_sky != pr.sky)
+                line("gpu light", fmt.tprintf("%s%s%s%s", pr.gpu_brick ? "brick" : fmt.tprintf("one value, sky %d", pr.gpu_sky),
+                    pr.gpu_owned ? "" : "  NOT OWNED", pr.dirty ? "  upload pending" : "", mismatch ? "  MISMATCH" : ""))
+            }
         }
+        near := 0
+        for k in gs.stitch_queue {
+            d := k - gs.player_chunk.xz
+            if d.x * d.x + d.y * d.y <= LIGHT_STITCH_NEAR * LIGHT_STITCH_NEAR { near += 1 }
+        }
+        line("stitch", fmt.tprintf("%d queued, %d near   F9 relight here", len(gs.stitch_queue), near))
+        used := MAX_LIGHT_BRICKS - int(gs.light_pool.free_top)
+        line("light mem", fmt.tprintf("%d of %d bricks (%.0f%%)%s", used, MAX_LIGHT_BRICKS, 100 * f32(used) / MAX_LIGHT_BRICKS,
+            len(gs.light_starved) > 0 ? fmt.tprintf("  %d WAITING", len(gs.light_starved)) : ""))
         line("columns", fmt.tprintf("%d loaded, %d pending", len(gs.columns), worker_pool_pending_count(&gs.pool)))
         line("entities", fmt.tprintf("%d drawn", gs.entity_count))
         line("render", fmt.tprintf("%dx%d (%.0f%%)  aa%d  %s", gs.render_w, gs.render_h, gs.render_scale * 100, gs.aa_samples, gs.shadow_rays == 1 ? "hard" : "soft"))

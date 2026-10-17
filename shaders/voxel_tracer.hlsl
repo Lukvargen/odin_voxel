@@ -152,12 +152,16 @@ float3 hand_light(float3 p, float3 n, bool two_sided) {
     return TORCH_LIGHT_COLOR * (block_light_curve(level) * ndl * sh);
 }
 
-// Sun bounced off sunlit ground (mostly grass, rock, sand): reaches faces
-// turned sideways or down. Scaled by the face's sky light by the caller.
+// Sun bounced off sunlit surfaces (grass, rock, sand): fills faces turned
+// sideways or down, and some from the walls onto the floor. Not only off
+// flat ground: a low sun lights walls and slopes square on, so a canyon or
+// a cave mouth at golden hour fills with warm light off the bright rock
+// beside it. Scaled by the face's sky light by the caller (how open it is).
 float3 bounce_light(float3 n) {
-    float facing = n.y > 0.5 ? 0.0 : (n.y < -0.5 ? 1.0 : 0.6);
-    return sun_tint() * float3(0.85, 0.80, 0.62)
-         * (u_sun_intensity * saturate(light_dir_normalized.y) * 0.09 * facing);
+    float facing = n.y > 0.5 ? 0.3 : (n.y < -0.5 ? 1.0 : 0.7);
+    float up = saturate(light_dir_normalized.y);
+    float lit = smoothstep(-0.02, 0.06, light_dir_normalized.y) * (0.5 + 0.5 * up);
+    return sun_tint() * float3(0.85, 0.80, 0.62) * (u_sun_intensity * lit * 0.2 * facing);
 }
 
 // Tone mapping lives in composite.hlsl — the LAST pass — so the volumetric
@@ -1290,7 +1294,7 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     if (n_dot_l > 0.0 && sky_level > 0.0) {
         float3 shadow_origin = hit_point + surf_normal * epsilon;
         float shadow_factor = full_sun ? trace_shadow_transmittance(shadow_origin, l)
-                                       : smoothstep(13.0, 15.0, sky_level);
+                                       : smoothstep(SKY_LIGHT_MAX - 3.0, SKY_LIGHT_MAX, sky_level);
         // Soft shadow: 5-tap disc within a small sun cone (~3 deg).
         // t0 is binary for solid occluders, so it can't detect
         // penumbra by itself; only taken near the camera.

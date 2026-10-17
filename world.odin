@@ -58,7 +58,7 @@ set_slot_index :: proc(gs: ^Game_State, slot: int, idx: i32) {
 // mostly the terrain surface, tree canopies, cave mouths and around torches.
 // gpu_light_index[slot] is a light pool id, or light_index_uniform(v) for a
 // chunk whose every voxel has light v.
-MAX_LIGHT_BRICKS :: 3 << 16 // 196k: caves full of glows need their share
+MAX_LIGHT_BRICKS :: 5 << 16 // 320k (320 MB): sky light 31 deep varies in many chunks; mountains at far view peaked ~234k (bench relight)
 LIGHT_BRICK_BYTES :: VOXELS_PER_BRICK * size_of(u16)
 
 light_index_uniform :: #force_inline proc(v: u16) -> i32 { return -1 - i32(v) }
@@ -485,6 +485,11 @@ unload_column :: proc(gs: ^Game_State, key: [2]int) {
     gs.light_planes[plane] = true
     delete_key(&gs.columns, key)
     worker_pool_unqueue(&gs.pool, key)
+    // Gone, so nothing to stitch: it's queued again if it comes back
+    // (left in, the queue only grew as you flew).
+    for k, i in gs.stitch_queue {
+        if k == key { unordered_remove(&gs.stitch_queue, i); break }
+    }
     column_free(col)
 }
 
@@ -514,20 +519,47 @@ integrate_ready_chunks :: proc(gs: ^Game_State) {
     profile_add(.Integrate, t_int)
 }
 
-// Main-thread time per frame for stitching light between columns. New
-// columns stream in far from the player, so a few frames of unstitched
-// light at their borders is never seen; a spike in frame time would be.
+// Main-thread time per frame for stitching light between columns; a spike in
+// frame time would be seen.
 LIGHT_STITCH_BUDGET :: 1500 * time.Microsecond
+LIGHT_STITCH_NEAR_BUDGET :: 4000 * time.Microsecond // while columns this near are waiting
+LIGHT_STITCH_NEAR :: 10 // chunk columns (~50 m)
 
+// Nearest the player first. Flying fast queues columns faster than the
+// budget stitches them (over a minute's backlog), and in arrival order the
+// ground underfoot came last: light that should cross a column border
+// (into a cave or a ravine wall) was missing there for a long time, dark
+// patches that only a reload fixed. Stitching only adds light, so the order
+// doesn't change the result.
 stitch_pending_columns :: proc(gs: ^Game_State) {
     start := time.tick_now()
-    n := 0
-    for n < len(gs.stitch_queue) && time.tick_since(start) < LIGHT_STITCH_BUDGET {
-        c := gs.stitch_queue[n]
+    me := [2]int{gs.player_chunk.x, gs.player_chunk.z}
+    for len(gs.stitch_queue) > 0 {
+        best, best_d := 0, max(int)
+        for k, i in gs.stitch_queue {
+            d := k - me
+            if dd := d.x * d.x + d.y * d.y; dd < best_d { best, best_d = i, dd }
+        }
+        // Columns around the player get more of the frame (what's in view
+        // up close); the rest wait for the plain budget.
+        budget := best_d <= LIGHT_STITCH_NEAR * LIGHT_STITCH_NEAR ? LIGHT_STITCH_NEAR_BUDGET : LIGHT_STITCH_BUDGET
+        if time.tick_since(start) >= budget { break }
+        c := gs.stitch_queue[best]
+        unordered_remove(&gs.stitch_queue, best)
         light_stitch_column(gs, c[0], c[1])
-        n += 1
     }
-    remove_range(&gs.stitch_queue, 0, n)
+}
+
+// Stitch now any queued columns touching the chunk-column box [lo, hi]
+// (grown by one): an edit relights against its neighbours, so they must be
+// settled first.
+stitch_columns_near :: proc(gs: ^Game_State, lo, hi: [2]int) {
+    for i := len(gs.stitch_queue) - 1; i >= 0; i -= 1 {
+        k := gs.stitch_queue[i]
+        if k.x < lo.x - 1 || k.x > hi.x + 1 || k.y < lo.y - 1 || k.y > hi.y + 1 { continue }
+        unordered_remove(&gs.stitch_queue, i)
+        light_stitch_column(gs, k.x, k.y)
+    }
 }
 
 // No columns generating, waiting to integrate, or waiting for light stitching.

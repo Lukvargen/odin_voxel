@@ -5,12 +5,12 @@ import "core:time"
 // Minecraft-style voxel light, computed on the CPU and sampled by the shader
 // instead of tracing light rays. Every non-opaque voxel stores a u16:
 // bits 12..15 = block light tint (Light_Tint of the brightest emitter
-// reaching it), bits 8..11 = sky light (0..LIGHT_MAX), low byte = block
+// reaching it), bits 5..9 = sky light (0..LIGHT_MAX), bits 0..4 = block
 // light (0..BLOCK_LIGHT_MAX, torches and glows). The tint spreads with the
 // level, so where two colours meet the brighter one wins; the shader blends
 // neighbouring voxels so the seam is soft.
 //
-// Sky light: 15 straight down through open air and water from the top of
+// Sky light: LIGHT_MAX straight down through open air and water from the top of
 // the world, then flood-filled sideways/down, losing 1 per voxel (leaves
 // stop the straight-down rule, so canopies shade the ground below). Under
 // water the shader darkens it with depth instead (underwater_light), which
@@ -22,18 +22,23 @@ import "core:time"
 // The main thread then stitches it to already-loaded neighbour columns
 // (light_stitch_column) and relights around block edits (light_on_edit).
 
-LIGHT_MAX   :: 15 // sky light
-// Block light has a byte of its own, so torches reach further than the sky
-// light's 15 levels. The shader's block_light_curve is relative to
-// BLOCK_LIGHT_MAX; each emitter keeps its old brightness at the source
-// (15 - old level below the top) and just fades out over more blocks.
-BLOCK_LIGHT_MAX :: 24
+// Sky light: all five bits, so with blocks of 2/3 m (TERRAIN_SCALE) it
+// reaches ~20 m into caves and tunnels before it's gone (Minecraft's 15
+// levels a block would be 10 m here, and a tunnel dug into a cliff went
+// black a short way in). The shader's light_curve is per metre, so the
+// extra levels light further in, not brighter.
+LIGHT_MAX   :: 31
+// Block light, stretched the same way (it was 15 levels once). The shader's
+// block_light_curve is relative to BLOCK_LIGHT_MAX; each emitter keeps its
+// old brightness at the source (15 - old level below the top) and just
+// fades out over more blocks.
+BLOCK_LIGHT_MAX :: 24 // at most 31: five bits
 TORCH_LIGHT :: BLOCK_LIGHT_MAX
 CRYSTAL_LIGHT :: 18
 SEA_PICKLE_LIGHT :: 15
 GLOW_MUSHROOM_LIGHT :: 16
 GLOW_MOSS_LIGHT :: 13
-LIGHT_SKY   :: u16(LIGHT_MAX << 8) // full sky, no block light
+LIGHT_SKY   :: u16(LIGHT_MAX) << 5 // full sky, no block light
 
 Light_Channel :: enum { Sky, Block }
 
@@ -63,19 +68,19 @@ block_emission :: #force_inline proc(b: u8) -> u8 {
 }
 
 chan_get :: #force_inline proc(v: u16, ch: Light_Channel) -> u8 {
-    return ch == .Sky ? u8(v >> 8) & 0x0F : u8(v)
+    return ch == .Sky ? u8(v >> 5) & 0x1F : u8(v) & 0x1F
 }
 
 // Block light also takes the tint of where it came from (no light, no tint).
 chan_set :: #force_inline proc(v: u16, ch: Light_Channel, l: u8, tint: u8 = 0) -> u16 {
-    if ch == .Sky { return (v & 0xF0FF) | u16(l) << 8 }
-    return (v & 0x0F00) | u16(l) | (l > 0 ? u16(tint) << 12 : 0)
+    if ch == .Sky { return (v & ~u16(0x03E0)) | u16(l) << 5 }
+    return (v & 0x03E0) | u16(l) | (l > 0 ? u16(tint) << 12 : 0)
 }
 
 light_tint :: #force_inline proc(v: u16) -> u8 { return u8(v >> 12) }
 
 light_pack :: #force_inline proc(sky, blk, tint: u8) -> u16 {
-    return u16(sky) << 8 | u16(blk) | (blk > 0 ? u16(tint) << 12 : 0)
+    return u16(sky) << 5 | u16(blk) | (blk > 0 ? u16(tint) << 12 : 0)
 }
 
 // Light of the voxel a light level `l` spreads into from direction `d`
@@ -440,6 +445,11 @@ light_stitch_column :: proc(gs: ^Game_State, wcx, wcz: int) {
 // Relight after the blocks at `changed` were replaced: unflood the light they
 // held or blocked, light new emitters, then re-flood from the boundary.
 light_on_edit :: proc(gs: ^Game_State, changed: [][3]int) {
+    if len(changed) > 0 {
+        lo, hi := changed[0].xz, changed[0].xz
+        for p in changed { lo, hi = {min(lo.x, p.x), min(lo.y, p.z)}, {max(hi.x, p.x), max(hi.y, p.z)} }
+        stitch_columns_near(gs, {lo.x >> 3, lo.y >> 3}, {hi.x >> 3, hi.y >> 3})
+    }
     w := Light_World{gs = gs}
     for ch in Light_Channel {
         rem := make([dynamic]Light_Removal)
@@ -466,4 +476,65 @@ light_on_edit :: proc(gs: ^Game_State, changed: [][3]int) {
         lw_flood(&w, &add, ch)
     }
     lw_finish(&w)
+}
+
+// ---- Debug (F3 panel, F9) ----------------------------------------------------
+
+// What the light system holds for one voxel, CPU and GPU side, to tell a
+// stale CPU light (wrong levels here) from a stale GPU copy (right levels
+// here, wrong on screen).
+Light_Probe :: struct {
+    pos:        [3]int,
+    sky, blk:   int,  // CPU levels
+    per_voxel:  bool, // the chunk keeps a light array (else one value for all)
+    queued:     bool, // its column still waits for stitching
+    gpu_brick:  bool, // the GPU reads a light brick for its slot
+    gpu_sky:    int,  // ... or this sky level, its slot's one value (-1 with a brick)
+    gpu_owned:  bool, // the slot belongs to this chunk on the GPU side
+    dirty:      bool, // an upload of its light is pending
+}
+
+light_probe :: proc(gs: ^Game_State, p: [3]int) -> (pr: Light_Probe, ok: bool) {
+    key := [3]int{p.x >> 3, p.y >> 3, p.z >> 3}
+    c := world_chunk(gs, key)
+    if c == nil { return }
+    l := p & 7
+    v := chunk_light(c, l.x + l.y * CHUNK_VOXELS + l.z * CHUNK_VOXELS * CHUNK_VOXELS)
+    pr = {pos = p, sky = int(chan_get(v, .Sky)), blk = int(chan_get(v, .Block)), per_voxel = c.light != nil, gpu_sky = -1}
+    for k in gs.stitch_queue { if k == key.xz { pr.queued = true; break } }
+    if chunk_y_index(key.y) >= 0 {
+        slot := ring_slot(key.x, key.y, key.z)
+        owner := gs.gpu_chunk_owner[slot]
+        pr.gpu_owned = owner[0] == i32(key.x) && owner[1] == i32(key.z)
+        if li := gs.gpu_light_index[slot]; li >= 0 {
+            pr.gpu_brick = true
+        } else {
+            pr.gpu_sky = int(chan_get(u16(-1 - li), .Sky))
+        }
+        for s in gs.light_dirty { if s == slot { pr.dirty = true; break } }
+    }
+    return pr, true
+}
+
+// F9: the light of every column within `radius` of the player worked out
+// again from scratch, stitched to its neighbours and re-uploaded. If a dark
+// patch goes, its CPU light was stale. Returns how many columns.
+light_relight_near :: proc(gs: ^Game_State, radius: int) -> int {
+    me := gs.player_chunk.xz
+    keys := make([dynamic][2]int, context.temp_allocator)
+    for dz in -radius ..= radius {
+        for dx in -radius ..= radius {
+            key := me + {dx, dz}
+            col := gs.columns[key]
+            if col == nil { continue }
+            for &c in col.chunks { chunk_free_light(&c) }
+            light_column_compute(col)
+            append(&keys, key)
+        }
+    }
+    for k in keys { light_stitch_column(gs, k.x, k.y) }
+    for k in keys {
+        for iy in 0 ..< CHUNKS_H { mark_light_dirty(gs, {k.x, iy + WORLD_CHUNK_Y_MIN, k.y}) }
+    }
+    return len(keys)
 }

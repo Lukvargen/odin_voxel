@@ -57,6 +57,7 @@ Game_State :: struct {
     gpu_light_index: []i32,              // ring slot -> light pool id, or uniform light (light.odin)
     light_pool:      Brick_Pool,         // free-list allocator over light pool ids
     light_dirty:     [dynamic]int,       // slots whose light needs GPU upload
+    light_starved:   [dynamic]int,       // slots that wanted a light brick when none were free (retried)
     stitch_queue:    [dynamic][2]int,    // integrated columns awaiting light stitching
     player_chunk:    [3]int,
     prof_frames:     int,
@@ -208,6 +209,7 @@ main :: proc() {
             case a == "nav": bench_nav = true
             case a == "crowd": bench_crowd = true
             case a == "build": bench_build = true
+            case a == "relight": bench_relight = true
             case a == "combat": bench_combat = true
             case a == "water": bench_water = true
             case a == "sea": bench_sea = true
@@ -307,6 +309,7 @@ main :: proc() {
     defer delete(gs.dirty_slots)
     gs.light_dirty = make([dynamic]int)
     defer delete(gs.light_dirty)
+    defer delete(gs.light_starved)
     defer delete(gs.stitch_queue)
     if bench {
         // Benches drive the simulation directly, in the world they look at.
@@ -666,6 +669,10 @@ on_key_down :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods, repeat, playi
     case SDL.K_F7:
         client_send_empty(gs, .Clear)
         ui_toast(gs, "Slimes and enemies cleared")
+    case SDL.K_F9:
+        // Debug: light around the player worked out again (light.odin).
+        n := light_relight_near(gs, 6)
+        ui_toast(gs, fmt.tprintf("Relit %d columns around you", n))
     case SDL.K_F8:
         enemy_debug_spawn(gs)
     case SDL.K_1 ..= SDL.K_9:

@@ -108,6 +108,10 @@ bench_run :: proc(gs: ^Game_State) {
         bench_build_run(gs)
         return
     }
+    if bench_relight {
+        bench_relight_run(gs)
+        return
+    }
     if bench_crowd {
         bench_crowd_run(gs)
         return

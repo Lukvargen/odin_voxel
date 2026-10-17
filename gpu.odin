@@ -517,6 +517,13 @@ g_light_pool_warned: bool
 // encoded straight into gpu_light_index; one whose light varies gets a light
 // pool brick holding its 512 u16s. Same coalesced upload as the voxels.
 flush_light_uploads :: proc(gs: ^Game_State) {
+    // Chunks that found the pool full show full sky until they get a brick:
+    // retried as bricks come free (columns unloading behind you), not only
+    // when their light changes again, so an overflow heals as you move.
+    if n := min(len(gs.light_starved), int(gs.light_pool.free_top)); n > 0 {
+        append(&gs.light_dirty, ..gs.light_starved[len(gs.light_starved) - n:])
+        resize(&gs.light_starved, len(gs.light_starved) - n)
+    }
     if len(gs.light_dirty) == 0 { return }
 
     seen: map[int]bool
@@ -544,8 +551,10 @@ flush_light_uploads :: proc(gs: ^Game_State) {
                 if !g_light_pool_warned {
                     g_light_pool_warned = true
                     fmt.eprintln("WARNING: light pool exhausted; raise MAX_LIGHT_BRICKS.")
+                    ui_toast(gs, "Light memory full: some places light wrong (try a shorter view distance)", 4)
                 }
                 gs.gpu_light_index[slot] = light_index_uniform(LIGHT_SKY)
+                append(&gs.light_starved, slot)
                 continue
             }
             gs.gpu_light_index[slot] = lid

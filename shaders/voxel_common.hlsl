@@ -1093,15 +1093,16 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
 // ---- Voxel light (light.odin) ---------------------------------------------
 // Only for shaders that declare `light_index` (StructuredBuffer<int>) and
 // `light_pool` (StructuredBuffer<uint>) — define HAS_VOXEL_LIGHT first.
-// A u16 per voxel: block light tint << 12 | sky light (0..15) << 8 |
-// block light (0..BLOCK_LIGHT_MAX).
+// A u16 per voxel: block light tint << 12 | sky light (0..SKY_LIGHT_MAX)
+// << 5 | block light (0..BLOCK_LIGHT_MAX), as light.odin packs it.
 #ifdef HAS_VOXEL_LIGHT
 
-#define LIGHT_SKY_FULL 0xF00u
+#define SKY_LIGHT_MAX   31.0 // light.odin LIGHT_MAX
+#define LIGHT_SKY_FULL  (31u << 5)
 #define BLOCK_LIGHT_MAX 24.0 // light.odin
 
-uint light_sky(uint l)   { return (l >> 8) & 15u; }
-uint light_block(uint l) { return l & 0xFFu; }
+uint light_sky(uint l)   { return (l >> 5) & 31u; }
+uint light_block(uint l) { return l & 31u; }
 uint light_tint(uint l)  { return l >> 12; }
 
 #define TORCH_LIGHT_COLOR float3(1.6, 0.95, 0.45) // block light at BLOCK_LIGHT_MAX
@@ -1143,19 +1144,26 @@ uint sample_light(int3 v) {
     return (light_pool[idx >> 1] >> ((uint(idx) & 1u) * 16u)) & 0xFFFFu;
 }
 
-// Light level (0..15) to brightness: each level is 20% dimmer, as in
-// Minecraft, so light falls off smoothly instead of linearly.
+// Sky light level (0..SKY_LIGHT_MAX) to brightness: a level is lost each
+// voxel, so per metre (TERRAIN_SCALE voxels) it dims ~12%, gentler than
+// Minecraft's 20% a block, so light reaching in under overhangs and down
+// cave mouths stays visible a good way in. It eases out over the last ten
+// levels (~7 m): dropping from a dim glow straight to black where the light
+// runs out draws hard, blocky edges, and a tunnel seems to end in a wall
+// of dark.
 float light_curve(float level) {
-    return level > 0.0 ? pow(0.8, 15.0 - level) : 0.0;
+    if (level <= 0.0) return 0.0;
+    return pow(0.88, (SKY_LIGHT_MAX - level) / TERRAIN_SCALE) * smoothstep(0.0, 10.0, level);
 }
 
 // Block light (torches, glows) by level: it loses a level a block, so with
-// blocks of 2/3 m (TERRAIN_SCALE) the falloff is stretched to fade over as
-// many metres as it was designed to, easing out over the last few levels
-// instead of stopping at a hard edge.
+// blocks of 2/3 m (TERRAIN_SCALE) the falloff is per metre, ~15% dimmer
+// each (a little gentler than Minecraft's 20%, so a torch fills more of a
+// cave), easing out over the last few levels instead of stopping at a hard
+// edge. Full brightness at the source is unchanged.
 float block_light_curve(float level) {
     if (level <= 0.0) return 0.0;
-    return pow(0.8, (BLOCK_LIGHT_MAX - level) / TERRAIN_SCALE) * saturate(level / 6.0);
+    return pow(0.85, (BLOCK_LIGHT_MAX - level) / TERRAIN_SCALE) * smoothstep(0.0, 7.0, level);
 }
 
 // The block light of light value l, as colour; flicker: torch_flicker
@@ -1200,7 +1208,7 @@ float face_light(int3 vkey, float3 nrm, float3 hit_pos, out float3 block) {
     float fl = torch_flicker(hit_pos);
     block = (w.x * block_radiance(l00, fl) + w.y * block_radiance(l10, fl)
            + w.z * block_radiance(l01, fl) + w.w * block_radiance(l11, fl)) * inv;
-    return dot(w, float4((l >> 8) & 15u)) * inv;
+    return dot(w, float4((l >> 5) & 31u)) * inv;
 }
 
 #endif // HAS_VOXEL_LIGHT

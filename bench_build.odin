@@ -139,6 +139,8 @@ bench_build_run :: proc(gs: ^Game_State) {
     b.tool = .Block
     shot(gs, dir, "undone")
     bench_build_keys(gs)
+    bench_build_seal(gs, base + {20, 0, -30})
+    bench_build_tunnel(gs, base + {-60, 0, -40})
     fmt.println("bench build: wrote screenshots to", dir)
 }
 
@@ -207,4 +209,85 @@ bench_build_keys :: proc(gs: ^Game_State) {
     check(&fails, build_key(gs, SDL.K_C, {}) && b.cursor == .Face, "C didn't cycle the cursor")
     b.cursor = .Block
     fmt.printf("bench build: modifier checks %s (%d failed)\n", fails == 0 ? "passed" : "FAILED", fails)
+}
+
+// A shaft dug at the surface and then capped: the sky light inside must go
+// to 0 (sealed in, pitch black), and come back when the cap is broken.
+@(private="file")
+bench_build_seal :: proc(gs: ^Game_State, at: [3]int) {
+    sky_at :: proc(gs: ^Game_State, p: [3]int) -> int {
+        c := world_chunk(gs, {p.x >> 3, p.y >> 3, p.z >> 3})
+        if c == nil { return -1 }
+        l := p & 7
+        return int(chan_get(chunk_light(c, l.x + l.y * 8 + l.z * 64), .Sky))
+    }
+    top := [3]int{at.x, top_solid(gs, at.x, at.z), at.z}
+    for size in ([2]int{0, 1}) {
+        p := top + {size * 6, 0, 0}
+        p.y = top_solid(gs, p.x, p.z)
+        lo, hi := p + {-size, -4, -size}, p + {size, 0, size}
+        build_apply(gs, Edit_Region{lo = lo, hi = hi}, .Air, .All)
+        open := sky_at(gs, p + {0, -3, 0})
+        build_apply(gs, Edit_Region{lo = {lo.x, p.y, lo.z}, hi = hi}, .Stone, .All)
+        sealed := [3]int{sky_at(gs, p + {0, -1, 0}), sky_at(gs, p + {0, -3, 0}), sky_at(gs, p + {size, -4, size})}
+        if size == 1 && bench_shot_dir != "" {
+            // From inside, standing on the floor: should be all but black.
+            saved := gs.camera
+            gs.camera.pos = {f32(p.x) + 0.5, f32(p.y - 4) + PLAYER_EYE_HEIGHT, f32(p.z) + 0.5}
+            gs.camera.yaw, gs.camera.pitch = 0, -20
+            gs.player_chunk = {p.x >> 3, p.y >> 3, p.z >> 3}
+            bench_hud_shot(gs, fmt.tprintf("%s/build_sealed.bmp", bench_shot_dir))
+            gs.camera = saved
+        }
+        build_apply(gs, Edit_Region{lo = {lo.x, p.y, lo.z}, hi = hi}, .Air, .All)
+        again := sky_at(gs, p + {0, -3, 0})
+        ok := open > 0 && sealed == {0, 0, 0} && again == open
+        fmt.printf("bench build: sealed %dx%d shaft: sky open %d, capped %v, reopened %d  %s\n",
+            2 * size + 1, 2 * size + 1, open, sealed, again, ok ? "ok" : "WRONG")
+    }
+}
+
+// A tunnel dug into a cliff with a big round brush, sphere by sphere: the
+// sky light down its middle should fade off smoothly with depth.
+@(private="file")
+bench_build_tunnel :: proc(gs: ^Game_State, at: [3]int) {
+    sky_at :: proc(gs: ^Game_State, p: [3]int) -> int {
+        c := world_chunk(gs, {p.x >> 3, p.y >> 3, p.z >> 3})
+        if c == nil { return -1 }
+        l := p & 7
+        return int(chan_get(chunk_light(c, l.x + l.y * 8 + l.z * 64), .Sky))
+    }
+    g := top_solid(gs, at.x, at.z)
+    cliff_lo := [3]int{at.x - 30, g + 1, at.z}
+    cliff_hi := [3]int{at.x + 30, g + 40, at.z + 70}
+    build_apply(gs, Edit_Region{lo = cliff_lo, hi = cliff_hi}, .Stone, .All)
+    // Into the cliff along +z from its open face, one radius-8 ball per 4 voxels.
+    c := [3]int{at.x, g + 12, at.z}
+    for k in 0 ..< 12 {
+        build_apply(gs, sphere_region(c + {0, 0, k * 4}, 8), .Air, .All)
+    }
+    fmt.printf("bench build: straight tunnel, sky light by depth:")
+    for d := 0; d <= 52; d += 4 { fmt.printf(" %d:%d", d, sky_at(gs, c + {0, 0, d})) }
+    fmt.println()
+    // A second one at 45 degrees from the cliff's corner (light spreads
+    // along the axes only, so it fades faster per metre on a diagonal).
+    dc := [3]int{cliff_hi.x, g + 30, at.z}
+    for k in 0 ..< 12 {
+        build_apply(gs, sphere_region(dc + {-k * 3, 0, k * 3}, 8), .Air, .All)
+    }
+    fmt.printf("bench build: diagonal tunnel, sky light by depth (m along it):")
+    for k := 0; k < 12; k += 2 {
+        d := f32(k * 3) * 1.414 / 1.5
+        fmt.printf(" %.0f:%d", d, sky_at(gs, dc + {-k * 3, 0, k * 3}))
+    }
+    fmt.println()
+    if bench_shot_dir != "" {
+        saved := gs.camera
+        gs.camera.pos = {f32(c.x) + 0.5, f32(c.y) - 4, f32(c.z) - 6}
+        gs.camera.yaw, gs.camera.pitch = 0, -5
+        gs.player_chunk = {c.x >> 3, c.y >> 3, c.z >> 3}
+        gs.build.tool = .Shape // no block outline in the way
+        bench_hud_shot(gs, fmt.tprintf("%s/build_tunnel.bmp", bench_shot_dir))
+        gs.camera = saved
+    }
 }
