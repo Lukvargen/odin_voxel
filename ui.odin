@@ -1176,14 +1176,26 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
     r := gs.ui.renderer_data.renderer
     SDL.SetRenderDrawBlendMode(r, {.BLEND})
     NEAR :: 0.05
-    // The faint carve outline first, then the main one: a dark line under a
-    // light one.
-    for pass in 0 ..< 3 {
-        segs := pass == 0 ? pv.carve : pv.segs
+    // The faint carve and cursor outlines first, then the main one (a dark
+    // line under a light one), then the area's pushed face.
+    for pass in 0 ..< 5 {
+        segs: [dynamic][2][3]f32
         switch pass {
-        case 0: SDL.SetRenderDrawColor(r, CLEAR_COL.r, CLEAR_COL.g, CLEAR_COL.b, u8(f32(alpha) * 0.6))
-        case 1: SDL.SetRenderDrawColor(r, 0, 0, 0, alpha / 2)
-        case 2: SDL.SetRenderDrawColor(r, col.r, col.g, col.b, alpha)
+        case 0:
+            segs = pv.carve
+            SDL.SetRenderDrawColor(r, CLEAR_COL.r, CLEAR_COL.g, CLEAR_COL.b, u8(f32(alpha) * 0.6))
+        case 1:
+            segs = pv.cursor
+            SDL.SetRenderDrawColor(r, 255, 250, 240, u8(f32(alpha) * 0.5))
+        case 2:
+            segs = pv.segs
+            SDL.SetRenderDrawColor(r, 0, 0, 0, alpha / 2)
+        case 3:
+            segs = pv.segs
+            SDL.SetRenderDrawColor(r, col.r, col.g, col.b, alpha)
+        case 4:
+            segs = pv.face
+            SDL.SetRenderDrawColor(r, u8(COLOR_ACCENT.r), u8(COLOR_ACCENT.g), u8(COLOR_ACCENT.b), alpha)
         }
         for sg in segs {
             p, q := sg[0] - eye, sg[1] - eye
@@ -1192,9 +1204,9 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
             if dp < NEAR { p = la.lerp(p, q, (NEAR - dp) / (dq - dp)) }
             if dq < NEAR { q = la.lerp(q, p, (NEAR - dq) / (dp - dq)) }
             s, e := project(p, fwd, right, up, w, h), project(q, fwd, right, up, w, h)
-            o: f32 = pass == 1 ? 1 : 0
+            o: f32 = pass == 2 ? 1 : 0
             SDL.RenderLine(r, s.x + o, s.y + o, e.x + o, e.y + o)
-            if pass == 2 { SDL.RenderLine(r, s.x + 0.5, s.y + 0.5, e.x + 0.5, e.y + 0.5) }
+            if pass >= 3 { SDL.RenderLine(r, s.x + 0.5, s.y + 0.5, e.x + 0.5, e.y + 0.5) }
         }
     }
 }
@@ -1204,12 +1216,10 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
 // The tool panel, bottom left: the three tools (T), the shape (Q), and each
 // setting with the key that changes it. The row the wheel changes right now,
 // by the modifiers held, is lit; with a combo that does nothing, none is.
-// While an area is dragged, its size by the crosshair.
 @(private="file")
 build_hud_layout :: proc(gs: ^Game_State, w: f32) {
     b := &gs.build
     live := wheel_target(b.tool, held_mods())
-    if b.dragging { area_size_label(b) }
     walls := b.wall == 0 ? "solid" : fmt.tprintf("%d thick", b.wall)
     lift: f32 = w < 1240 ? -86 : -14 // over the hotbar when they'd overlap
     if clay.UI(clay.ID("BuildTool"))({
@@ -1226,10 +1236,35 @@ build_hud_layout :: proc(gs: ^Game_State, w: f32) {
         case .Block:
             param_row("Brush", gs.brush_radius == 0 ? "1 block" : fmt.tprintf("radius %d", gs.brush_radius), "Ctrl", live == .Brush)
         case .Area:
-            param_row("Height", fmt.tprintf("%d", b.layers + 1), "Wheel", live == .Layers)
+            param_row("Cursor", build_cursor_name(b.cursor), "C", false)
+            if b.cursor == .Air { param_row("Reach", fmt.tprintf("%d", b.air_dist), "Alt", live == .Distance) }
+            if b.selected {
+                r := area_region(b)
+                d := r.hi - r.lo + 1
+                vol := region_volume(r)
+                param_row("Size", fmt.tprintf("%d × %d × %d", d.x, d.y, d.z), "Wheel", live == .Push)
+                if vol > MAX_EDIT_VOXELS {
+                    hint(fmt.tprintf("too big: %s of %s blocks", thousands(vol), thousands(MAX_EDIT_VOXELS)))
+                } else {
+                    hint(fmt.tprintf("%s blocks; wheel pushes the lit face", thousands(vol)))
+                }
+                param_row("Move", "via lit face", "Shift", live == .Move)
+            }
             param_row("Walls", walls, "Ctrl", live == .Walls)
             param_row("Fill", build_mask_name(b.mask), "V", false)
-            hint("Hold L to clear, R to fill; drag, let go")
+            if b.selected {
+                if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, padding = {4, 0, 2, 0}, childGap = 5, childAlignment = {y = .Center}}}) {
+                    keycap("F")
+                    text("fill", COLOR_TEXT_DIM, 11)
+                    keycap("X")
+                    text("clear", COLOR_TEXT_DIM, 11)
+                    spacer()
+                    keycap("Bksp")
+                    text("drop", COLOR_TEXT_DIM, 11)
+                }
+            } else {
+                hint("L / R click: set the box's two corners")
+            }
         case .Shape:
             if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 2, childAlignment = {y = .Center}}}) {
                 for sh in Build_Shape {
@@ -1256,25 +1291,6 @@ build_hud_layout :: proc(gs: ^Game_State, w: f32) {
                 text(fmt.tprintf("redo %d", len(b.redo)), len(b.redo) > 0 ? COLOR_TEXT_DIM : COLOR_TEXT_FAINT, 11)
             }
         }
-    }
-}
-
-// The dragged area's size and block count (amber when too big), by the
-// crosshair.
-@(private="file")
-area_size_label :: proc(b: ^Build) {
-    r := area_region(b)
-    d := r.hi - r.lo + 1
-    vol := region_volume(r)
-    big := vol > MAX_EDIT_VOXELS
-    if clay.UI(clay.ID("AreaSize"))({
-        layout = {layoutDirection = .TopToBottom, padding = {9, 9, 5, 6}, childGap = 1, childAlignment = {x = .Center}},
-        floating = anchored(.CenterCenter, {0, 40}),
-        custom = deco(.Glass_Soft, radius = 6),
-    }) {
-        text(fmt.tprintf("%d × %d × %d", d.x, d.y, d.z), big ? COLOR_ACCENT_2 : COLOR_TEXT, 14, FONT_ID_TITLE)
-        text(big ? fmt.tprintf("too big: %s of %s", thousands(vol), thousands(MAX_EDIT_VOXELS)) : fmt.tprintf("%s blocks", thousands(vol)),
-            big ? COLOR_ACCENT_2 : COLOR_TEXT_DIM, 11)
     }
 }
 
@@ -1931,7 +1947,7 @@ menu_controls :: proc(gs: ^Game_State) {
     }
     moving   := Group{"Moving", {"WASD", "move", "Ctrl  or  W W", "sprint", "Shift", "sneak: quiet, hard to spot, won't fall off", "Space", "jump; hold to swim up", "Space twice", "fly: Shift down, Alt fast"}}
     building := Group{"Building", {"L / R click", "break / place; hold repeats", "Middle click", "pick the block you look at", "1-9, wheel", "hotbar", "E", "all blocks", "B, Ctrl+wheel", "brush size", "T", "tool: block / area / shape", "Ctrl Z / Ctrl Y", "undo / redo"}}
-    tools    := Group{"Area and shape", {"Area: hold L / R", "drag a box, let go", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "area height; shape size", "Shift+wheel", "shape height", "Alt+wheel", "turn the shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V", "cycle back"}}
+    tools    := Group{"Area and shape", {"Area: L / R", "the box's two corners", "Area: F / X", "fill / clear the box", "C", "area cursor: block / face / air", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "push lit face; shape size", "Shift+wheel", "move box; shape height", "Alt+wheel", "air reach; turn shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V, C", "cycle back"}}
     fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll", "F (hold)", "guard; parry just in time"}}
     gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
     other    := Group{"Other", {"Enter", "chat", "Tab (hold)", "players", "F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)"}}

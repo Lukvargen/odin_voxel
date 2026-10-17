@@ -8,9 +8,14 @@ import SDL "vendor:sdl3"
 // Building tools. T cycles three (Shift+T back):
 //   Block - Minecraft style: left breaks, right places, held repeats. B or
 //           Ctrl+wheel sizes a round brush.
-//   Area  - hold left (clear) or right (fill), look across to drag a box out
-//           over the face you pressed on, let go to apply. The wheel sets how
-//           many layers it rises off that face (or digs into it).
+//   Area  - a box you select, then act on. Left sets one corner, right the
+//           other (the first click of either starts a one-block box); C
+//           picks where the cursor sits: on the block aimed at, in front of
+//           its face, or in the air at a set distance (Alt+wheel). The
+//           selection stays while you move: the wheel (or Up / Down) pushes
+//           the face you look at out or in, Shift+wheel moves the whole box
+//           that way. F fills it with the held block, X clears it, Backspace
+//           drops it.
 //   Shape - left carves (hold to keep carving: a drill), right stamps a shape
 //           (an SDF: sphere, box, cylinder, cone, pyramid, torus, dome). Q
 //           picks the shape; the wheel sizes it, Shift+wheel its height,
@@ -27,6 +32,7 @@ import SDL "vendor:sdl3"
 Build_Tool  :: enum u8 { Block, Area, Shape }
 Build_Shape :: enum u8 { Sphere, Box, Cylinder, Cone, Pyramid, Torus, Dome }
 Build_Mask  :: enum u8 { All, Air, Solid } // what a fill may replace
+Build_Cursor :: enum u8 { Block, Face, Air } // where an area corner goes
 
 Build :: struct {
     tool:   Build_Tool,
@@ -36,14 +42,13 @@ Build :: struct {
     height: int, // shape: vertical half extent
     wall:   int, // shell thickness, 0 = solid (area and shape)
     yaw:    int, // shape: degrees, in YAW_STEP steps
-    layers: int, // area: extra layers off the pressed face (fill) or into it (clear)
 
-    // Area drag, while a button is held.
-    dragging:   bool,
-    drag_fill:  bool,   // right button: fill; left: clear
-    drag_a:     [3]int, // corner under the press
-    drag_b:     [3]int, // corner under the crosshair, on the pressed face's plane
-    drag_n:     [3]int, // the pressed face's normal
+    // Area selection: corners a (left click) and b (right), inclusive.
+    selected:  bool,
+    sel_a:     [3]int,
+    sel_b:     [3]int,
+    cursor:    Build_Cursor,
+    air_dist:  int, // .Air cursor: voxels from the eye
 
     undo, redo:  [dynamic]Edit_Record,
     undo_voxels: int,  // voxel changes held in `undo`, for the budget
@@ -60,7 +65,7 @@ MAX_EDIT_VOXELS     :: 4_000_000 // an edit's bounding box, at most (~160^3)
 UNDO_VOXEL_BUDGET   :: 6_000_000 // voxel changes kept for undo (16 B each)
 UNDO_STEPS          :: 64
 MAX_SHAPE_SIZE      :: 80
-MAX_AREA_LAYERS     :: 120
+MAX_AIR_DIST        :: 64
 YAW_STEP            :: 15
 
 // Which voxels an edit covers: every voxel of [lo, hi] (thinned to a shell of
@@ -78,6 +83,7 @@ Edit_Region :: struct {
 
 build_init :: proc(b: ^Build) {
     b.size, b.height = 4, 4
+    b.air_dist = 8
 }
 
 build_destroy :: proc(b: ^Build) {
@@ -118,6 +124,15 @@ build_mask_name :: proc(m: Build_Mask) -> string {
     return ""
 }
 
+build_cursor_name :: proc(c: Build_Cursor) -> string {
+    switch c {
+    case .Block: return "on block"
+    case .Face:  return "on face"
+    case .Air:   return "in the air"
+    }
+    return ""
+}
+
 // ─── Input ──────────────────────────────────────────────────────────────────
 
 Mod  :: enum u8 { Ctrl, Shift, Alt }
@@ -140,7 +155,7 @@ key_mods :: proc(m: SDL.Keymod) -> (r: Mods) {
 }
 
 // What the wheel changes for a tool under the held modifiers.
-Wheel_Target :: enum u8 { None, Hotbar, Brush, Layers, Size, Height, Walls, Turn }
+Wheel_Target :: enum u8 { None, Hotbar, Brush, Push, Move, Distance, Size, Height, Walls, Turn }
 
 wheel_target :: proc(tool: Build_Tool, mods: Mods) -> Wheel_Target {
     switch tool {
@@ -150,9 +165,11 @@ wheel_target :: proc(tool: Build_Tool, mods: Mods) -> Wheel_Target {
         case {.Ctrl}: return .Brush
         }
     case .Area:
-        switch mods - {.Shift} {
-        case {}:      return .Layers
-        case {.Ctrl}: return .Walls
+        switch mods {
+        case {}:       return .Push
+        case {.Shift}: return .Move
+        case {.Ctrl}:  return .Walls
+        case {.Alt}:   return .Distance
         }
     case .Shape:
         switch mods {
@@ -182,7 +199,6 @@ build_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
     case SDL.K_T:
         if !plain { return false }
         b.tool = Build_Tool(cycle(int(b.tool), len(Build_Tool), step))
-        b.dragging = false
         if gs.combat.sword { combat_toggle_sword(gs) }
     case SDL.K_Q:
         if !plain || b.tool != .Shape { return false }
@@ -202,6 +218,39 @@ build_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
     case SDL.K_Y:
         if mods != {.Ctrl} { return false }
         build_undo(gs, &b.redo, &b.undo, "Redo")
+    case:
+        return b.tool == .Area && area_key(gs, key, mods)
+    }
+    return true
+}
+
+// The Area tool's keys: the cursor, and what to do with the selection. Not
+// with the sword out (F blocks then) or gliding.
+@(private="file")
+area_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
+    b := &gs.build
+    if gs.combat.sword || gs.glider.deployed { return false }
+    plain := mods & {.Ctrl, .Alt} == {}
+    switch key {
+    case SDL.K_C:
+        if !plain { return false }
+        b.cursor = Build_Cursor(cycle(int(b.cursor), len(Build_Cursor), .Shift in mods ? -1 : 1))
+    case SDL.K_BACKSPACE:
+        if !plain || !b.selected { return false }
+        b.selected = false
+    case SDL.K_UP, SDL.K_DOWN:
+        if !plain || !b.selected { return false }
+        steps := key == SDL.K_UP ? 1 : -1
+        if .Shift in mods { area_move(gs, steps) } else { area_push(gs, steps) }
+    case SDL.K_F, SDL.K_X:
+        if !plain { return false }
+        if !b.selected {
+            ui_toast(gs, "Select an area first: left and right click its corners", 1.5)
+            return true
+        }
+        fill := key == SDL.K_F
+        n := build_apply(gs, area_region(b), fill ? gs.selected_block : .Air, b.mask)
+        ui_toast(gs, n == 0 ? "Nothing to change" : fmt.tprintf("%s %s blocks", fill ? "Filled" : "Cleared", thousands(n)), 1)
     case:
         return false
     }
@@ -225,7 +274,9 @@ build_wheel :: proc(gs: ^Game_State, steps: int, mods: Mods) {
     case .None:
     case .Hotbar: hotbar_select(gs, cycle(gs.hotbar_slot, HOTBAR_SLOTS, -steps)) // down = next
     case .Brush:  brush_step(gs, steps)
-    case .Layers: b.layers = clamp(b.layers + steps, 0, MAX_AREA_LAYERS)
+    case .Push:   area_push(gs, steps)
+    case .Move:   area_move(gs, steps)
+    case .Distance: b.air_dist = clamp(b.air_dist + steps, 2, MAX_AIR_DIST)
     case .Walls:  b.wall = clamp(b.wall + steps, 0, 32)
     case .Turn:   b.yaw = cycle(b.yaw, 360, steps * YAW_STEP)
     case .Height: b.height = clamp(b.height + steps, 0, MAX_SHAPE_SIZE)
@@ -240,14 +291,11 @@ build_wheel :: proc(gs: ^Game_State, steps: int, mods: Mods) {
 build_update :: proc(gs: ^Game_State, dt: f32) {
     b := &gs.build
     active := gs.mouse_locked && !gs.glider.deployed && !gs.combat.sword
-    if !active {
-        b.dragging = false
-        return
-    }
+    if !active { return }
     gs.edit_timer -= dt
     // Right click on a door swings it, whatever the tool (door.odin).
     if !gs.right_held { b.door_click = false }
-    if gs.right_pressed && !b.dragging {
+    if gs.right_pressed {
         if p, ok := door_aimed(gs); ok {
             door_toggle(gs, p)
             b.door_click = true
@@ -304,63 +352,102 @@ build_shape_update :: proc(gs: ^Game_State) {
     }
 }
 
-// Press: the corner under the crosshair. Held: the far corner follows the
-// crosshair across the pressed face's plane. Release: apply. The other
-// button cancels.
+// A click sets a corner where the cursor is: left the first, right the
+// other. With nothing selected either click starts a one-block box.
 @(private="file")
 build_area_update :: proc(gs: ^Game_State) {
     b := &gs.build
-    if !b.dragging {
-        if !gs.left_pressed && !gs.right_pressed { return }
-        hit, nrm, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH)
-        if !ok { return }
-        b.dragging  = true
-        b.drag_fill = gs.right_pressed
-        b.drag_n    = nrm
-        b.drag_a    = b.drag_fill ? hit + nrm : hit
-        b.drag_b    = b.drag_a
-        return
+    if !gs.left_pressed && !gs.right_pressed { return }
+    p, ok := area_cursor(gs)
+    if !ok { return }
+    if !b.selected {
+        b.sel_a, b.sel_b, b.selected = p, p, true
+    } else if gs.left_pressed {
+        b.sel_a = p
+    } else {
+        b.sel_b = p
     }
-    if (b.drag_fill && gs.left_pressed) || (!b.drag_fill && gs.right_pressed) {
-        b.dragging = false
-        ui_toast(gs, "Cancelled", 0.8)
-        return
-    }
-    b.drag_b = area_drag_corner(gs)
-    if b.drag_fill ? gs.right_held : gs.left_held { return }
-    b.dragging = false
-    build_apply(gs, area_region(b), b.drag_fill ? gs.selected_block : .Air, b.mask)
 }
 
-// Where the crosshair ray meets the plane through the drag's first corner,
-// across its face; the old corner if it doesn't (looking away, or too far).
-@(private="file")
-area_drag_corner :: proc(gs: ^Game_State) -> [3]int {
+// Where a corner would go: the block aimed at, the voxel in front of its
+// face, or a point air_dist ahead (stopped in front of a nearer block).
+area_cursor :: proc(gs: ^Game_State) -> ([3]int, bool) {
     b := &gs.build
-    n := [3]f32{f32(b.drag_n.x), f32(b.drag_n.y), f32(b.drag_n.z)}
-    a := b.drag_a
-    plane := [3]f32{f32(a.x), f32(a.y), f32(a.z)} + 0.5
     eye, fwd := camera_aim_eye(gs.camera), camera_forward(gs.camera)
-    denom := la.dot(fwd, n)
-    if abs(denom) < 1e-4 { return b.drag_b }
-    t := la.dot(plane - eye, n) / denom
-    if t <= 0 || t > REACH * 2 { return b.drag_b }
-    p := eye + fwd * t
-    c := [3]int{int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z))}
-    for i in 0 ..< 3 { if b.drag_n[i] != 0 { c[i] = a[i] } }
-    return c
+    hit, nrm, ok := raycast_voxel(gs, eye, fwd, REACH)
+    switch b.cursor {
+    case .Block: return hit, ok
+    case .Face:  return hit + nrm, ok
+    case .Air:
+        d := f32(b.air_dist)
+        if ok && la.length([3]f32{f32(hit.x), f32(hit.y), f32(hit.z)} + 0.5 - eye) <= d { return hit + nrm, true }
+        p := eye + fwd * d
+        return {int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z))}, true
+    }
+    return {}, false
 }
 
-// The drag's box, grown `layers` along the face normal: off the face for a
-// fill, into it for a clear.
-area_region :: proc(b: ^Build) -> Edit_Region {
-    r := Edit_Region{lo = la.min(b.drag_a, b.drag_b), hi = la.max(b.drag_a, b.drag_b), wall = b.wall}
+// The selection's face the crosshair is on: the one the ray goes in by (from
+// inside the box, out by); missing the box, the face toward the eye nearest
+// the crosshair. Its axis, and side (+1 the high face, -1 the low).
+area_face :: proc(gs: ^Game_State) -> (axis, side: int) {
+    r := area_region(&gs.build)
+    lo := [3]f32{f32(r.lo.x), f32(r.lo.y), f32(r.lo.z)}
+    hi := [3]f32{f32(r.hi.x), f32(r.hi.y), f32(r.hi.z)} + 1
+    eye, fwd := camera_aim_eye(gs.camera), camera_forward(gs.camera)
+    t_in, t_out := f32(-math.F32_MAX), f32(math.F32_MAX)
+    ax_in, ax_out := 0, 0
+    miss := false
     for i in 0 ..< 3 {
-        d := b.drag_n[i] * (b.drag_fill ? 1 : -1)
-        if d > 0 { r.hi[i] += b.layers }
-        if d < 0 { r.lo[i] -= b.layers }
+        if abs(fwd[i]) < 1e-6 {
+            if eye[i] < lo[i] || eye[i] > hi[i] { miss = true }
+            continue
+        }
+        t0, t1 := (lo[i] - eye[i]) / fwd[i], (hi[i] - eye[i]) / fwd[i]
+        if t0 > t1 { t0, t1 = t1, t0 }
+        if t0 > t_in  { t_in, ax_in = t0, i }
+        if t1 < t_out { t_out, ax_out = t1, i }
     }
-    return r
+    if !miss && t_in <= t_out && t_out > 0 {
+        if t_in > 0 { return ax_in, fwd[ax_in] > 0 ? -1 : 1 }
+        return ax_out, fwd[ax_out] > 0 ? 1 : -1
+    }
+    best := -2 * f32(1)
+    for i in 0 ..< 3 {
+        for s in ([2]int{-1, 1}) {
+            c := (lo + hi) / 2
+            c[i] = s > 0 ? hi[i] : lo[i]
+            if (eye[i] - c[i]) * f32(s) <= 0 { continue } // faces away
+            if d := la.dot(la.normalize0(c - eye), fwd); d > best { best, axis, side = d, i, s }
+        }
+    }
+    if best < -1 { axis, side = 1, 1 }
+    return
+}
+
+// Pushes the face looked at out by `steps` (in when negative), never past
+// the opposite face.
+area_push :: proc(gs: ^Game_State, steps: int) {
+    b := &gs.build
+    if !b.selected { return }
+    ax, side := area_face(gs)
+    on_a := side > 0 ? b.sel_a[ax] > b.sel_b[ax] : b.sel_a[ax] < b.sel_b[ax]
+    far, near := on_a ? &b.sel_a : &b.sel_b, on_a ? &b.sel_b : &b.sel_a
+    far[ax] += side * steps
+    far[ax] = side > 0 ? max(far[ax], near[ax]) : min(far[ax], near[ax])
+}
+
+// Moves the whole selection `steps` out through the face looked at.
+area_move :: proc(gs: ^Game_State, steps: int) {
+    b := &gs.build
+    if !b.selected { return }
+    ax, side := area_face(gs)
+    b.sel_a[ax] += side * steps
+    b.sel_b[ax] += side * steps
+}
+
+area_region :: proc(b: ^Build) -> Edit_Region {
+    return {lo = la.min(b.sel_a, b.sel_b), hi = la.max(b.sel_a, b.sel_b), wall = b.wall}
 }
 
 // The shape under the crosshair. Placing, it sits on the face you look at;
@@ -693,16 +780,18 @@ build_undo :: proc(gs: ^Game_State, from, to: ^[dynamic]Edit_Record, verb: strin
 Build_Preview :: struct {
     segs:     [dynamic][2][3]f32,
     carve:    [dynamic][2][3]f32, // shape: where a left click would carve, drawn faint
+    cursor:   [dynamic][2][3]f32, // area: where a click would put a corner, faint
+    face:     [dynamic][2][3]f32, // area: the face the wheel pushes, accented
     fill:     bool,
     too_big:  bool,
-    dims:     [3]int, // area: the box's size
-    has_dims: bool,
 }
 
 // Built in the temp allocator.
 build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
     pv.segs = make([dynamic][2][3]f32, context.temp_allocator)
     pv.carve = make([dynamic][2][3]f32, context.temp_allocator)
+    pv.cursor = make([dynamic][2][3]f32, context.temp_allocator)
+    pv.face = make([dynamic][2][3]f32, context.temp_allocator)
     b := &gs.build
     eye := gs.camera.pos
     switch b.tool {
@@ -716,24 +805,34 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
             wire_shape(&pv.segs, .Sphere, lo + 0.5, r, r, 1, 0, eye)
         }
     case .Area:
-        r: Edit_Region
-        if b.dragging {
-            r = area_region(b)
-            pv.fill = b.drag_fill
-        } else {
-            hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH)
-            if !ok { return }
-            r = {lo = hit, hi = hit}
+        // The selection, its walls and the face the wheel pushes; the cursor
+        // faint beside it (on its own, it's the outline).
+        pv.fill = true
+        if c, ok := area_cursor(gs); ok {
+            lo := [3]f32{f32(c.x), f32(c.y), f32(c.z)}
+            wire_box(b.selected ? &pv.cursor : &pv.segs, lo + 0.5, {0.502, 0.502, 0.502}, 1, 0)
         }
-        pv.dims, pv.has_dims = r.hi - r.lo + 1, b.dragging
+        if !b.selected { return }
+        r := area_region(b)
         pv.too_big = region_volume(r) > MAX_EDIT_VOXELS
         lo := [3]f32{f32(r.lo.x), f32(r.lo.y), f32(r.lo.z)}
         hi := [3]f32{f32(r.hi.x), f32(r.hi.y), f32(r.hi.z)} + 1
         wire_box(&pv.segs, (lo + hi) / 2, (hi - lo) / 2 + 0.002, 1, 0)
-        if b.wall > 0 && b.dragging {
+        if b.wall > 0 {
             inner := (hi - lo) / 2 - f32(b.wall)
             if inner.x > 0 && inner.y > 0 && inner.z > 0 { wire_box(&pv.segs, (lo + hi) / 2, inner, 1, 0) }
         }
+        ax, side := area_face(gs)
+        u, v := (ax + 1) % 3, (ax + 2) % 3
+        inset := min(0.2, (hi[u] - lo[u]) / 4, (hi[v] - lo[v]) / 4)
+        k: [4][3]f32
+        for &q, i in k {
+            q[ax] = (side > 0 ? hi[ax] : lo[ax]) + f32(side) * 0.01
+            q[u] = (i == 1 || i == 2) ? hi[u] - inset : lo[u] + inset
+            q[v] = i >= 2 ? hi[v] - inset : lo[v] + inset
+        }
+        for i in 0 ..< 4 { append(&pv.face, [2][3]f32{k[i], k[(i + 1) % 4]}) }
+        append(&pv.face, [2][3]f32{k[0], k[2]}, [2][3]f32{k[1], k[3]})
     case .Shape:
         // Right places: the shape sitting on the face looked at. Left
         // carves: the same shape around the voxel, faint.

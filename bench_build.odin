@@ -120,16 +120,17 @@ bench_build_run :: proc(gs: ^Game_State) {
         gs.camera = saved
     }
 
-    // Area drag preview: a 30 x 30 patch, 8 layers, walls 1.
-    b.tool, b.layers, b.wall = .Area, 8, 1
-    b.dragging, b.drag_fill, b.drag_n = true, true, {0, 1, 0}
-    b.drag_a = ahead(gs, base, fwd, 20, -15)
-    b.drag_b = ahead(gs, base, fwd, 50, 15)
-    b.drag_b.y = b.drag_a.y
+    // Area selection preview: a 30 x 30 patch pushed up 8, walls 1, filled
+    // with F, then moved off and filled again.
+    b.tool, b.wall = .Area, 1
+    b.selected = true
+    b.sel_a = ahead(gs, base, fwd, 20, -15)
+    b.sel_b = ahead(gs, base, fwd, 50, 15)
+    b.sel_b.y = b.sel_a.y + 8
     shot(gs, dir, "preview_area")
-    build_apply(gs, area_region(b), gs.selected_block, .All)
-    b.dragging = false
+    build_key(gs, SDL.K_F, {})
     shot(gs, dir, "area_walls")
+    b.selected = false
 
     // Big ones, timed.
     b.wall = 0
@@ -205,10 +206,24 @@ bench_build_keys :: proc(gs: ^Game_State) {
     check(&fails, b.wall == 0, "walls went below 0")
     check(&fails, !build_key(gs, SDL.K_Q, {.Alt}), "Alt+Q changed shape")
     b.tool = .Area
-    l0 := b.layers
-    build_wheel(gs, 1, {.Shift})
-    check(&fails, b.layers == l0 + 1, "Shift+wheel isn't layers in Area")
+    b.selected, b.sel_a, b.sel_b = true, {0, 0, 0}, {3, 3, 3}
+    gs.camera.pos, gs.camera.yaw, gs.camera.pitch = {1.5, 30, 1.5}, 0, -89.9 // above, looking down: the top face
+    ax, side := area_face(gs)
+    check(&fails, ax == 1 && side == 1, "looking down on the box isn't its top face")
+    build_wheel(gs, 2, {})
+    check(&fails, area_region(b).hi.y == 5 && area_region(b).lo.y == 0, "wheel didn't push the top face out")
+    build_wheel(gs, -9, {})
+    check(&fails, area_region(b).hi.y == 0 && area_region(b).lo.y == 0, "pushing in went past the bottom")
+    build_wheel(gs, 2, {.Shift})
+    check(&fails, area_region(b).lo.y == 2 && area_region(b).hi.y == 2, "Shift+wheel didn't move the box")
+    d0 := b.air_dist
     build_wheel(gs, 1, {.Alt})
-    check(&fails, b.layers == l0 + 1, "Alt+wheel changed layers")
+    check(&fails, b.air_dist == d0 + 1 && area_region(b).lo.y == 2, "Alt+wheel isn't the air reach alone")
+    build_wheel(gs, 1, {.Ctrl, .Alt})
+    check(&fails, b.air_dist == d0 + 1 && b.wall == 0 && area_region(b).lo.y == 2, "Ctrl+Alt+wheel did something in Area")
+    check(&fails, !build_key(gs, SDL.K_F, {.Ctrl}), "Ctrl+F filled")
+    check(&fails, build_key(gs, SDL.K_BACKSPACE, {}) && !b.selected, "Backspace didn't drop the selection")
+    check(&fails, build_key(gs, SDL.K_C, {}) && b.cursor == .Face, "C didn't cycle the cursor")
+    b.cursor = .Block
     fmt.printf("bench build: modifier checks %s (%d failed)\n", fails == 0 ? "passed" : "FAILED", fails)
 }
