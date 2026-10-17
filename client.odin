@@ -306,7 +306,7 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             c := msg_get(&r, Msg_Clock) or_break
             replica_clock_stamp(&gs.net.clock, c.time)
             if client_joined(gs) { // our own server's clock is ours already
-                gs.day.hour, gs.day.paused = c.hour, c.paused
+                gs.day.hour, gs.day.paused, gs.day.sun = c.hour, c.paused, c.sun
                 day_tick(&gs.sim, 0)
             }
         case .Welcome:
@@ -492,7 +492,7 @@ client_send_voxels :: proc(gs: ^Game_State, changed: [][3]int) {
 // from the generated one.
 @(private="file")
 client_write :: proc(gs: ^Game_State, p: [3]int, block: u8, changed: ^[dynamic][3]int) {
-    if p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX || int(block) >= len(Block_Type) { return }
+    if p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX || int(block) >= BLOCK_IDS { return }
     key := [2]int{p.x >> 3, p.z >> 3}
     gs.net.edited[key] = true
     col := gs.columns[key]

@@ -181,10 +181,10 @@ float corner_ao(bool s1, bool s2, bool c) {
     return 1.0 - n / 3.0;                            // 0..1, 1 = unoccluded
 }
 
-// Water doesn't darken the corners it fills.
+// Water doesn't darken the corners it fills, nor a thin door panel.
 bool ao_occludes(float3 p) {
     uint v = sample_voxel(p);
-    return v != 0u && !block_is_watery(v);
+    return v != 0u && !block_is_watery(v) && !block_is_door(v);
 }
 
 float compute_ao(float3 p, float3 nrm, float3 hit_pos) {
@@ -588,6 +588,27 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
 
     if (block_id == BLOCK_WATER) {
         return float3(0.10, 0.28, 0.36);
+    }
+
+    if (block_is_door(block_id)) {
+        // Oak planks running up the door in a darker frame; a middle rail,
+        // two sunken panels below it, window panes above (see-through:
+        // door_hit), an iron knob away from the hinge. Edges of the panel
+        // are the frame's end grain.
+        DoorShape ds = door_shape(block_id);
+        int2  c  = door_texel(ds, hit_pos - nrm * 0.01 - float3(vkey));
+        float th = hash31i(int3(vkey.x * 8 + c.x, c.y, vkey.z * 8 + c.x));
+        float plank = hash31i(int3(vkey.x, c.x >> 1, vkey.z)); // two texels a plank
+        float3 wood = float3(0.52, 0.36, 0.20) * (0.88 + 0.16 * plank) * (0.92 + 0.16 * lerp(0.5, th, detail));
+        bool face = ds.along_x ? abs(nrm.z) > 0.5 : abs(nrm.x) > 0.5;
+        if (!face) return saturate(wood * 0.8);
+        bool frame = c.x == 0 || c.x == 7 || c.y == 0 || c.y == 23 || c.y == 11 || c.y == 12
+                  || (c.y >= 13 && (c.x == 3 || c.x == 4));
+        if (frame) wood *= 0.72;
+        bool sunk = c.y >= 2 && c.y <= 9 && c.x >= 2 && c.x <= 5;
+        if (sunk) wood *= 0.86;
+        if (c.x == 6 && c.y == 12) return float3(0.10, 0.09, 0.09); // knob
+        return saturate(wood * (1.0 + vj * 0.06));
     }
 
     if (block_is_cutout(block_id)) {
@@ -1241,9 +1262,10 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     // sun can reach at all) and block light (torches). A water plant's
     // planes cut through its own voxel, which holds the light.
     bool   plant = block_is_cutout(hit.block_id);
+    bool   door  = block_is_door(hit.block_id); // its panel's lit by the light in its voxel too
     float  sky_level;
     float3 block_light;
-    if (plant) {
+    if (plant || door) {
         uint pl = sample_light(hit.vkey);
         sky_level   = float(light_sky(pl));
         block_light = block_radiance(pl, torch_flicker(hit_point));
@@ -1304,7 +1326,7 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
         hit_color.rgb += float3(0.3, 0.45, 0.1) * back_light * light_curve(sky_level) * sun_tint();
     }
 
-    float ao = (ao_on && !plant) ? compute_ao(hit_point + surf_normal * epsilon, surf_normal, hit_point) : 1.0;
+    float ao = (ao_on && !plant && !door) ? compute_ao(hit_point + surf_normal * epsilon, surf_normal, hit_point) : 1.0;
     hit_color.xyz *= lighting * ao;
     // Emissive blocks radiate on their own — NOT multiplied by
     // lighting/AO/shadow. Bright enough to trip the bloom threshold.

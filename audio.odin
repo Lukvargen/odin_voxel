@@ -192,6 +192,7 @@ vary :: proc(amount: f32 = 0.08) -> f32 {
 }
 
 block_material :: proc(b: Block_Type) -> Material {
+    if block_is_door(u8(b)) { return .Wood }
     #partial switch b {
     case .Grass, .Dry_Grass, .Moss:      return .Grass
     case .Dirt:                          return .Dirt
@@ -224,6 +225,13 @@ audio_edit :: proc(pos: [3]int, block, old: Block_Type, radius: int) {
         play_at(.Place, p, 0.5 + 0.4 * big, vary(0.08) * (1 - 0.25 * big), 10)
         play_at(step_sound(block_material(block)), p, 0.45, vary(), 10)
     }
+}
+
+// A door swinging open or banging shut: a wooden knock, lower shutting.
+audio_door :: proc(pos: [3]int, opening: bool) {
+    p := [3]f32{f32(pos.x) + 0.5, f32(pos.y) + 1, f32(pos.z) + 0.5}
+    play_at(.Place, p, opening ? 0.35 : 0.6, vary(0.06) * (opening ? 1.15 : 0.8), 12)
+    play_at(.Step_Wood, p, opening ? 0.5 : 0.7, vary(0.06) * (opening ? 1.1 : 0.85), 12)
 }
 
 // Once a frame, after the player and entities have moved.

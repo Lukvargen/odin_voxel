@@ -105,7 +105,7 @@ column_decode :: proc(rle: []u8) -> ^Column {
     n := 0
     for i := 0; i + 3 <= len(rle); i += 3 {
         count := int(endian.unchecked_get_u16le(rle[i + 1:]))
-        if n + count > COLUMN_VOXELS || int(rle[i]) >= len(Block_Type) { return nil }
+        if n + count > COLUMN_VOXELS || int(rle[i]) >= BLOCK_IDS { return nil }
         for &v in voxels[n:][:count] { v = rle[i] }
         n += count
     }

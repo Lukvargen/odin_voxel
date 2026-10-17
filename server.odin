@@ -301,11 +301,22 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
             h := msg_get(&r, f32) or_break
             if admin && h >= 0 && h < 24 {
                 sim.day.hour = h
+                sim.day.sun = 0
                 day_tick(sim, 0)
             }
         case .Set_Paused:
             paused := msg_get(&r, bool) or_break
-            if admin { sim.day.paused = paused }
+            if admin {
+                sim.day.paused = paused
+                if !paused { sim.day.sun = 0 } // running again: the clock's sun
+            }
+        case .Set_Sun:
+            sun := msg_get(&r, [3]f32) or_break
+            if admin && la.length(sun) > 0.5 && la.length(sun) < 2 {
+                sim.day.sun = la.normalize(sun)
+                sim.day.paused = true
+                day_tick(sim, 0)
+            }
         case .Set_Monsters:
             on := msg_get(&r, bool) or_break
             if admin { sim.monsters = on }
@@ -321,9 +332,22 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
             m := msg_get(&r, Msg_Voxels) or_break
             m.count = min(m.count, VOXEL_BATCH)
             if !server_may_build(srv, player) {
-                // Not theirs to change: what's really there, back to them.
-                for &v in m.items[:m.count] { v.block = u8(get_voxel(srv.sim.world, int(v.pos.x), int(v.pos.y), int(v.pos.z))) }
-                outbox_put(server_outbox(srv, player), .Voxels, m)
+                // Not theirs to change, but for opening and shutting doors:
+                // those pass on, the rest goes back as it really is.
+                swung, back: Msg_Voxels
+                for v in m.items[:m.count] {
+                    cur := u8(get_voxel(srv.sim.world, int(v.pos.x), int(v.pos.y), int(v.pos.z)))
+                    if door_swung(cur, v.block) {
+                        server_write(srv, la.array_cast(v.pos, int), v.block)
+                        swung.items[swung.count] = v
+                        swung.count += 1
+                    } else {
+                        back.items[back.count] = {pos = v.pos, block = cur}
+                        back.count += 1
+                    }
+                }
+                if swung.count > 0 { server_forward(srv, player, .Voxels, swung) }
+                if back.count > 0 { outbox_put(server_outbox(srv, player), .Voxels, back) }
                 break
             }
             for v in m.items[:m.count] { server_write(srv, la.array_cast(v.pos, int), v.block) }
@@ -395,7 +419,7 @@ server_hit :: proc(srv: ^Server, by: int, h: Msg_Hit) {
 // column's save (server_save_away).
 @(private="file")
 server_write :: proc(srv: ^Server, p: [3]int, block: u8) {
-    if p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX || int(block) >= len(Block_Type) { return }
+    if p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX || int(block) >= BLOCK_IDS { return }
     w := srv.sim.world
     key := [2]int{p.x >> 3, p.z >> 3} // CHUNK_VOXELS == 8
     col := w.columns[key]
@@ -508,7 +532,7 @@ server_flush :: proc(srv: ^Server, dt: f32) {
     srv.view_timer -= dt
     if srv.view_timer <= 0 {
         srv.view_timer = 1.0 / VIEW_RATE
-        server_broadcast(srv, .Clock, Msg_Clock{hour = sim.day.hour, paused = sim.day.paused, time = time.duration_seconds(time.tick_since(srv.started))})
+        server_broadcast(srv, .Clock, Msg_Clock{hour = sim.day.hour, paused = sim.day.paused, sun = sim.day.sun, time = time.duration_seconds(time.tick_since(srv.started))})
         for &p, slot in sim.players {
             if !p.active { continue }
             view := Msg_Player_View{slot = u8(slot), player = player_pack(p)}

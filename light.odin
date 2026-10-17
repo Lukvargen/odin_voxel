@@ -38,7 +38,7 @@ LIGHT_SKY   :: u16(LIGHT_MAX << 8) // full sky, no block light
 Light_Channel :: enum { Sky, Block }
 
 block_opaque :: #force_inline proc(b: u8) -> bool {
-    return b != u8(Block_Type.Air) && !block_is_leaves(b) && !block_is_watery(b) && !block_is_land_plant(b)
+    return b != u8(Block_Type.Air) && !block_is_leaves(b) && !block_is_watery(b) && !block_is_land_plant(b) && !block_is_door(b)
 }
 
 // Colour of a block's light (palette in the shader: light_tint_color).

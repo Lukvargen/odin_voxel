@@ -67,6 +67,7 @@ far_summary_init :: proc(s: ^Far_Summary) {
 // Add a block at (lx, wy, lz), lx/lz local to the tile.
 far_record :: proc(s: ^Far_Summary, lx, wy, lz: int, b: u8) {
     ci := lx / FAR_CELL + (lz / FAR_CELL) * FAR_TILE_CELLS
+    if block_is_door(b) { return } // too thin to show, like plants
     switch b {
     case u8(Block_Type.Air), u8(Block_Type.Cactus), u8(Block_Type.Tall_Grass), u8(Block_Type.Flower), u8(Block_Type.Fern), u8(Block_Type.Dry_Bush), u8(Block_Type.Mushroom),
          u8(Block_Type.Roots), u8(Block_Type.Glow_Mushroom):

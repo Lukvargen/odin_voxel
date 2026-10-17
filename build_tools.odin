@@ -48,6 +48,8 @@ Build :: struct {
     undo, redo:  [dynamic]Edit_Record,
     undo_voxels: int,  // voxel changes held in `undo`, for the budget
     stroke:      bool, // the last undo record is the held stroke's: repeats join it
+
+    door_click:  bool, // right went down on a door: holding it doesn't build
 }
 
 // Old values of the voxels one edit changed; undoing writes them back.
@@ -243,6 +245,15 @@ build_update :: proc(gs: ^Game_State, dt: f32) {
         return
     }
     gs.edit_timer -= dt
+    // Right click on a door swings it, whatever the tool (door.odin).
+    if !gs.right_held { b.door_click = false }
+    if gs.right_pressed && !b.dragging {
+        if p, ok := door_aimed(gs); ok {
+            door_toggle(gs, p)
+            b.door_click = true
+        }
+    }
+    if b.door_click { return }
     switch b.tool {
     case .Block: build_block_update(gs)
     case .Area:  build_area_update(gs)
@@ -261,6 +272,11 @@ build_block_update :: proc(gs: ^Game_State) {
     gs.edit_timer = EDIT_REPEAT
     hit, nrm, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH, plants = true)
     if !ok { return }
+    if !breaking && gs.selected_block == .Door {
+        // Doors go in one at a time, on a click (door.odin).
+        if gs.right_pressed { door_place(gs, hit, nrm) }
+        return
+    }
     target := hit
     block  := Block_Type.Air
     if !breaking {
@@ -455,6 +471,10 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
         ui_toast(gs, "Too big: make it smaller")
         return 0
     }
+    if block == .Door {
+        ui_toast(gs, "Doors go in one at a time, with the Block tool", 1.5)
+        return 0
+    }
     rec: Edit_Record
     changed := make([dynamic][3]int)
     defer delete(changed)
@@ -499,6 +519,20 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
         delete(rec.changes)
         return 0
     }
+    // A door goes whole, and with its ground (door.odin).
+    orphans := make([dynamic][3]int, context.temp_allocator)
+    door_orphans(gs, changed[:], &orphans)
+    for q in orphans {
+        col := gs.columns[{q.x >> 3, q.z >> 3}]
+        if col == nil { continue }
+        c := &col.chunks[chunk_y_index(q.y >> 3)]
+        vi := (q.x & 7) + (q.y & 7) * CHUNK_VOXELS + (q.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS
+        v := chunk_voxel(c, vi)
+        if !block_is_door(v) || !chunk_set_voxel(c, vi, 0) { continue }
+        dirty[ring_slot(q.x >> 3, q.y >> 3, q.z >> 3)] = true
+        append(&changed, q)
+        append(&rec.changes, Voxel_Change{{i32(q.x), i32(q.y), i32(q.z)}, v})
+    }
     // Plants on ground that's gone go with it (roots with their ceiling).
     for i in 0 ..< len(changed) {
         p := changed[i]
@@ -534,6 +568,37 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
         push_record(b, &b.undo, rec)
     }
     b.stroke = true
+    return len(changed)
+}
+
+// Sets each of `pos` to its block of `blocks` (a door's two halves), and
+// tells everyone. undo: kept for Ctrl+Z (placing a door); swinging one
+// isn't. Returns how many voxels changed.
+build_set :: proc(gs: ^Game_State, pos: [][3]int, blocks: []u8, undo: bool) -> int {
+    rec: Edit_Record
+    changed := make([dynamic][3]int, context.temp_allocator)
+    dirty := make(map[int]bool, 4, context.temp_allocator)
+    for p, i in pos {
+        col := gs.columns[{p.x >> 3, p.z >> 3}]
+        if col == nil || p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX { continue }
+        c := &col.chunks[chunk_y_index(p.y >> 3)]
+        vi := (p.x & 7) + (p.y & 7) * CHUNK_VOXELS + (p.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS
+        cur := chunk_voxel(c, vi)
+        if !chunk_set_voxel(c, vi, blocks[i]) { continue }
+        col.modified = true
+        dirty[ring_slot(p.x >> 3, p.y >> 3, p.z >> 3)] = true
+        append(&changed, p)
+        if undo { append(&rec.changes, Voxel_Change{{i32(p.x), i32(p.y), i32(p.z)}, cur}) }
+    }
+    if len(changed) == 0 { return 0 }
+    build_commit(gs, changed[:], dirty)
+    if undo {
+        b := &gs.build
+        b.stroke = false
+        for &x in b.redo { delete(x.changes) }
+        clear(&b.redo)
+        push_record(b, &b.undo, rec)
+    }
     return len(changed)
 }
 

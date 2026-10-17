@@ -42,6 +42,7 @@ Msg_Kind :: enum u8 {
     Scatter,      // [3]f32: knocked out here: everything about is flung away
     Set_Hour,     // f32: the clock set (options)
     Set_Paused,   // bool: the clock stopped or running
+    Set_Sun,      // [3]f32: the sun aimed by hand (L); the clock stops
     Set_Monsters, // bool: slimes and enemies on or off (options)
     Spawn,        // Msg_Spawn: debug F6 / F8
     Clear,        // no body: every slime and enemy gone (debug F7)
@@ -182,6 +183,7 @@ Msg_Player_View :: struct #packed {
 Msg_Clock :: struct {
     hour:   f32,
     paused: bool,
+    sun:    [3]f32, // Day_Clock.sun: aimed by hand, or zero
     time:   f64, // seconds the server has run: the views after it in its packet are of this moment (replica.odin)
 }
 

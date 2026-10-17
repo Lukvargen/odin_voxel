@@ -10,9 +10,9 @@ import la "core:math/linalg"
 // night factor to paint twilight, stars and the moon (camera_uniforms.hlsl).
 //
 // Two halves: the clock is the simulation's (Sim.day: a server keeps the
-// time and its night brings out the skeletons); the sky is the client's
-// (Game_State.sky: light, mist, eye adaptation, and L aiming the sun by
-// hand, which changes only what this client sees).
+// time, and the sun when the host aims it by hand with L, and its night
+// brings out the skeletons); the sky is the client's (Game_State.sky:
+// light, mist, eye adaptation).
 
 DAY_START_HOUR   :: 16.8   // late afternoon: long shadows, golden light
 DAY_LENGTH_MIN   :: 24.0   // real minutes per game day
@@ -24,13 +24,13 @@ NIGHT_EXPOSURE   :: 2.8    // eye adaptation at night: lifts moonlit shapes out 
 Day_Clock :: struct {
     hour:   f32,  // 0..24
     paused: bool, // clock stopped (options panel, or L)
-    night:  f32,  // 0 day .. 1 full night, by the clock
+    sun:    [3]f32, // aimed by hand (L), until the clock is set or restarted; zero: the clock's sun
+    night:  f32,  // 0 day .. 1 full night, by the sun
 }
 
 Sky :: struct {
-    manual:   bool, // L aimed the sun by hand: light_dir is left alone
     sun_true: [3]f32,
-    night:    f32,  // 0 day .. 1 full night, as seen (follows a hand-aimed sun)
+    night:    f32,  // 0 day .. 1 full night
     mist:     f32,  // valley mist amount, thickest at dawn
     eye:      f32,  // smoothed exposure multiplier (eye adaptation)
 }
@@ -44,7 +44,7 @@ day_init :: proc(gs: ^Game_State) {
 // network this is a request to the server.
 day_set_hour :: proc(gs: ^Game_State, h: f32, settle := false) {
     gs.day.hour = h
-    gs.sky.manual = false
+    gs.day.sun = 0
     day_tick(gs, 0)
     sky_update(gs, 0)
     if settle { gs.sky.eye = day_target_eye(gs.sky.night, gs.sky.sun_true.y) }
@@ -81,17 +81,22 @@ day_tick :: proc(sim: ^Sim, dt: f32) {
         d.hour += dt * 24 / (DAY_LENGTH_MIN * 60)
         for d.hour >= 24 { d.hour -= 24 }
     }
-    d.night = night_for(sun_dir_at(d.hour).y)
+    d.night = night_for(day_sun(d^).y)
+}
+
+// Direction toward the sun: where the host aimed it, else by the clock.
+day_sun :: proc(d: Day_Clock) -> [3]f32 {
+    return d.sun != 0 ? la.normalize(d.sun) : sun_dir_at(d.hour)
 }
 
 // The client's sky for the clock's hour: sun or moon light, mist, eyes.
 sky_update :: proc(gs: ^Game_State, dt: f32) {
     s := &gs.sky
-    sun := sun_dir_at(gs.day.hour)
+    sun := day_sun(gs.day)
     s.sun_true = sun
     s.night = gs.day.night
 
-    if !s.manual {
+    if gs.day.sun == 0 {
         // The sun lights the world until just below the horizon, then the
         // moon (opposite) takes over; both intensities are ~0 at the switch.
         if sun.y > -0.06 {
@@ -103,9 +108,9 @@ sky_update :: proc(gs: ^Game_State, dt: f32) {
             gs.sun_intensity = MOON_PEAK * math.smoothstep(f32(0.04), 0.18, moon.y)
         }
     } else {
-        // Manual sun (L): the true sun is wherever the light points.
-        s.sun_true = la.normalize(gs.light_dir)
-        s.night = night_for(s.sun_true.y)
+        // Aimed by hand (L): full sun wherever it points.
+        gs.light_dir = sun
+        gs.sun_intensity = SUN_PEAK
     }
 
     // Mist pools in the valleys at dawn, lingers a little at dusk and at night.

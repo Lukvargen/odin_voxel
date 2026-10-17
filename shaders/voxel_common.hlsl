@@ -95,6 +95,8 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_ROOTS         42u // hanging plant
 #define BLOCK_GLOW_MUSHROOM 43u // plant, emissive
 #define BLOCK_GLOW_MOSS     44u // emissive
+#define BLOCK_DOOR          45u // doors: 48 ids, one per state (door_shape)
+#define BLOCK_DOOR_LAST     92u
 
 // World blocks per design block (terrain.odin TERRAIN_SCALE): textures laid
 // out over the world in design sizes use it.
@@ -109,6 +111,10 @@ bool block_is_water_plant(uint id) { return id == BLOCK_KELP || id == BLOCK_SEAG
 bool block_is_watery(uint id) { return id == BLOCK_WATER || block_is_water_plant(id); }
 // Drawn as crossed cutout planes (plant_hit).
 bool block_is_cutout(uint id) { return block_is_water_plant(id) || block_is_land_plant(id); }
+// A thin panel in its voxel (door_hit).
+bool block_is_door(uint id) { return id >= BLOCK_DOOR && id <= BLOCK_DOOR_LAST; }
+// Not a whole cube: rays test the shape inside the voxel (shaped_hit).
+bool block_is_shaped(uint id) { return block_is_cutout(id) || block_is_door(id); }
 
 // Radiance a block's surface emits on its own (0 = not emissive). Added to
 // shading UNLIT (not multiplied by lighting/AO). Their light on the world
@@ -211,6 +217,67 @@ float3 safe_dir(float3 d) {
     return s * max(abs(d), 1e-6);
 }
 
+// ---- Doors ----------------------------------------------------------------------
+// As door.odin: id = BLOCK_DOOR + ((facing * 2 + hinge_right) * 2 + open) *
+// DOOR_PARTS + part. facing (0 -z, 1 +x, 2 +z, 3 -x) is the way the placer
+// looked: closed, the panel lies against the side toward them; open, against
+// the hinge side. A panel is 8 texels across (u, from the hinge) and 8 a
+// part up the whole door (v), with two window panes up top that rays pass
+// through.
+#define DOOR_THICK 0.1875 // 3/16 of a block
+#define DOOR_PARTS 3u     // blocks tall
+
+struct DoorShape {
+    float3 lo, hi;  // the panel's box in its voxel, 0..1
+    float2 hinge;   // the hinge corner (x, z)
+    bool   along_x; // the panel runs along x (else z)
+    uint   part;    // 0 at the bottom
+};
+
+DoorShape door_shape(uint id) {
+    uint   k = id - BLOCK_DOOR;
+    uint   st = k / DOOR_PARTS;
+    uint   f = st >> 2;
+    float2 d = f == 0u ? float2(0, -1) : f == 1u ? float2(1, 0) : f == 2u ? float2(0, 1) : float2(-1, 0);
+    float2 r = float2(-d.y, d.x); // right of the facing
+    float2 hv = (st & 2u) != 0u ? r : -r;
+    float2 s = (st & 1u) != 0u ? hv : -d; // the side the panel lies against
+    DoorShape ds;
+    ds.lo = float3(s.x > 0.5 ? 1.0 - DOOR_THICK : 0.0, 0.0, s.y > 0.5 ? 1.0 - DOOR_THICK : 0.0);
+    ds.hi = float3(s.x < -0.5 ? DOOR_THICK : 1.0, 1.0, s.y < -0.5 ? DOOR_THICK : 1.0);
+    ds.hinge = 0.5 + 0.5 * (hv - d);
+    ds.along_x = abs(s.y) > 0.5;
+    ds.part = k % DOOR_PARTS;
+    return ds;
+}
+
+// Panel texel (u 0..7 from the hinge, v 0..23 up the door) at local point q.
+int2 door_texel(DoorShape ds, float3 q) {
+    float u = ds.along_x ? abs(q.x - ds.hinge.x) : abs(q.z - ds.hinge.y);
+    return int2(clamp(int(u * 8.0), 0, 7), clamp(int((q.y + float(ds.part)) * 8.0), 0, int(DOOR_PARTS) * 8 - 1));
+}
+
+bool door_window(int2 c) { return c.y >= 15 && c.y <= 20 && c.x != 0 && c.x != 3 && c.x != 4 && c.x != 7; }
+
+// Ray against the panel of the door voxel it spans for s in [0, span]; q0
+// is the ray position at s = 0 relative to the voxel's min corner. Returns
+// the hit distance (or -1: missed, or in through a window) and the normal
+// of the face it entered.
+float door_hit(uint id, float3 q0, float3 dir, float span, out float3 n) {
+    DoorShape ds = door_shape(id);
+    float3 inv = 1.0 / dir;
+    float3 a = (ds.lo - q0) * inv, b = (ds.hi - q0) * inv;
+    float3 tn = min(a, b), tf = max(a, b);
+    float  t0 = max(max(tn.x, tn.y), max(tn.z, 0.0));
+    float  t1 = min(min(tf.x, tf.y), min(tf.z, span));
+    if (tn.x >= tn.y && tn.x >= tn.z) n = float3(-sign(dir.x), 0, 0);
+    else if (tn.y >= tn.z)            n = float3(0, -sign(dir.y), 0);
+    else                              n = float3(0, 0, -sign(dir.z));
+    if (t0 > t1) return -1.0;
+    if (door_window(door_texel(ds, q0 + dir * t0))) return -1.0;
+    return t0;
+}
+
 // Per-voxel shadow walk through one occupied chunk. local_entry is the ray
 // entry pos in voxel units within the chunk, [0,8) per axis. Returns the
 // transmittance factor for this chunk (0 = fully blocked, leaves attenuate
@@ -243,12 +310,12 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float m
 
     int base = chunk_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
     float factor = 1.0;
+    float t_enter = 0.0;
 
     // Entry voxel first, then step-and-test (each voxel tested exactly once:
     // the step that exits this chunk lands on the next chunk's entry voxel).
     for (int i = 0; i <= 23; i++) {
         if (i > 0) {
-            float t_enter;
             if (t_max_x < t_max_y && t_max_x < t_max_z) {
                 t_enter = t_max_x; x_i += step_x; t_max_x += t_delta_x;
             } else if (t_max_y < t_max_z) {
@@ -270,6 +337,12 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float m
             } else if (block_is_leaves(bid)) {
                 factor *= LEAF_TRANSMIT;
                 if (factor < 0.01) return 0.0;
+            } else if (block_is_door(bid)) {
+                // Only the panel shades (not its windows, nor an open
+                // door's way through).
+                float3 dn;
+                float  span = min(t_max_x, min(t_max_y, t_max_z)) - t_enter;
+                if (door_hit(bid, local_entry + dir * t_enter - float3(x_i, y_i, z_i), dir, span, dn) >= 0.0) return 0.0;
             } else if (block_is_cutout(bid)) {
                 factor *= PLANT_TRANSMIT;
             } else {
@@ -648,6 +721,12 @@ float plant_hit(uint id, int3 vkey, float3 q0, float3 dir, float span, out float
     return best;
 }
 
+// A shaped block's surface along the ray (plants, doors), as plant_hit.
+float shaped_hit(uint id, int3 vkey, float3 q0, float3 dir, float span, out float3 n) {
+    if (block_is_door(id)) return door_hit(id, q0, dir, span, n);
+    return plant_hit(id, vkey, q0, dir, span, n);
+}
+
 // world_origin: ray pos in WORLD units, used only for the final hit_pos
 //   output (depth/shading) — its far-from-spawn drift is cosmetically
 //   harmless there and pre-existing.
@@ -699,9 +778,9 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
         if (uniform_id != 0u) hit_block_id = uniform_id;
         else if (voxel_solid(chunk_i, lvi)) hit_block_id = load_voxel(global_chunk_i + lvi);
         if (hit_block_id == skip_id) hit_block_id = 0u;
-        if (block_is_cutout(hit_block_id)) {
+        if (block_is_shaped(hit_block_id)) {
             float3 pn;
-            float  s = plant_hit(hit_block_id, chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i),
+            float  s = shaped_hit(hit_block_id, chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i),
                                  local_entry - float3(x_i, y_i, z_i), dir,
                                  min(t_max_x, min(t_max_y, t_max_z)), pn);
             if (s < 0.0) hit_block_id = 0u;
@@ -727,9 +806,9 @@ HitInfo trace_ray_chunk_voxels(float3 world_origin, float3 local_entry,
         int lvi2 = x_i + y_i * BRICK_CHUNK_SIZE + z_i * BRICK_CHUNK_SIZE * BRICK_CHUNK_SIZE;
         if (voxel_solid(chunk_i, lvi2)) {
             uint b = load_voxel(global_chunk_i + lvi2);
-            if (block_is_cutout(b)) {
+            if (block_is_shaped(b)) {
                 float3 pn;
-                float  s = plant_hit(b, chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i),
+                float  s = shaped_hit(b, chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i),
                                      local_entry + dir * t - float3(x_i, y_i, z_i), dir,
                                      min(t_max_x, min(t_max_y, t_max_z)) - t, pn);
                 if (s >= 0.0) { hit_block_id = b; t += s; hit_side = pn; }

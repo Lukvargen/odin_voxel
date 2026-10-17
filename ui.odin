@@ -596,6 +596,7 @@ heading :: proc(s: string, a: f32 = 1) {
 // "Red_Sand" -> "Red sand".
 @(private="file")
 block_name :: proc(b: Block_Type) -> string {
+    if block_is_door(u8(b)) { return "Door" }
     s, _ := strings.replace_all(fmt.tprint(b), "_", " ", context.temp_allocator)
     if len(s) < 2 { return s }
     return strings.concatenate({s[:1], strings.to_lower(s[1:], context.temp_allocator)}, context.temp_allocator)
@@ -1066,6 +1067,23 @@ draw_block_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, b: Block_Type) {
         core := SDL.FRect{cx - u, cy - 5 * u, 2 * u, 2 * u}
         SDL.SetRenderDrawColor(r, 255, 240, 170, 255)
         SDL.RenderFillRect(r, &core)
+        return
+    }
+    if b == .Door {
+        // A plank door: frame, two window panes up top, a knob.
+        u := rect.w / 16
+        fill :: proc(r: ^SDL.Renderer, x, y, w, h: f32, col: [3]u8) {
+            q := SDL.FRect{x, y, w, h}
+            SDL.SetRenderDrawColor(r, col.r, col.g, col.b, 255)
+            SDL.RenderFillRect(r, &q)
+        }
+        x0, y0 := cx - 4 * u, cy - 7.5 * u
+        fill(r, x0, y0, 8 * u, 14 * u, {92, 62, 34})
+        fill(r, x0 + u, y0 + u, 6 * u, 12 * u, {150, 106, 60})
+        fill(r, x0 + 1.5 * u, y0 + 1.5 * u, 2.2 * u, 3.5 * u, {150, 196, 220})
+        fill(r, x0 + 4.3 * u, y0 + 1.5 * u, 2.2 * u, 3.5 * u, {150, 196, 220})
+        fill(r, x0 + 1.5 * u, y0 + 7 * u, 5 * u, 0.6 * u, {112, 78, 44})
+        fill(r, x0 + 5.6 * u, y0 + 7.8 * u, 0.9 * u, 0.9 * u, {40, 36, 32})
         return
     }
     top, side := icon_colors(b)
@@ -1731,21 +1749,22 @@ menu_graphics :: proc(gs: ^Game_State) {
         if i := segmented("Bnc", {"1", "2", "3", "4", "5"}, int(gs.reflect_amount) - 1); i >= 0 { gs.reflect_amount = i32(i + 1) }
     }
     // Time of day: dragging sets the clock; the toggle runs or stops it.
-    if clay.UI()(setting_row()) {
-        row_label("Time of day")
-        t := gs.day.hour / 24
-        hh, mm := day_clock(gs.day.hour)
-        if slider(gs, clay.ID("Hour"), &t, fmt.tprintf("%02d:%02d", hh, mm)) {
-            gs.sky.manual = false
-            client_send(gs, .Set_Hour, clamp(t, 0, 0.999) * 24)
+    // The clock is the host's: a guest's server ignores both.
+    if !client_joined(gs) {
+        if clay.UI()(setting_row()) {
+            row_label("Time of day")
+            t := gs.day.hour / 24
+            hh, mm := day_clock(gs.day.hour)
+            if slider(gs, clay.ID("Hour"), &t, fmt.tprintf("%02d:%02d", hh, mm)) {
+                client_send(gs, .Set_Hour, clamp(t, 0, 0.999) * 24)
+            }
         }
-    }
-    if clay.UI()(setting_row()) {
-        row_label("Day cycle")
-        running := !gs.day.paused
-        toggle("Day", &running)
-        if running == gs.day.paused { client_send(gs, .Set_Paused, !running) }
-        if running { gs.sky.manual = false }
+        if clay.UI()(setting_row()) {
+            row_label("Day cycle")
+            running := !gs.day.paused
+            toggle("Day", &running)
+            if running == gs.day.paused { client_send(gs, .Set_Paused, !running) }
+        }
     }
     // Exposure 0.25..4 and haze (fog density 0.0003..0.006), both on log scales.
     if clay.UI()(setting_row()) {

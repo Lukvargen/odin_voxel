@@ -127,10 +127,17 @@ aabb_solid :: proc(w: ^World, pos: [3]f32) -> bool {
     max_y := int(math.floor(pos.y + PLAYER_HEAD_ABOVE))
     min_z := int(math.floor(pos.z - PLAYER_HALF_W))
     max_z := int(math.floor(pos.z + PLAYER_HALF_W))
+    lo := pos - {PLAYER_HALF_W, PLAYER_EYE_HEIGHT, PLAYER_HALF_W}
+    hi := pos + {PLAYER_HALF_W, PLAYER_HEAD_ABOVE, PLAYER_HALF_W}
     for iy in min_y ..= max_y {
         for ix in min_x ..= max_x {
             for iz in min_z ..= max_z {
-                if solid_at(w, ix, iy, iz) { return true }
+                b := u8(get_voxel(w, ix, iy, iz))
+                if block_is_door(b) {
+                    if door_overlaps(b, {ix, iy, iz}, lo, hi) { return true } // its panel only
+                } else if block_solid(b) {
+                    return true
+                }
             }
         }
     }

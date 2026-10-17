@@ -165,7 +165,14 @@ Block_Type :: enum u8 {
     Roots         = 42,  // hanging from cave ceilings: a plant (cutout)
     Glow_Mushroom = 43,  // a plant, and a dim light
     Glow_Moss     = 44,  // on cave ceilings: a dim light
+    // Doors (door.odin): 48 ids from here, one per state (facing, hinge,
+    // open, which part). Door itself is the one in hand and in the
+    // inventory; the rest only appear placed, so this stays the last name.
+    Door          = 45,
 }
+
+// Every block id there is: the named ones and the doors' states.
+BLOCK_IDS :: int(Block_Type.Door) + 48
 
 // Plants that live in water and count as water for everything but drawing.
 block_is_water_plant :: #force_inline proc(b: u8) -> bool {
@@ -183,9 +190,10 @@ block_is_watery :: #force_inline proc(b: u8) -> bool {
     return b == u8(Block_Type.Water) || block_is_water_plant(b)
 }
 
-// Blocks the player and entities collide with.
+// Blocks the player and entities collide with. A door is a wall closed and
+// a way through open; the player meets its actual panel (aabb_solid).
 block_solid :: #force_inline proc(b: u8) -> bool {
-    return b != u8(Block_Type.Air) && !block_is_watery(b) && !block_is_land_plant(b)
+    return b != u8(Block_Type.Air) && !block_is_watery(b) && !block_is_land_plant(b) && !door_is_open(b)
 }
 
 block_is_leaves :: #force_inline proc(b: u8) -> bool {
@@ -1302,7 +1310,15 @@ raycast_voxel :: proc(w: ^World, origin, dir: [3]f32, max_dist: f32, plants := f
     nx, ny, nz := 0, 0, 0
 
     for t := 0.0; t < f64(max_dist); {
-        if v := u8(get_voxel(w, xi, yi, zi)); block_solid(v) || plants && block_is_land_plant(v) {
+        v := u8(get_voxel(w, xi, yi, zi))
+        if block_is_door(v) {
+            // Only its panel: an open door's way through is open.
+            q0 := [3]f32{f32(ox - f64(xi) + f64(dx) * t), f32(oy - f64(yi) + f64(dy) * t), f32(oz - f64(zi) + f64(dz) * t)}
+            span := f32(min(t_max_x, t_max_y, t_max_z) - t)
+            if _, n, ok := door_ray(v, q0, dir, span); ok {
+                return {xi, yi, zi}, n == {} ? [3]int{nx, ny, nz} : n, true
+            }
+        } else if block_solid(v) || plants && block_is_land_plant(v) {
             return {xi, yi, zi}, {nx, ny, nz}, true
         }
         if t_max_x < t_max_y && t_max_x < t_max_z {

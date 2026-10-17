@@ -212,6 +212,7 @@ main :: proc() {
             case a == "water": bench_water = true
             case a == "sea": bench_sea = true
             case a == "climb": bench_climb = true
+            case a == "doors": bench_doors = true
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
                 day_set_hour(&gs, h, settle = true)
@@ -417,32 +418,34 @@ main :: proc() {
         }
 
         // Held keys. Ctrl or a double-tapped W sprints, Shift sneaks (and
-        // sinks / flies down), Alt flies very fast.
+        // sinks / flies down), Alt flies very fast. A menu or a text box
+        // (chat) has the keyboard: then none of them count.
         kb := SDL.GetKeyboardState(nil)
-        move_fwd   := kb[SDL.Scancode.W]
-        move_back  := kb[SDL.Scancode.S]
-        move_left  := kb[SDL.Scancode.A]
-        move_right := kb[SDL.Scancode.D]
-        ctrl_held  := bool(kb[SDL.Scancode.LCTRL])
+        keys_free := gs.mouse_locked && gs.ui.typing == nil
+        held :: proc(kb: [^]bool, free: bool, sc: SDL.Scancode) -> bool { return free && kb[sc] }
+        move_fwd   := held(kb, keys_free, .W)
+        move_back  := held(kb, keys_free, .S)
+        move_left  := held(kb, keys_free, .A)
+        move_right := held(kb, keys_free, .D)
+        ctrl_held  := held(kb, keys_free, .LCTRL)
         if !move_fwd { gs.sprint_latched = false }
         sprint := ctrl_held || gs.sprint_latched
-        sneak  := bool(kb[SDL.Scancode.LSHIFT]) && !gs.combat.sword // drawn, Shift dodges
-        ultra  := bool(kb[SDL.Scancode.LALT])
-        if !gs.mouse_locked || gs.ui.typing != nil { move_fwd, move_back, move_left, move_right, sneak = false, false, false, false, false }
+        sneak  := held(kb, keys_free, .LSHIFT) && !gs.combat.sword // drawn, Shift dodges
+        ultra  := held(kb, keys_free, .LALT)
 
         // In fly mode, Space held moves up
-        if gs.camera.fly_mode && kb[SDL.Scancode.SPACE] && gs.mouse_locked {
+        if gs.camera.fly_mode && held(kb, keys_free, .SPACE) {
             gs.jump_pressed = true // reuse as move_up in fly
         }
-        gs.camera.swim_up = kb[SDL.Scancode.SPACE] && gs.mouse_locked
+        gs.camera.swim_up = held(kb, keys_free, .SPACE)
 
-        // Light dir: hold L + look direction.
-        if gs.mouse_locked && kb[SDL.Scancode.L] {
+        // Light dir: hold L + look direction. The sun is the server's, so
+        // everyone sees it (until the clock is set or restarted, options);
+        // only the host may aim it.
+        if held(kb, keys_free, .L) && !client_joined(&gs) {
             fwd := camera_forward(gs.camera)
-            gs.light_dir = fwd
-            gs.sun_intensity = SUN_PEAK
-            gs.sky.manual = true // until the clock is set or restarted (options)
-            client_send(&gs, .Set_Paused, true)
+            gs.day.sun = fwd // ours now; the server's says the same next step
+            client_send(&gs, .Set_Sun, fwd)
         }
         sky_update(&gs, dt) // the clock ticks in the server (server_simulate)
 
@@ -463,7 +466,7 @@ main :: proc() {
         fx_dt := combat_fx_dt(&gs, play_dt)
         combat_in := Combat_Input{
             attack = gs.left_pressed, attack_held = gs.left_held, special = gs.right_pressed, dodge = dodge_pressed,
-            block = bool(kb[SDL.Scancode.F]),
+            block = held(kb, keys_free, .F),
             move = {f32(int(move_right)) - f32(int(move_left)), f32(int(move_fwd)) - f32(int(move_back))},
         }
         if !gs.mouse_locked { combat_in = {} }
