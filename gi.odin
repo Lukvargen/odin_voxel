@@ -20,7 +20,7 @@ import SDL "vendor:sdl3"
 // GI_PROBES / GI_PER_FRAME frames in visible jumps.
 
 GI_SPACING :: 4
-GI_DIMS    :: [3]int{32, 24, 32} // 128 x 96 x 128 voxels (as gi_common.hlsl)
+GI_DIMS    :: [3]int{48, 24, 48} // 192 x 96 x 192 voxels (as gi_common.hlsl)
 GI_PROBES  :: GI_DIMS.x * GI_DIMS.y * GI_DIMS.z
 GI_ROW     :: 128                 // probes per texture row
 GI_VIS_WORDS :: 17                // reach mask words + owner

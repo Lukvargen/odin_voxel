@@ -18,7 +18,7 @@
 #define GI_COMMON_HLSL
 
 #define GI_SPACING   4
-#define GI_DIMS      int3(32, 24, 32) // gi.odin GI_DIMS
+#define GI_DIMS      int3(48, 24, 48) // gi.odin GI_DIMS
 #define GI_ROW       128              // probes per texture row (gi.odin GI_ROW)
 #define GI_VIS_WORDS 17               // reach mask (16), owner
 #define GI_OWNER_WORD 16
@@ -62,9 +62,9 @@ float3 gi_probe_light(int s, float3 n, out float settled) {
 
 // Where the probes' light gives way to the stand-in: a circle around the
 // camera (a square's edge shows as a straight seam across the ground)
-// inside the grid's 64-voxel half width, and the grid's top and bottom.
-#define GI_FADE_FULL 44.0
-#define GI_FADE_END  60.0
+// inside the grid's 96-voxel half width, and the grid's top and bottom.
+#define GI_FADE_FULL 70.0
+#define GI_FADE_END  88.0
 
 // Bounce light at point p (just off a surface facing n) in open voxel f:
 // the probes around it that reach f, weighted trilinearly; probes not

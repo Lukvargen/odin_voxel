@@ -231,6 +231,7 @@ main :: proc() {
             // Never for timings: frame times depend on it.
             case a == "fast": view_radius = VIEW_RADII[0]
             case a == "ab=gi": bench_ab_gi = true
+            case a == "gi=show": gs.gi.show = 1 // every shot: the bounce light alone
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])
