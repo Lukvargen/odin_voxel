@@ -3,6 +3,8 @@ package main
 import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
+import "core:os"
+import "core:path/filepath"
 import "core:slice"
 import "core:strings"
 import "core:time"
@@ -39,6 +41,9 @@ Bench_Config :: struct {
 bench_shot_dir: string
 // Only measure the first (default) config.
 bench_quick: bool
+// `ab=gi`: every shot (bench_screenshot) twice, into <dir>/on/ and with the
+// bounce-light probes off into <dir>/off/, for before/after in one run.
+bench_ab_gi: bool
 // `bench glider`: fly a scripted hang-glider test instead of the views.
 bench_glider: bool
 // `bench entcost`: per view, the GPU cost of entity view rays and entity
@@ -67,23 +72,26 @@ bench_run :: proc(gs: ^Game_State) {
         {"all on",             2, 3, true,  false, 0},
     }
 
-    // Stream the whole load radius before measuring.
-    t0 := time.now()
-    enqueue_chunks(gs)
-    for !streaming_idle(gs) {
-        integrate_ready_chunks(gs)
-        far_enqueue(gs)
-        integrate_far_tiles(gs)
-        stitch_pending_columns(gs)
-        flush_gpu_uploads(gs)
-        if time.duration_seconds(time.since(t0)) > 120 {
-            fmt.println("bench: streaming did not finish in 120 s, measuring anyway")
-            break
+    // Stream the whole load radius before measuring, unless the bench
+    // goes somewhere else first (bench_teleport streams there).
+    if !bench_teleports_first() {
+        t0 := time.now()
+        enqueue_chunks(gs)
+        for !streaming_idle(gs) {
+            integrate_ready_chunks(gs)
+            far_enqueue(gs)
+            integrate_far_tiles(gs)
+            stitch_pending_columns(gs)
+            flush_gpu_uploads(gs)
+            if time.duration_seconds(time.since(t0)) > 120 {
+                fmt.println("bench: streaming did not finish in 120 s, measuring anyway")
+                break
+            }
+            time.sleep(time.Millisecond)
         }
-        time.sleep(time.Millisecond)
+        fmt.printf("bench: world streamed in %.1f s\n", time.duration_seconds(time.since(t0)))
+        bench_world_stats(gs)
     }
-    fmt.printf("bench: world streamed in %.1f s\n", time.duration_seconds(time.since(t0)))
-    bench_world_stats(gs)
     if bench_glider {
         bench_glider_run(gs)
         return
@@ -387,7 +395,40 @@ bench_hud_shot :: proc(gs: ^Game_State, path: string) {
     free_all(context.temp_allocator)
 }
 
+// Benches whose first move is a bench_teleport: streaming around spawn
+// first would only be thrown away.
+bench_teleports_first :: proc() -> bool {
+    return bench_look || bench_caves || bench_gi || bench_landmarks || bench_trees || bench_sea ||
+           bench_slimes || bench_enemies || bench_fight || bench_nav || bench_crowd || bench_players ||
+           bench_build || bench_combat || bench_relight
+}
+
+// Save the last frame as a BMP; with ab=gi also the same view with the
+// probes off (see bench_ab_gi).
 bench_screenshot :: proc(gs: ^Game_State, path: string) {
+    if !bench_ab_gi || !gs.gi.enabled {
+        bench_save_frame(gs, path)
+        return
+    }
+    dir, file := filepath.split(path)
+    on_dir  := fmt.tprintf("%s/on", dir)
+    off_dir := fmt.tprintf("%s/off", dir)
+    _ = os.make_directory_all(on_dir)
+    _ = os.make_directory_all(off_dir)
+    bench_save_frame(gs, fmt.tprintf("%s/%s", on_dir, file))
+    // Off needs no settling: one frame. Back on, the probes keep their light.
+    gs.gi.enabled = false
+    flush_gpu_uploads(gs)
+    if fence := gpu_render(gs, want_fence = true); fence != nil {
+        _ = SDL.WaitForGPUFences(gs.gpu_device, true, &fence, 1)
+        SDL.ReleaseGPUFence(gs.gpu_device, fence)
+    }
+    bench_save_frame(gs, fmt.tprintf("%s/%s", off_dir, file))
+    gs.gi.enabled = true
+}
+
+@(private="file")
+bench_save_frame :: proc(gs: ^Game_State, path: string) {
     pixels := bench_frame_pixels(gs)
     defer delete(pixels)
     surf := SDL.CreateSurfaceFrom(gs.render_w, gs.render_h, .RGBA32, raw_data(pixels), gs.render_w * 4)
@@ -468,7 +509,7 @@ bench_glider_deploys :: proc(gs: ^Game_State, at: [3]f32) {
             worst = max(worst, abs(g.bank))
             if !g.deployed { break }
         }
-        fmt.printf("  deploy %-20s worst bank %5.1f°  heading off the look by %+6.1f° after 3 s\n",
+        fmt.printf("  deploy %-20s worst bank %5.1fÂ°  heading off the look by %+6.1fÂ° after 3 s\n",
             st.name, worst * 57.3, wrap_angle(g.heading - 30))
         if g.deployed { glider_toggle_deploy(gs) }
     }
@@ -527,7 +568,7 @@ bench_glider_deploys :: proc(gs: ^Game_State, at: [3]f32) {
         kick_up, kick_down = max(kick_up, g.kick), min(kick_down, g.kick)
         if !g.deployed { break }
         if i % 30 == 29 {
-            fmt.printf("  thermal pass t=%.1f  lift %+5.2f  lift_side %+5.2f  bank %+5.1f°  hdg %+6.1f  vario %+5.2f\n",
+            fmt.printf("  thermal pass t=%.1f  lift %+5.2f  lift_side %+5.2f  bank %+5.1fÂ°  hdg %+6.1f  vario %+5.2f\n",
                 f32(i + 1) / 60, g.lift_here, g.lift_side, g.bank * 57.3, wrap_angle(g.heading), g.vario)
         }
     }

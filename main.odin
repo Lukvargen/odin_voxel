@@ -226,6 +226,11 @@ main :: proc() {
                 h, _ := strconv.parse_f32(a[5:])
                 day_set_hour(&gs, h, settle = true)
             case a == "gi=0": gs.gi.enabled = false // bounce light from the stand-in only (gi.odin)
+            // Shots only: the Short view distance loads ~5x faster than
+            // Far (voxels end at 192 blocks, the far terrain beyond).
+            // Never for timings: frame times depend on it.
+            case a == "fast": view_radius = VIEW_RADII[0]
+            case a == "ab=gi": bench_ab_gi = true
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])
