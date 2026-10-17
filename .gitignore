@@ -1,2 +1,11 @@
 saves/
 *.exe
+
+# Build artifacts
+*.pdb
+*.ilk
+*.rdi
+
+# Verification output
+screenshots/
+tools/_verify*.png
