@@ -123,6 +123,7 @@ Game_State :: struct {
     entities_enabled: bool, // options panel toggle
     clouds_enabled:   bool, // volumetric cumulus over thermals (options panel)
     gi:               GI,   // bounce-light probes (gi.odin)
+    torch:            Torch_Shadows, // shadows from placed torches and crystals (torch.odin)
     no_textures:      bool, // debug (F10, notex): blocks plain grey, to see the lighting alone
 
     // Input state
@@ -189,6 +190,8 @@ main :: proc() {
     gs.entities_enabled = true
     gs.clouds_enabled   = true
     gs.gi.enabled       = true
+    gs.torch.enabled    = true
+    gs.torch.floor      = 0.35
     gs.far_enabled      = true
     gs.camera.pos     = find_spawn()
     day_init(&gs)
@@ -223,6 +226,8 @@ main :: proc() {
             case a == "hear": bench_hear = true
             case a == "gi": bench_gi = true
             case a == "gimove": bench_gi, bench_gi_move = true, true
+            case a == "torch": bench_torch = true
+            case a == "shade": bench_shade = true
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
                 day_set_hour(&gs, h, settle = true)
@@ -242,6 +247,11 @@ main :: proc() {
                 for v, i in xyz[:min(len(xyz), 3)] { bench_view_pos[i], _ = strconv.parse_f32(v) }
             case strings.has_prefix(a, "yaw="):   bench_view_yaw, _ = strconv.parse_f32(a[4:])
             case strings.has_prefix(a, "pitch="): bench_view_pitch, _ = strconv.parse_f32(a[6:])
+            case a == "torch=0": gs.torch.enabled = false // no shadows from placed torches (torch.odin)
+            case strings.has_prefix(a, "torchfloor="): // share of torch light left in its shadow
+                f, _ := strconv.parse_f32(a[11:])
+                gs.torch.floor = clamp(f, 0, 1)
+            case a == "torch=show": gs.gi.show = 3 // every shot: the torch shadow factor (white lit, black hidden)
             case a == "gi=show": gs.gi.show = 1 // every shot: the bounce light alone
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)

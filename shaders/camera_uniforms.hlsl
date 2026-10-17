@@ -35,6 +35,8 @@ cbuffer CameraUniforms : register(b0, space2) {
     float4 u_hand_light;     // torch in hand: xyz = position, w = light level (0 = none)
     int4   u_gi_origin;      // bounce-light probe grid (gi_common.hlsl): min corner in probe coords, w = enabled
     int4   u_gi_frame;       // x = first probe slot updated this frame, y = frame counter
+    int4   u_torch;          // torch shadows (torch.odin): xyz = the box's min chunk, w = emitters listed (0 = off)
+    float4 u_torch_params;   // x = share of torch light left in its shadow
 };
 
 #endif // CAMERA_UNIFORMS_HLSL

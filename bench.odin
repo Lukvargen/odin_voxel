@@ -191,6 +191,14 @@ bench_run :: proc(gs: ^Game_State) {
         bench_gi_run(gs)
         return
     }
+    if bench_shade {
+        bench_shade_run(gs)
+        return
+    }
+    if bench_torch {
+        bench_torch_run(gs)
+        return
+    }
     if bench_view {
         gs.entities_enabled = false
         entities_update(gs, 0)
@@ -418,7 +426,7 @@ bench_hud_shot :: proc(gs: ^Game_State, path: string) {
 bench_teleports_first :: proc() -> bool {
     return bench_look || bench_caves || bench_gi || bench_landmarks || bench_trees || bench_sea ||
            bench_slimes || bench_enemies || bench_fight || bench_nav || bench_crowd || bench_players ||
-           bench_build || bench_combat || bench_relight || bench_view
+           bench_build || bench_combat || bench_relight || bench_view || bench_torch || bench_shade
 }
 
 // Save the last frame as a BMP; with ab=gi also the same view with the

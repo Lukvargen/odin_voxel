@@ -233,6 +233,7 @@ Chunk :: struct {
     fill:       u8,
     light:      ^[VOXELS_PER_BRICK]u16, // nil = all light_fill (light.odin)
     light_fill: u16,
+    casters:    u16, // torches and crystals in it: they cast shadows (torch.odin)
 }
 
 // All CHUNKS_H chunks of one 8x8 footprint: the unit of generation,
@@ -254,6 +255,8 @@ chunk_set_voxel :: proc(c: ^Chunk, vi: int, v: u8) -> bool {
         for &x in c.voxels { x = c.fill }
     }
     if c.voxels[vi] == v { return false }
+    if block_casts_shadow(c.voxels[vi]) { c.casters -= 1 }
+    if block_casts_shadow(v) { c.casters += 1 }
     c.voxels[vi] = v
     return true
 }
@@ -463,6 +466,7 @@ gpu_sync_slot :: proc(gs: ^Game_State, slot: int) {
 // Make a freshly loaded column resident: evict whatever column held its ring
 // position, then point the ring slots at it.
 integrate_column :: proc(gs: ^Game_State, key: [2]int, col: ^Column) {
+    torch_on_column(gs, key, col)
     owner := gs.gpu_chunk_owner[ring_slot(key.x, WORLD_CHUNK_Y_MIN, key.y)]
     if owner[0] != 0x7fffffff && (int(owner[0]) != key.x || int(owner[1]) != key.y) {
         unload_column(gs, {int(owner[0]), int(owner[1])})
@@ -710,7 +714,7 @@ generate_column_at :: proc(wcx, wcz: int) -> ^Column {
     decorate_cave_life(column, gx, gz, height[:])
     decorate_ocean(column, gx, gz, height[:], seas[:])
     generate_landmarks(&tgt)
-    for &c in column.chunks { chunk_compact(&c) }
+    for &c in column.chunks { chunk_compact(&c); chunk_count_casters(&c) }
     return column
 }
 

@@ -116,6 +116,7 @@ column_decode :: proc(rle: []u8) -> ^Column {
         c.voxels = new([VOXELS_PER_BRICK]u8)
         copy(c.voxels[:], voxels[iy * VOXELS_PER_BRICK:][:VOXELS_PER_BRICK])
         chunk_compact(&c)
+        chunk_count_casters(&c)
     }
     return col
 }

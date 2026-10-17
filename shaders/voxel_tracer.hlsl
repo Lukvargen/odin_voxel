@@ -12,14 +12,16 @@
 // Shared constants/functions come from voxel_common.hlsl AFTER these decls.
 Texture2D<float4>          gi_irr           : register(t0, space0); // probe light per direction (gi_common.hlsl)
 Texture2D<uint>            gi_vis           : register(t1, space0); // probe reach masks + owners
-StructuredBuffer<uint>     voxel_chunk      : register(t2, space0);
-StructuredBuffer<int>      chunk_index      : register(t3, space0);
-StructuredBuffer<int2>     chunk_owner      : register(t4, space0);
-StructuredBuffer<uint>     voxel_mask       : register(t5, space0);
-StructuredBuffer<int>      light_index      : register(t6, space0); // per slot: light pool id, or -1-light if uniform
-StructuredBuffer<uint>     light_pool       : register(t7, space0); // 512 u16 light values per brick, two per uint
-StructuredBuffer<uint4>    ent_data         : register(t8, space0); // entity voxel models + instances (voxel_models.odin)
-StructuredBuffer<uint>     far_data         : register(t9, space0); // far terrain tile table, then cells (far.odin)
+Texture2D<float4>          torch_emit       : register(t2, space0); // torch shadows: emitter voxel centre, level (torch.odin)
+Texture2D<uint4>           torch_cells      : register(t3, space0); // per chunk of the box: emitter index + 1, strongest first
+StructuredBuffer<uint>     voxel_chunk      : register(t4, space0);
+StructuredBuffer<int>      chunk_index      : register(t5, space0);
+StructuredBuffer<int2>     chunk_owner      : register(t6, space0);
+StructuredBuffer<uint>     voxel_mask       : register(t7, space0);
+StructuredBuffer<int>      light_index      : register(t8, space0); // per slot: light pool id, or -1-light if uniform
+StructuredBuffer<uint>     light_pool       : register(t9, space0); // 512 u16 light values per brick, two per uint
+StructuredBuffer<uint4>    ent_data         : register(t10, space0); // entity voxel models + instances (voxel_models.odin)
+StructuredBuffer<uint>     far_data         : register(t11, space0); // far terrain tile table, then cells (far.odin)
 
 RWTexture2D<float4>        img_output        : register(u0, space1);
 RWTexture2D<float>         depth_output      : register(u1, space1); // primary-hit dist, 1e30 = sky
@@ -54,13 +56,13 @@ float4 sky_color(float3 dir) {
 //  1) distance haze (squared-exponential, tunable via u_fog_density) times a
 //     gentle exponential aerial perspective, so ridges fade into layers of
 //     blue with distance instead of all reading at the same contrast
-//  2) exponential HEIGHT fog — density falls off with altitude, integrated in
-//     closed form along the ray → valleys collect haze, peaks stay clear
-//  3) cave fog — short-range murk that scales with u_cave_factor so caves
+//  2) exponential HEIGHT fog â€” density falls off with altitude, integrated in
+//     closed form along the ray â†’ valleys collect haze, peaks stay clear
+//  3) cave fog â€” short-range murk that scales with u_cave_factor so caves
 //     feel enclosed; tinted near-black blue instead of sky color
-//  4) valley mist — a thin dense layer just above sea level whose amount
+//  4) valley mist â€” a thin dense layer just above sea level whose amount
 //     follows the clock (u_atmos.x: thickest at dawn)
-#define FOG_BASE_Y         10.0   // terrain minimum — height-fog reference plane
+#define FOG_BASE_Y         10.0   // terrain minimum â€” height-fog reference plane
 #define FOG_FALLOFF        40.0   // height-fog density e-fold distance (voxels)
 #define FOG_HEIGHT_DENSITY 0.004  // height-fog density at FOG_BASE_Y
 #define AERIAL_DENSITY     0.0003 // exponential aerial perspective per voxel
@@ -88,7 +90,7 @@ float4 apply_fog(float4 color, float dist, float3 ray_dir) {
     // 3) Cave murk
     float t_cave = exp(-dist * CAVE_FOG_DENSITY * u_cave_factor);
 
-    // Fog color: horizon sky tint (sun-warmed, disc-free — the disc would
+    // Fog color: horizon sky tint (sun-warmed, disc-free â€” the disc would
     // draw the sun on top of fogged geometry) above ground, near-black blue
     // underground.
     float4 fog_color = float4(sky_color_fog_d(rd, light_dir_normalized), 1.0);
@@ -140,6 +142,67 @@ float3 hand_light(float3 p, float3 n, bool two_sided) {
     return TORCH_LIGHT_COLOR * (block_light_curve(level) * ndl * sh);
 }
 
+// ---- Torch shadows (torch.odin) ----------------------------------------------
+// Block light is flood-filled: it spreads around corners as if nothing were
+// in the way. Where it comes from a torch or crystal, the few emitters
+// listed for this chunk are shadow-tested, weighted by how much light each
+// brings here, and the block light dims by the share that's hidden (down
+// to u_torch_params.x, the options' strength: light off the walls around
+// still reaches into the shadow). Faces turned away from an emitter dim too. Fades out at the edge
+// of the listed box, where emitters beyond it aren't listed.
+#define TORCH_CELLS        int3(12, 8, 12) // torch.odin TORCH_CELLS
+
+float torch_shadow(float3 p, float3 n, int3 f, bool two_sided) {
+    if (u_torch.w == 0) return 1.0;
+    uint lv = sample_light(f);
+    if (light_block(lv) == 0u || light_tint(lv) > 1u) return 1.0; // tints 0, 1: torch, crystal
+    int3 c = (f >> 3) - u_torch.xyz;
+    if (any(c < 0) || any(c >= TORCH_CELLS)) return 1.0;
+    uint4 ids = torch_cells[int2(c.x + c.z * TORCH_CELLS.x, c.y)];
+    float wsum = 0.0, vsum = 0.0;
+    float strongest = 0.0; // the most light any listed emitter brings here
+    // Loops kept loops: one shadow walk in the code, not eight inlined.
+    [loop]
+    for (int k = 0; k < 4; k++) {
+        uint id = ids[k];
+        if (id == 0u) break;
+        float4 e = torch_emit[int2(int(id) - 1, 0)];
+        uint   lift_i = uint(e.w) >> 5; // torch.odin TORCH_LIFT
+        float  lift = lift_i == 2u ? 1.5 : (lift_i == 1u ? 1.0 : 0.45);
+        float  level = (e.w - 32.0 * float(lift_i)) - length(e.xyz - p);
+        if (level <= 0.0) continue;
+        strongest = max(strongest, level);
+        float  w = block_light_curve(level);
+        // Cast from up in the flame (torch.odin TORCH_LIFT: a torch on rough
+        // ground would hide behind every step of the floor around it from
+        // its centre): seen from there, lit; else the block's nearest point
+        // seen, half lit. No falloff with the angle: the flood fill's level
+        // is how much reaches here, and a face turned away still goes dark
+        // (its ray runs into its own block).
+        float3 o = p + n * 0.01;
+        float  vis = 0.0;
+        [loop]
+        for (int s = 0; s < 2 && vis < 0.99; s++) {
+            float3 to = (s == 0 ? e.xyz + float3(0.0, lift, 0.0) : e.xyz + clamp(p - e.xyz, -0.45, 0.45)) - o;
+            float  d = length(to);
+            float3 l = to / max(d, 1e-4);
+            if (!two_sided && dot(n, l) <= 0.0) continue;
+            float  t = trace_shadow_transmittance(o, l, max(d - 0.05, 0.0), true);
+            vis = max(vis, s == 0 ? t : 0.5 * t);
+        }
+        wsum += w;
+        vsum += w * vis;
+    }
+    // Light here from an emitter that isn't listed (more than fit, or beyond
+    // the box): what's listed can't tell whether it's hidden, so leave it.
+    // (Block light spreads one level a block along open paths, which beat
+    // straight-line distance only round corners: a little slack.)
+    if (wsum <= 0.0 || strongest < float(light_block(lv)) - 3.0) return 1.0;
+    int3  m = min(c, TORCH_CELLS - 1 - c);
+    float edge = saturate(float(min(m.x, min(m.y, m.z))) / 1.5);
+    return lerp(1.0, lerp(u_torch_params.x, 1.0, vsum / wsum), edge);
+}
+
 // A stand-in for bounce light where the GI probes don't reach (past their
 // grid): sun bounced off sunlit surfaces (grass, rock, sand), filling faces
 // turned sideways or down. Not only off flat ground: a low sun lights walls
@@ -167,7 +230,7 @@ float3 indirect_light(int3 vkey, float3 n, float3 p, bool in_voxel, float sky_le
     return u_gi_frame.z == 2 ? gi : lerp(guess, gi, fade);
 }
 
-// Tone mapping lives in composite.hlsl — the LAST pass — so the volumetric
+// Tone mapping lives in composite.hlsl â€” the LAST pass â€” so the volumetric
 // inscatter is added in linear HDR and rolls off instead of clipping.
 
 // ---- Lighting / AO ----------------------------------------------------------
@@ -178,14 +241,14 @@ float3 indirect_light(int3 vkey, float3 n, float3 p, bool in_voxel, float sky_le
 // (the "split shade on one face" artifact). Instead: compute an AO value
 // at each of the face's 4 CORNERS from that corner's 3 touching neighbour
 // cells (two edge-adjacent + the diagonal), then BILINEARLY interpolate
-// across the face using the sub-voxel hit position → a continuous gradient,
+// across the face using the sub-voxel hit position â†’ a continuous gradient,
 // no steps. `p` is just inside the surface; sub-voxel pos uses frac(hit_pos)
 // (the precision-safe convention proven this session).
 //
-// corner_ao(side1, side2, corner): standard MC rule — if both edge sides
+// corner_ao(side1, side2, corner): standard MC rule â€” if both edge sides
 // are solid the corner is fully occluded; else darken by the count.
 float corner_ao(bool s1, bool s2, bool c) {
-    if (s1 && s2) return 0.0;                       // both sides → max occlusion
+    if (s1 && s2) return 0.0;                       // both sides â†’ max occlusion
     float n = (s1 ? 1.0 : 0.0) + (s2 ? 1.0 : 0.0) + (c ? 1.0 : 0.0);
     return 1.0 - n / 3.0;                            // 0..1, 1 = unoccluded
 }
@@ -215,7 +278,7 @@ float compute_ao(float3 p, float3 nrm, float3 hit_pos) {
     if (dot(bitang,  float3(1, 1, 1)) < 0.0) fv = 1.0 - fv;
 
     // Neighbour occupancy around the hit voxel, on the face plane.
-    // pT/nT = ±tangent edge, pB/nB = ±bitangent edge, c** = diagonals.
+    // pT/nT = Â±tangent edge, pB/nB = Â±bitangent edge, c** = diagonals.
     bool pT = ao_occludes(p + tangent)            ;
     bool nT = ao_occludes(p - tangent)            ;
     bool pB = ao_occludes(p + bitang)             ;
@@ -225,13 +288,13 @@ float compute_ao(float3 p, float3 nrm, float3 hit_pos) {
     bool np = ao_occludes(p - tangent + bitang)   ;
     bool nn = ao_occludes(p - tangent - bitang)   ;
 
-    // AO at the 4 face corners (fu,fv ∈ {0,1}) from their 3 touching cells.
+    // AO at the 4 face corners (fu,fv âˆˆ {0,1}) from their 3 touching cells.
     float a00 = corner_ao(nT, nB, nn);   // (-t,-b)
     float a10 = corner_ao(pT, nB, pn);   // (+t,-b)
     float a01 = corner_ao(nT, pB, np);   // (-t,+b)
     float a11 = corner_ao(pT, pB, pp);   // (+t,+b)
 
-    // Bilinear interpolate across the face → continuous, no mid-face step.
+    // Bilinear interpolate across the face â†’ continuous, no mid-face step.
     float ao = lerp(lerp(a00, a10, fu), lerp(a01, a11, fu), fv);
 
     // Max darkening strength (subtle). 0.35 was near-invisible, 0.65 a bit
@@ -240,8 +303,8 @@ float compute_ao(float3 p, float3 nrm, float3 hit_pos) {
 }
 
 // ---- Procedural voxel texturing ----------------------------------------------
-// Every face gets a TEXELS×TEXELS texel grid keyed on EXACT integer texel
-// coords (vkey*TEXELS + sub-voxel texel) — hash-based "texture without
+// Every face gets a TEXELSÃ—TEXELS texel grid keyed on EXACT integer texel
+// coords (vkey*TEXELS + sub-voxel texel) â€” hash-based "texture without
 // textures", pixel-crisp (quantized, not smooth) and stable at any distance.
 // Patterns are built in FACE texel space (fuv: the two texel axes of the face
 // plane, continuous across neighbouring voxels), so clumps, cracks and
@@ -383,7 +446,7 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         } else if (nrm.y < -0.5) {
             on_top = false;
         } else {
-            // Side: ragged HARD-EDGED band (no fade) — depth varies per
+            // Side: ragged HARD-EDGED band (no fade) â€” depth varies per
             // texel column, only where the voxel above is open air.
             // Snow drifts over the edge in a smooth wavy band instead.
             uint above = sample_voxel(float3(vkey) + float3(0.5, 1.5, 0.5));
@@ -829,7 +892,7 @@ CloudResult march_clouds(float3 ro, float3 rd, float t_max, uint2 pix) {
     r.color = float3(0, 0, 0); r.trans = 1.0; r.t_entry = 1e30;
     if (u_thermal_count.x == 0 || (u_ent_debug & 4) != 0) return r;
     // Rays that can't reach the cloud layer before hitting something (caves,
-    // terrain below 240 m — most pixels) skip the per-cloud tests.
+    // terrain below 240 m â€” most pixels) skip the per-cloud tests.
     float ty0 = (CUMULUS_BASE - ro.y) / rd.y, ty1 = (CLOUD_TOP - ro.y) / rd.y;
     if (abs(rd.y) < 1e-5) { ty0 = (ro.y >= CUMULUS_BASE && ro.y <= CLOUD_TOP) ? 0.0 : 1e30; ty1 = 1e30; }
     if (max(min(ty0, ty1), 0.0) >= min(max(ty0, ty1), t_max)) return r;
@@ -1301,6 +1364,14 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     } else {
         sky_level = face_light(hit.vkey, surf_normal, hit_point, block_light);
     }
+    // Shadows from placed torches: primary rays only (reflections are dim
+    // and small on screen).
+    if (full_sun && block_light.r + block_light.g > 0.0) {
+        bool thin = plant && !block_is_micro(hit.block_id);
+        float ts = torch_shadow(hit_point, surf_normal, (plant || door) ? hit.vkey : hit.vkey + int3(round(surf_normal)), thin);
+        if (u_gi_frame.z == 3) return float4(ts.xxx, 1.0); // bench: the torch shadow factor alone
+        block_light *= ts;
+    }
     float3 uw = underwater_light(hit_point + surf_normal * 0.05);
     float3 lighting = (sky_ambient() * light_curve(sky_level) * uw + MIN_AMBIENT
                     + block_light) * face_shade(surf_normal);
@@ -1360,7 +1431,7 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
 
     float ao = (ao_on && !plant && !door) ? compute_ao(hit_point + surf_normal * epsilon, surf_normal, hit_point) : 1.0;
     hit_color.xyz *= lighting * ao;
-    // Emissive blocks radiate on their own — NOT multiplied by
+    // Emissive blocks radiate on their own â€” NOT multiplied by
     // lighting/AO/shadow. Bright enough to trip the bloom threshold.
     // The texture shapes the glow: ember texels burn bright, the
     // charred wood between them only smoulders.
@@ -1480,7 +1551,7 @@ float3 water_surface_below(float3 ps, float3 dir, float t_surf) {
 }
 
 // hit0/far0/ehit0/use_hit0: precomputed primary voxel, far terrain and
-// entity hits for the center ray — when set, the first bounce of this sample
+// entity hits for the center ray â€” when set, the first bounce of this sample
 // skips its traces entirely.
 float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityHit ehit0, bool use_hit0) {
     float3 origin = u_cam_pos;
@@ -1599,7 +1670,7 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
         }
     }
 
-    // Linear HDR out — tone mapping happens in composite, after volumetrics.
+    // Linear HDR out â€” tone mapping happens in composite, after volumetrics.
     return pixel_color;
 }
 
@@ -1613,7 +1684,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     int2   ipix = int2(id.xy);
     if (id.x >= w || id.y >= h) return;
 
-    // 1. Trace the center primary ray ONCE — it feeds depth and AA sample 0
+    // 1. Trace the center primary ray ONCE â€” it feeds depth and AA sample 0
     // (whose offset is the pixel center).
     float2 pf  = float2(ipix);
     float  cnx = (pf.x * 2.0 - dims.x) / dims.x;
@@ -1639,7 +1710,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     float prim_depth = hit0_t;
     if (ehit0.index >= 0) prim_depth = min(prim_depth, ehit0.t);
 
-    // 2. AA loop — u_quality packs: AA = u_quality/10, shadow mode = u_quality%10
+    // 2. AA loop â€” u_quality packs: AA = u_quality/10, shadow mode = u_quality%10
     int aa = clamp(u_quality / 10, 1, AA_SAMPLES);
     float4 color = float4(0, 0, 0, 0);
     for (int s = 0; s < aa; s++) {

@@ -51,6 +51,8 @@ Camera_Uniform :: struct #packed {
     hand_light:     [4]f32, // torch in hand: xyz = position, w = light level (0 = none)
     gi_origin:      [4]i32, // bounce-light probe grid (gi.odin): min corner in probe coords, w = enabled
     gi_frame:       [4]i32, // x = first probe slot renewed this frame, y = frame counter
+    torch:          [4]i32, // torch shadows (torch.odin): xyz = the box's min chunk, w = emitters listed (0 = off)
+    torch_params:   [4]f32, // x = share of torch light left in its shadow
 }
 
 // A held torch lights the world around the player as a point light in the
@@ -189,8 +191,8 @@ gpu_init :: proc(gs: ^Game_State) {
         // put the driver on a ~2x slower path), hence the shared buffers:
         // region counts ride at the end of chunk_index, and the far tile
         // table and cells share one buffer.
-        num_readonly_storage_textures  = 2, // GI probes: gi_irr (t0), gi_vis (t1)
-        num_readonly_storage_buffers   = 8, // voxel_chunk (t2), chunk_index + region counts (t3), chunk_owner (t4), voxel_mask (t5), light_index (t6), light_pool (t7), ent_data (t8), far_data (t9)
+        num_readonly_storage_textures  = 4, // GI probes: gi_irr (t0), gi_vis (t1); torch shadows: torch_emit (t2), torch_cells (t3)
+        num_readonly_storage_buffers   = 8, // voxel_chunk (t4), chunk_index + region counts (t5), chunk_owner (t6), voxel_mask (t7), light_index (t8), light_pool (t9), ent_data (t10), far_data (t11)
         num_readwrite_storage_textures = 2, // img_output (u0), depth_output (u1)
         num_uniform_buffers            = 1, // CameraUniforms (b0)
         threadcount_x                  = 16,
@@ -200,6 +202,7 @@ gpu_init :: proc(gs: ^Game_State) {
     gs.pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, pipeline_info)
     assert(gs.pipeline != nil, "Failed to create compute pipeline")
     gi_init(gs)
+    torch_init(gs)
 
     // Volumetric pass: 1 RO storage texture (depth) + 4 RO storage buffers,
     // 1 RW storage texture (half-res inscatter).
@@ -742,11 +745,15 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     uniform.thermal_count.x = i32(clouds)
     uniform.hand_light = hand_light(gs, render_pos, fwd, right, up)
     uniform.gi_origin, uniform.gi_frame = gi_uniforms(gs, render_pos)
+    uniform.torch = torch_uniform(gs, render_pos)
+    uniform.torch_params = {gs.torch.floor, 0, 0, 0}
     gs.gi.uniform = uniform // gi_time runs the probe pass again with it
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
-    // --- Pass 0: renew a share of the bounce-light probes (gi.odin) ---
+    // --- Pass 0: renew a share of the bounce-light probes (gi.odin); the
+    // torch shadow lists if they changed (torch.odin) ---
     gi_dispatch(gs, cmd)
+    torch_copy(gs, cmd)
 
     ro_bufs := [4]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf}
     // The tracer additionally reads the voxel light (t4, t5) and the
@@ -768,8 +775,8 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
 
     p1 := SDL.BeginGPUComputePass(cmd, raw_data(rw_main[:]), 2, nil, 0)
     SDL.BindGPUComputePipeline(p1, gs.pipeline)
-    gi_tex := [2]^SDL.GPUTexture{gs.gi.irr, gs.gi.vis}
-    SDL.BindGPUComputeStorageTextures(p1, 0, raw_data(gi_tex[:]), 2)
+    ro_tex := [4]^SDL.GPUTexture{gs.gi.irr, gs.gi.vis, gs.torch.emit_tex, gs.torch.cell_tex}
+    SDL.BindGPUComputeStorageTextures(p1, 0, raw_data(ro_tex[:]), 4)
     SDL.BindGPUComputeStorageBuffers(p1, 0, raw_data(ro_bufs_tracer[:]), 8)
     SDL.DispatchGPUCompute(p1, groups_x, groups_y, 1)
     SDL.EndGPUComputePass(p1)
@@ -837,6 +844,7 @@ gpu_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.entity_buf)
     SDL.ReleaseGPUTransferBuffer(gs.gpu_device, gs.ent_transfer)
     gi_destroy(gs)
+    torch_destroy(gs)
     staging_release(gs, &gs.stage_voxel)
     staging_release(gs, &gs.stage_light)
     staging_release(gs, &gs.stage_far)

@@ -446,6 +446,7 @@ light_stitch_column :: proc(gs: ^Game_State, wcx, wcz: int) {
 // held or blocked, light new emitters, then re-flood from the boundary.
 light_on_edit :: proc(gs: ^Game_State, changed: [][3]int) {
     gi_on_edit(gs, changed) // the bounce light around them settles anew (gi.odin)
+    torch_on_edit(gs)       // an emitter may have come or gone (torch.odin)
     if len(changed) > 0 {
         lo, hi := changed[0].xz, changed[0].xz
         for p in changed { lo, hi = {min(lo.x, p.x), min(lo.y, p.z)}, {max(hi.x, p.x), max(hi.y, p.z)} }

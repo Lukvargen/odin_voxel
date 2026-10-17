@@ -1399,6 +1399,8 @@ debug_layout :: proc(gs: ^Game_State) {
             line("bounce", fmt.tprintf("probes %.2f ms, %d + %d a frame, %d waiting, %.0f%% buried",
                 gi.ms, GI_PER_FRAME, gi.listed, waiting, 100 * gi.buried))
         }
+        line("torches", gs.torch.enabled ? fmt.tprintf("%d casting shadows%s", gs.torch.count,
+            gs.torch.found > gs.torch.count ? fmt.tprintf(" (nearest of %d)", gs.torch.found) : "") : "shadows off")
         line("render", fmt.tprintf("%dx%d (%.0f%%)  aa%d  %s", gs.render_w, gs.render_h, gs.render_scale * 100, gs.aa_samples, gs.shadow_rays == 1 ? "hard" : "soft"))
         line("cave", fmt.tprintf("%.2f", gs.cave_factor))
         alive := 0
@@ -1659,6 +1661,10 @@ menu_graphics :: proc(gs: ^Game_State) {
     if clay.UI()(setting_row()) {
         row_label("Bounce light")
         toggle("GI", &gs.gi.enabled)
+    }
+    if clay.UI()(setting_row()) {
+        row_label("Torch shadows")
+        toggle("TSh", &gs.torch.enabled)
     }
     if clay.UI()(setting_row()) {
         row_label("Thermal clouds")
