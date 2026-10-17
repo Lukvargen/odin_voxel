@@ -113,7 +113,10 @@ bool block_is_watery(uint id) { return id == BLOCK_WATER || block_is_water_plant
 bool block_is_cutout(uint id) { return block_is_water_plant(id) || block_is_land_plant(id); }
 // Small-voxel models (micro_hit): 8^3 cells inside their voxel. Still
 // cutouts for everything else (light, shadows, walking through).
-bool block_is_micro(uint id) { return id == BLOCK_MUSHROOM || id == BLOCK_GLOW_MUSHROOM || id == BLOCK_FLOWER || id == BLOCK_FERN; }
+bool block_is_micro(uint id) {
+    return id == BLOCK_MUSHROOM || id == BLOCK_GLOW_MUSHROOM || id == BLOCK_FLOWER || id == BLOCK_FERN ||
+           id == BLOCK_SEA_PICKLE || id == BLOCK_DRY_BUSH;
+}
 // A thin panel in its voxel (door_hit).
 bool block_is_door(uint id) { return id >= BLOCK_DOOR && id <= BLOCK_DOOR_LAST; }
 // Not a whole cube: rays test the shape inside the voxel (shaped_hit).
@@ -243,11 +246,6 @@ bool plant_texel(uint id, int3 vkey, int cu, int cv, int pl) {
         if (hb > 0.45) return false;
         return float(7 - cv) < 2.0 + hb * 14.0;
     }
-    if (id == BLOCK_DRY_BUSH) {
-        // Bare twigs fanning up from the ground.
-        int spread = cv / 2;
-        return cv < 7 && (cu == 3 + spread || cu == 4 - spread || (cv > 3 && hash31i(int3(vkey.x * 8 + cu, cv, vkey.z + pl)) < 0.25));
-    }
     if (id == BLOCK_KELP) {
         // A stalk up the middle, and a leaf blade every few texels that
         // grows out to one side, widest at its base.
@@ -257,16 +255,10 @@ bool plant_texel(uint id, int3 vkey, int cu, int cv, int pl) {
         int   reach = 3 - k;                            // 3 texels out at the base .. 0 at the tip
         return left ? (cu < 3 && cu >= 3 - reach) : (cu > 4 && cu <= 4 + reach);
     }
-    if (id == BLOCK_SEAGRASS) {
-        // Separate blades of random height, leaning a texel now and then.
-        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 7));
-        if (hb > 0.5) return false;
-        return float(cv) < 3.0 + hb * 10.0;
-    }
-    // Sea pickle: a few short capsules on the floor.
-    int c0 = 1 + int(h * 2.0), c1 = 5 + int(h * 1.9);
-    bool col = (cu == c0 || cu == c0 + 1 || cu == c1 || cu == c1 + 1);
-    return col && cv < ((cu <= c0 + 1) ? 4 : 3);
+    // Seagrass: separate blades of random height, leaning a texel now and then.
+    float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 7));
+    if (hb > 0.5) return false;
+    return float(cv) < 3.0 + hb * 10.0;
 }
 
 // Ray against the plant planes of the voxel it spans for s in [0, span]; q0
@@ -329,6 +321,18 @@ bool glow_mushroom_stem(int3 c) {
     return false;
 }
 
+// A sea pickle's three capsules: x, z (their 2x2 cells' low corner), height.
+static const int3 SEA_PICKLES[3] = { int3(1, 1, 4), int3(4, 2, 3), int3(2, 5, 2) };
+
+// The top of one of them (the brighter, glowing tip), at model cell c.
+bool sea_pickle_tip(int3 c) {
+    [unroll] for (int k = 0; k < 3; k++) {
+        int2 o = c.xz - SEA_PICKLES[k].xy;
+        if (all(o >= 0) && all(o <= 1) && c.y == SEA_PICKLES[k].z - 1) return true;
+    }
+    return false;
+}
+
 // The cells the model fills lie in [lo, hi) of its own cells, and in its
 // voxel (turned and mirrored as micro_model_cell has it) in the box this
 // returns. Rays outside it skip the cell walk; most rays through a flower's
@@ -337,6 +341,8 @@ void micro_box(uint id, int3 vkey, out int3 lo, out int3 hi) {
     if (id == BLOCK_FLOWER)        { lo = int3(2, 0, 2); hi = int3(6, 7, 5); }
     else if (id == BLOCK_MUSHROOM) { lo = int3(1, 0, 1); hi = int3(7, 6, 7); }
     else if (id == BLOCK_GLOW_MUSHROOM) { lo = int3(1, 0, 1); hi = int3(7, 5, 8); }
+    else if (id == BLOCK_SEA_PICKLE)    { lo = int3(1, 0, 1); hi = int3(6, 4, 7); }
+    else if (id == BLOCK_DRY_BUSH)      { lo = int3(0, 0, 0); hi = int3(8, 6, 8); }
     else                           { lo = int3(0, 0, 0); hi = int3(8, 4, 8); } // fern
     // Model to voxel: micro_model_cell's steps undone, last first.
     uint v = uint(hash31i(vkey + int3(5, 9, 2)) * 8.0);
@@ -373,6 +379,28 @@ bool micro_cell(uint id, int3 c) {
         if (c.y <= 4) return all(o == 0) || (c.y == 2 && o.x == 1 && o.y == 0) || (c.y == 3 && o.x == 2 && o.y == 0);
         if (c.y == 5) return abs(o.x) + abs(o.y) <= 1;
         return c.y == 6 && all(o == 0);
+    }
+    if (id == BLOCK_SEA_PICKLE) {
+        // Three capsules of 2x2 cells, short and shorter.
+        [unroll] for (int k = 0; k < 3; k++) {
+            int2 o = c.xz - SEA_PICKLES[k].xy;
+            if (all(o >= 0) && all(o <= 1) && c.y < SEA_PICKLES[k].z) return true;
+        }
+        return false;
+    }
+    if (id == BLOCK_DRY_BUSH) {
+        // Bare twigs from one stub, climbing out diagonally (two cells a step,
+        // so they read as lines), of different lengths, one forking.
+        int2 o = c.xz - int2(3, 3);
+        if (all(o == 0)) return c.y <= 1;
+        static const int3 twigs[4] = { int3(1, 1, 4), int3(-1, -1, 3), int3(1, -1, 3), int3(-1, 1, 2) }; // dx, dz, length
+        [unroll] for (int k = 0; k < 4; k++) {
+            int i = o.x * twigs[k].x; // steps out along it
+            if (i < 1 || i > twigs[k].z || o.y != i * twigs[k].y) continue;
+            if (c.y == i + 1 || c.y == i) return true;
+        }
+        // The fork: off the long twig, straight up from its second step.
+        return all(o == int2(2, 2)) && c.y >= 3 && c.y <= 5;
     }
     // Fern: a tuft, and four fronds arching out (a pinwheel), each with a
     // leaflet beside it halfway.

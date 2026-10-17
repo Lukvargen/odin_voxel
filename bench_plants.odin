@@ -46,7 +46,7 @@ bench_plants_run :: proc(gs: ^Game_State) {
     }
 
     // Close: a row of each kind, two apart, three deep.
-    KINDS :: [5]Block_Type{.Mushroom, .Glow_Mushroom, .Flower, .Fern, .Tall_Grass}
+    KINDS :: [7]Block_Type{.Mushroom, .Glow_Mushroom, .Flower, .Fern, .Tall_Grass, .Sea_Pickle, .Dry_Bush}
     lay(gs, ox, sz, fy, 8, 10, proc(x, z: int) -> Block_Type {
         kinds := KINDS
         k := (x + 5) / 2
@@ -68,6 +68,13 @@ bench_plants_run :: proc(gs: ^Game_State) {
     cam.pos = {f32(ox) - 4.5, f32(fy) + 0.9, f32(sz) + 1.2}
     cam.yaw, cam.pitch = 0, -25
     shot(gs, "mushroom")
+    // The sea pickles and dry bushes (rows at x 5 and 7), by day and night.
+    cam.pos = {f32(ox) + 6.5, f32(fy) + 1.1, f32(sz) + 0.6}
+    cam.yaw, cam.pitch = 0, -28
+    shot(gs, "pickle_bush")
+    day_set_hour(gs, 23, settle = true)
+    shot(gs, "pickle_bush_night")
+    day_set_hour(gs, 15, settle = true)
     // Closer still, on the mushrooms and the flowers.
     cam.pos = {f32(ox) - 1.5, f32(fy) + 1.0, f32(sz) + 1.0}
     cam.yaw, cam.pitch = 0, -30

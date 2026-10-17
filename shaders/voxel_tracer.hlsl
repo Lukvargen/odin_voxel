@@ -630,6 +630,14 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
                          : k == 4u ? float3(0.30, 0.45, 0.95) : float3(0.95, 0.50, 0.70);
             return saturate(petal * (0.9 + 0.2 * th));
         }
+        if (block_id == BLOCK_SEA_PICKLE) {
+            // Pale lime capsules with brighter, glowing tips.
+            return sea_pickle_tip(mc) ? float3(0.70, 0.95, 0.40) : float3(0.40, 0.62, 0.22) * (0.9 + 0.2 * th);
+        }
+        if (block_id == BLOCK_DRY_BUSH) {
+            // Grey-brown twigs, paler toward their tips.
+            return float3(0.36, 0.26, 0.15) * (0.8 + 0.4 * th) * lerp(0.85, 1.25, float(mc.y) / 5.0);
+        }
         if (block_id == BLOCK_GLOW_MUSHROOM) {
             // Pale stems, caps that glow (block_emission does the glow).
             return glow_mushroom_stem(mc) ? float3(0.70, 0.75, 0.72) * (0.85 + 0.2 * th) : float3(0.55, 0.95, 1.0);
@@ -654,9 +662,6 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
             float3 c = g * lerp(0.75, 1.25, float(cv) / 7.0);
             return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.2));
         }
-        if (block_id == BLOCK_DRY_BUSH) {
-            return float3(0.36, 0.26, 0.15) * (0.8 + 0.4 * th);
-        }
         if (block_id == BLOCK_ROOTS) {
             return float3(0.40, 0.30, 0.19) * (0.75 + 0.4 * th) * lerp(0.8, 1.1, float(cv) / 7.0);
         }
@@ -668,12 +673,9 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
             if (stalk && th > 0.93) c = float3(0.45, 0.42, 0.12);
             return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.15));
         }
-        if (block_id == BLOCK_SEAGRASS) {
-            float3 c = lerp(float3(0.10, 0.28, 0.08), float3(0.30, 0.55, 0.18), float(cv) / 7.0);
-            return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.2));
-        }
-        // Sea pickle: pale lime capsules with brighter tops.
-        return cv >= 2 ? float3(0.70, 0.95, 0.40) : float3(0.40, 0.62, 0.22);
+        // Seagrass.
+        float3 c = lerp(float3(0.10, 0.28, 0.08), float3(0.30, 0.55, 0.18), float(cv) / 7.0);
+        return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.2));
     }
 
     if (block_id == BLOCK_CORAL) {
@@ -1341,6 +1343,9 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
         // Only the caps glow, and solid caps show far more surface than the
         // old crossed planes did: dimmer, or the bloom swallows them.
         emis *= glow_mushroom_stem(micro_hit_cell(hit.vkey, hit.hit_pos, hit.normal)) ? 0.0 : 0.3;
+    } else if (hit.block_id == BLOCK_SEA_PICKLE) {
+        // Solid too: the tips glow, the bodies only faintly.
+        emis *= sea_pickle_tip(micro_hit_cell(hit.vkey, hit.hit_pos, hit.normal)) ? 0.45 : 0.1;
     }
     if (emis.x > 0.0) {
         float fl = 0.92 + 0.08 * sin(u_time * 9.0 + hash31i(hit.vkey) * 6.2831853);
