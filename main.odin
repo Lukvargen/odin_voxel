@@ -214,6 +214,7 @@ main :: proc() {
             case a == "climb": bench_climb = true
             case a == "doors": bench_doors = true
             case a == "plants": bench_plants = true
+            case a == "hear": bench_hear = true
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
                 day_set_hour(&gs, h, settle = true)

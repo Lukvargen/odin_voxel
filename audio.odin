@@ -91,11 +91,10 @@ Audio :: struct {
     agl:   f32, // eye height above the terrain (or the sea)
     biome: Biome,
 
-    // Player state last frame, for footsteps, landings and splashes.
-    prev_pos, prev_vel: [3]f32,
-    prev_on_ground, prev_in_water, prev_deployed: bool,
+    // Footsteps, landings and splashes: ours, and the other players'.
+    me:         Body_Sounds,
+    others:     [MAX_PLAYERS]Body_Sounds,
     prev_block: Block_Type,
-    stride, stroke: f32, // distance left to the next footstep / swim stroke
     next_bird, next_eagle, next_drip, next_biome, last_edit: f32,
 }
 
@@ -139,7 +138,11 @@ audio_toggle_mute :: proc() {
 }
 
 // Plays a one-shot. pitch also changes speed; pan is -1 left .. 1 right.
+// Benches (where audio is off): every sound that would play, counted.
+bench_heard: ^[Sound]int
+
 play :: proc(sound: Sound, volume: f32 = 1, pitch: f32 = 1, pan: f32 = 0) {
+    if bench_heard != nil { bench_heard[sound] += 1 }
     if !audio.ok || audio.muted || volume * audio.effects < 0.003 { return }
     src := audio.sounds[sound][rand.int_max(VARIANTS)]
 
@@ -242,6 +245,7 @@ audio_update :: proc(gs: ^Game_State, dt: f32) {
     audio.ear_pos, audio.ear_right = gs.camera.pos, right
     surroundings_update(gs, dt)
     player_sounds(gs, dt)
+    others_sounds(gs, dt)
     ambient_calls(gs)
     loops_update()
 }
@@ -295,7 +299,7 @@ surroundings_update :: proc(gs: ^Game_State, dt: f32) {
     ease(&audio.wind_bright, math.smoothstep(f32(10), 140, audio.agl), 1, dt)
 
     // Rushing air from moving fast (falling, gliding, flying); the wing luffs in a stall.
-    moved := p - audio.prev_pos
+    moved := p - audio.me.prev_pos // last frame's: player_sounds runs after this
     speed := la.length(moved) / max(dt, 0.001)
     if speed > 300 && !cam.fly_mode { speed = 0 } // a teleport (spawn, bench), not motion
     ease(&audio.rush, math.smoothstep(f32(9), 45, speed) * (1 - 0.6 * audio.under), 4, dt)
@@ -318,81 +322,121 @@ surroundings_update :: proc(gs: ^Game_State, dt: f32) {
 
 // Footsteps, jumps, landings, splashes and the glider's wing, from how the player moved.
 @(private="file")
+// A body's state last frame, for its footsteps, landings and splashes.
+Body_Sounds :: struct {
+    seen:               bool, // has a last frame (another player just come: not yet)
+    prev_pos, prev_vel: [3]f32,
+    prev_on_ground, prev_in_water, prev_gliding, prev_sword: bool,
+    stride, stroke:     f32, // distance left to the next footstep / swim stroke
+}
+
+OTHER_STEP_VOLUME :: f32(0.8) // other players' body sounds, against our own: a crowd doesn't clatter
+
+// Our own body's sounds, and the bits only we hear (the hotbar's click).
 player_sounds :: proc(gs: ^Game_State, dt: f32) {
     cam := &gs.camera
-    p := cam.pos
+    body_sounds(gs, &audio.me, cam.pos, cam.velocity, cam.on_ground, cam.fly_mode, gs.glider.deployed, dt, remote = false)
+    if gs.selected_block != audio.prev_block && audio.prev_block != .Air {
+        play(.Click, 0.35)
+    }
+    audio.prev_block = gs.selected_block
+}
+
+// The other players' bodies, where they are as we draw them (as heard from
+// the server): footsteps, jumps, landings, splashes, the glider, the sword
+// coming out. Their swings and hurts come with the views and events.
+others_sounds :: proc(gs: ^Game_State, dt: f32) {
+    for &o, i in gs.net.others {
+        s := &audio.others[i]
+        if !o.active || i == gs.net.slot {
+            s.seen = false
+            continue
+        }
+        p := &o.latest
+        if s.seen && p.sword != s.prev_sword {
+            play_at(.Sword_Draw, p.pos - {0, 0.5, 0}, (p.sword ? 0.7 : 0.5) * OTHER_STEP_VOLUME, (p.sword ? 1 : 0.8) * vary(0.05), 12)
+        }
+        s.prev_sword = p.sword
+        body_sounds(gs, s, p.pos, p.velocity, p.on_ground, p.fly_mode, p.gliding, dt, remote = true)
+    }
+}
+
+// One body's sounds from how it moved since last frame: p its eye. Ours
+// play in the head; another player's (remote) where it is.
+@(private="file")
+body_sounds :: proc(gs: ^Game_State, s: ^Body_Sounds, p, vel: [3]f32, on_ground, fly, gliding: bool, dt: f32, remote: bool) {
+    snd :: proc(remote: bool, at: [3]f32, sound: Sound, vol, pitch: f32) {
+        if remote { play_at(sound, at, vol * OTHER_STEP_VOLUME, pitch, 12) } else { play(sound, vol, pitch) }
+    }
     feet := p - {0, PLAYER_EYE_HEIGHT + 0.05, 0}
     in_water := block_is_watery(u8(voxel_at(gs, p - {0, PLAYER_EYE_HEIGHT * 0.5, 0})))
-    walking := !cam.fly_mode && !gs.glider.deployed
-    moved := p - audio.prev_pos
-    teleport := la.length(moved) > 40
+    walking := !fly && !gliding
+    moved := p - s.prev_pos
+    teleport := !s.seen || la.length(moved) > 40
 
     if !teleport {
-        if walking && cam.on_ground && !in_water {
+        if walking && on_ground && !in_water {
             horiz := la.length(moved.xz)
-            audio.stride -= horiz
-            if audio.stride <= 0 {
+            s.stride -= horiz
+            if s.stride <= 0 {
                 hspeed := horiz / max(dt, 0.001)
-                audio.stride = 1.9 + hspeed * 0.11 // longer strides when running
+                s.stride = 1.9 + hspeed * 0.11 // longer strides when running
                 vol := clamp(0.22 + 0.03 * hspeed, 0, 0.6)
                 if block_is_watery(u8(voxel_at(gs, feet + {0, 0.3, 0}))) {
-                    play(.Swim, vol * 0.7, vary(0.15) * 1.2) // wading
+                    snd(remote, feet, .Swim, vol * 0.7, vary(0.15) * 1.2) // wading
                 } else {
-                    play(step_sound(ground_material(gs, feet)), vol, vary())
+                    snd(remote, feet, step_sound(ground_material(gs, feet)), vol, vary())
                 }
             }
-        } else if !cam.on_ground {
-            audio.stride = 0.6
+        } else if !on_ground {
+            s.stride = 0.6
         }
 
         // Pushing off for a jump.
-        if walking && audio.prev_on_ground && !cam.on_ground && cam.velocity.y > JUMP_SPEED * 0.5 && !in_water {
-            play(.Jump, 0.3, vary())
-            play(step_sound(ground_material(gs, audio.prev_pos - {0, PLAYER_EYE_HEIGHT + 0.05, 0})), 0.25, vary())
+        if walking && s.prev_on_ground && !on_ground && vel.y > JUMP_SPEED * 0.5 && !in_water {
+            snd(remote, feet, .Jump, 0.3, vary())
+            snd(remote, feet, step_sound(ground_material(gs, s.prev_pos - {0, PLAYER_EYE_HEIGHT + 0.05, 0})), 0.25, vary())
         }
         // Landing: harder falls land louder and lower.
-        if !cam.fly_mode && !audio.prev_on_ground && cam.on_ground {
-            impact := -audio.prev_vel.y
+        if !fly && !s.prev_on_ground && on_ground {
+            impact := -s.prev_vel.y
             if impact > 5 {
                 v := clamp((impact - 5) / 25, 0, 1)
-                play(.Land, 0.25 + 0.6 * v, vary(0.06) * (1.05 - 0.2 * v))
-                play(step_sound(ground_material(gs, feet)), 0.4 + 0.3 * v, vary())
-                audio.stride = 1.2
+                snd(remote, feet, .Land, 0.25 + 0.6 * v, vary(0.06) * (1.05 - 0.2 * v))
+                snd(remote, feet, step_sound(ground_material(gs, feet)), 0.4 + 0.3 * v, vary())
+                s.stride = 1.2
             }
         }
 
         // Into and out of water, and swim strokes.
-        if in_water && !audio.prev_in_water {
-            impact := -audio.prev_vel.y
+        if in_water && !s.prev_in_water {
+            impact := -s.prev_vel.y
             if impact > 4 {
-                play(.Splash, clamp(0.35 + impact / 30, 0, 1), vary() * (impact > 20 ? 0.85 : 1))
+                snd(remote, feet, .Splash, clamp(0.35 + impact / 30, 0, 1), vary() * (impact > 20 ? 0.85 : 1))
             } else {
-                play(.Swim, 0.4, vary(0.1))
+                snd(remote, feet, .Swim, 0.4, vary(0.1))
             }
-            audio.stroke = 1.5
-        } else if !in_water && audio.prev_in_water {
-            play(.Swim, 0.3, vary(0.1))
+            s.stroke = 1.5
+        } else if !in_water && s.prev_in_water {
+            snd(remote, feet, .Swim, 0.3, vary(0.1))
         }
         if in_water && walking {
             speed := la.length(moved) / max(dt, 0.001)
-            audio.stroke -= la.length(moved)
-            if audio.stroke <= 0 {
-                audio.stroke = 2.4
-                if speed > 0.8 { play(.Swim, clamp(0.15 + speed * 0.05, 0, 0.45), vary(0.12)) }
+            s.stroke -= la.length(moved)
+            if s.stroke <= 0 {
+                s.stroke = 2.4
+                if speed > 0.8 { snd(remote, feet, .Swim, clamp(0.15 + speed * 0.05, 0, 0.45), vary(0.12)) }
             }
         }
     }
 
-    if gs.glider.deployed != audio.prev_deployed {
-        play(gs.glider.deployed ? .Glider_Open : .Glider_Close, 0.55, vary(0.05))
-    }
-    if gs.selected_block != audio.prev_block && audio.prev_block != .Air {
-        play(.Click, 0.35)
+    if s.seen && gliding != s.prev_gliding {
+        snd(remote, p, gliding ? .Glider_Open : .Glider_Close, 0.55, vary(0.05))
     }
 
-    audio.prev_pos, audio.prev_vel = p, cam.velocity
-    audio.prev_on_ground, audio.prev_in_water = cam.on_ground, in_water
-    audio.prev_deployed, audio.prev_block = gs.glider.deployed, gs.selected_block
+    s.prev_pos, s.prev_vel = p, vel
+    s.prev_on_ground, s.prev_in_water, s.prev_gliding = on_ground, in_water, gliding
+    s.seen = true
 }
 
 // What's underfoot. Standing on an edge the voxel straight down can be air, so

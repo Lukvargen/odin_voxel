@@ -327,17 +327,27 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
         case .Voxels:
             m := msg_get(&r, Msg_Voxels) or_break
             changed := make([dynamic][3]int, 0, VOXEL_BATCH, context.temp_allocator)
+            heard: Heard_Edit
             for v in m.items[:min(m.count, VOXEL_BATCH)] {
-                client_write(gs, la.array_cast(v.pos, int), v.block, &changed)
+                p := la.array_cast(v.pos, int)
+                heard_note(gs, &heard, p, v.block)
+                client_write(gs, p, v.block, &changed)
             }
             world_refresh(gs, changed[:])
+            heard_play(heard)
         case .Chunk_Voxels:
             m := msg_get(&r, Msg_Chunk_Voxels) or_break
             if chunk_y_index(int(m.key.y)) < 0 { break }
             changed := make([dynamic][3]int, 0, VOXELS_PER_BRICK, context.temp_allocator)
             base := la.array_cast(m.key, int) * CHUNK_VOXELS
-            for v, vi in m.voxels { client_write(gs, base + {vi & 7, (vi >> 3) & 7, vi >> 6}, v, &changed) }
+            heard: Heard_Edit
+            for v, vi in m.voxels {
+                p := base + {vi & 7, (vi >> 3) & 7, vi >> 6}
+                heard_note(gs, &heard, p, v)
+                client_write(gs, p, v, &changed)
+            }
             world_refresh(gs, changed[:])
+            heard_play(heard)
         case .Monsters:
             m := msg_get(&r, Msg_Monsters) or_break
             if !client_joined(gs) { break }
@@ -485,6 +495,32 @@ client_send_voxels :: proc(gs: ^Game_State, changed: [][3]int) {
         }
     }
     if m.count > 0 { client_send(gs, .Voxels, m) }
+}
+
+// Another player's edit, for our ears: the first voxel it changed near us
+// and how many it did. A door swinging isn't one (it has Door_Swing).
+Heard_Edit :: struct {
+    pos:        [3]int,
+    block, old: Block_Type,
+    n:          int,
+}
+
+HEAR_EDITS :: 64 // blocks: edits further off than this are not heard
+
+@(private="file")
+heard_note :: proc(gs: ^Game_State, h: ^Heard_Edit, p: [3]int, block: u8) {
+    old := u8(get_voxel(gs, p.x, p.y, p.z))
+    if old == block || door_swung(old, block) { return }
+    if la.length([3]f32{f32(p.x), f32(p.y), f32(p.z)} - gs.camera.pos) > HEAR_EDITS { return }
+    if h.n == 0 { h.pos, h.block, h.old = p, Block_Type(block), Block_Type(old) }
+    h.n += 1
+}
+
+// Sounds as our own edit of that size would (audio_edit: bigger, lower).
+@(private="file")
+heard_play :: proc(h: Heard_Edit) {
+    if h.n == 0 { return }
+    audio_edit(h.pos, h.block, h.old, clamp(int(math.cbrt(f32(h.n)) * 0.6), 0, 8))
 }
 
 // A block another player changed, into our world if we have its column
