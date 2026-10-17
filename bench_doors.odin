@@ -139,6 +139,56 @@ bench_doors_run :: proc(gs: ^Game_State) {
     _, other := door_of(gs, b)
     check(&ok_all, "...and leaves the door beside it", other)
 
+    // A server of its own: players' Voxels messages swinging a door make one
+    // Door_Swing event each (for the others to hear), from its bottom part;
+    // other edits make none.
+    {
+        sim: Sim
+        link: Loopback
+        srv: Server
+        server_init(&srv, &sim, &link)
+        p := [3]i32{i32(ox) + 40, i32(fy), i32(sz)}
+        // Loaded, as a column by a player is (else writes go to its save).
+        key := [2]int{int(p.x) >> 3, int(p.z) >> 3}
+        srv.world.columns[key] = generate_column_at(key.x, key.y)
+        send :: proc(srv: ^Server, player: int, p: [3]i32, d: Door) -> (swings: int, by: int, opened: bool) {
+            m: Msg_Voxels
+            for k in 0 ..< DOOR_PARTS {
+                part := d
+                part.part = k
+                m.items[m.count] = {pos = p + {0, i32(k), 0}, block = door_encode(part)}
+                m.count += 1
+            }
+            o: Outbox
+            outbox_put(&o, .Voxels, m)
+            clear(&srv.sim.events)
+            server_handle(srv, player, o.reliable[:])
+            for ev in srv.sim.events {
+                if ev.kind != .Door_Swing { continue }
+                swings += 1
+                by, opened = int(ev.player), ev.amount > 0
+            }
+            delete(o.reliable)
+            return
+        }
+        d := Door{facing = 2}
+        n, _, _ := send(&srv, LOCAL_PLAYER, p, d)
+        check(&ok_all, "server: placing a door makes no swing", n == 0)
+        d.open = true
+        n2, by2, op2 := send(&srv, 1, p, d)
+        check(&ok_all, "server: a guest opening it makes one swing", n2 == 1 && by2 == 1 && op2)
+        srv.guests_build = false
+        d.open = false
+        n3, by3, op3 := send(&srv, 2, p, d)
+        check(&ok_all, "...and one who may not build shutting it", n3 == 1 && by3 == 2 && !op3)
+        d.facing = 1
+        n4, _, _ := send(&srv, LOCAL_PLAYER, p, d)
+        check(&ok_all, "server: turning it isn't a swing", n4 == 0)
+        d.open = true
+        n5, by5, _ := send(&srv, LOCAL_PLAYER, p, d)
+        check(&ok_all, "server: the host opening it makes one swing", n5 == 1 && by5 == LOCAL_PLAYER)
+    }
+
     fmt.println(ok_all ? "doors: all ok" : "doors: SOME FAILED")
     cam.fly_mode = true
 }

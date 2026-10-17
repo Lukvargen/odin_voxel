@@ -59,6 +59,10 @@ sim_event_play :: proc(gs: ^Game_State, ev: Sim_Event) {
     case .Enemy_Rise:
         splat(fx, c + {0, 0.2, 0}, {0.36, 0.27, 0.18}, {0, 1, 0}, 8, 0.4)
 
+    case .Door_Swing:
+        // The swinger heard it already (door_toggle).
+        if int(ev.player) != gs.net.slot { audio_door(la.array_cast(ev.pos, int), ev.amount > 0) }
+
     case .Player_Hurt:
         if int(ev.player) == gs.net.slot {
             combat_take_hurt(gs, ev.result, ev.amount, ev.vec)

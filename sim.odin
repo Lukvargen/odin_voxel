@@ -67,6 +67,7 @@ Sim_Event_Kind :: enum u8 {
     Enemy_Crumble, // pos: centre: a night skeleton gone at dawn
     Enemy_Rise,    // pos: feet: a skeleton clawing up out of the ground
     Player_Hurt,   // player was struck: result; pos: from; vec: knock; amount: damage
+    Door_Swing,    // player opened (amount 1) or shut (0) the door whose bottom voxel is at pos
 }
 
 Sim_Event :: struct {

@@ -338,6 +338,7 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
                 for v in m.items[:m.count] {
                     cur := u8(get_voxel(srv.sim.world, int(v.pos.x), int(v.pos.y), int(v.pos.z)))
                     if door_swung(cur, v.block) {
+                        server_door_swing(srv, player, cur, v)
                         server_write(srv, la.array_cast(v.pos, int), v.block)
                         swung.items[swung.count] = v
                         swung.count += 1
@@ -350,7 +351,10 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
                 if back.count > 0 { outbox_put(server_outbox(srv, player), .Voxels, back) }
                 break
             }
-            for v in m.items[:m.count] { server_write(srv, la.array_cast(v.pos, int), v.block) }
+            for v in m.items[:m.count] {
+                server_door_swing(srv, player, u8(get_voxel(srv.sim.world, int(v.pos.x), int(v.pos.y), int(v.pos.z))), v)
+                server_write(srv, la.array_cast(v.pos, int), v.block)
+            }
             server_forward(srv, player, .Voxels, m)
         case .Chunk_Voxels:
             m := msg_get(&r, Msg_Chunk_Voxels) or_break
@@ -413,6 +417,15 @@ server_hit :: proc(srv: ^Server, by: int, h: Msg_Hit) {
         if !e.alive || e.uid != h.uid || e.state == .Dead { return }
         if !enemy_damage(sim, e, h.damage, h.knock, h.boosted, by) { e.freeze = h.freeze }
     }
+}
+
+// A door that player swung (cur, as it was, to v): everyone else hears it
+// (Door_Swing, played by the clients but the swinger's). Once a door: its
+// bottom part.
+@(private="file")
+server_door_swing :: proc(srv: ^Server, player: int, cur: u8, v: Msg_Voxel) {
+    if !door_swung(cur, v.block) || door_decode(v.block).part != 0 { return }
+    sim_emit(srv.sim, {kind = .Door_Swing, player = u8(player), pos = la.array_cast(v.pos, f32), amount = door_is_open(v.block) ? 1 : 0})
 }
 
 // One block a player changed, into the world: its loaded column, or the
