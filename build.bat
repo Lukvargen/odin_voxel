@@ -20,6 +20,8 @@ if %errorlevel% neq 0 ( echo bloom_prefilter shader failed! & exit /b 1 )
 if %errorlevel% neq 0 ( echo bloom_blur_h shader failed! & exit /b 1 )
 "%DXC%" -T cs_6_0 -E main -I shaders shaders\bloom_blur.hlsl -spirv -fspv-target-env=vulkan1.1 -Fo shaders\bloom_blur_v.spv
 if %errorlevel% neq 0 ( echo bloom_blur_v shader failed! & exit /b 1 )
+"%DXC%" -T cs_6_0 -E main -I shaders shaders\gi_probes.hlsl -spirv -fspv-target-env=vulkan1.1 -Fo shaders\gi_probes.spv
+if %errorlevel% neq 0 ( echo gi_probes shader failed! & exit /b 1 )
 echo Shaders compiled OK.
 
 echo Building Odin...

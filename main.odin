@@ -122,6 +122,7 @@ Game_State :: struct {
     entity_count:     i32,  // entities uploaded this frame
     entities_enabled: bool, // options panel toggle
     clouds_enabled:   bool, // volumetric cumulus over thermals (options panel)
+    gi:               GI,   // bounce-light probes (gi.odin)
 
     // Input state
     mouse_locked:        bool,
@@ -186,6 +187,7 @@ main :: proc() {
     gs.brush_radius   = 0
     gs.entities_enabled = true
     gs.clouds_enabled   = true
+    gs.gi.enabled       = true
     gs.far_enabled      = true
     gs.camera.pos     = find_spawn()
     day_init(&gs)
@@ -218,9 +220,12 @@ main :: proc() {
             case a == "doors": bench_doors = true
             case a == "plants": bench_plants = true
             case a == "hear": bench_hear = true
+            case a == "gi": bench_gi = true
+            case a == "gimove": bench_gi, bench_gi_move = true, true
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
                 day_set_hour(&gs, h, settle = true)
+            case a == "gi=0": gs.gi.enabled = false // bounce light from the stand-in only (gi.odin)
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 x, _ := strconv.parse_int(xz[0])

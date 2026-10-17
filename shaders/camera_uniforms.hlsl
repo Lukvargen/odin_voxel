@@ -33,6 +33,8 @@ cbuffer CameraUniforms : register(b0, space2) {
     int4   u_thermal_count;  // x = count
     float4 u_cloud_puffs[64];// per thermal 4 cumulus towers: offset (cloud radii), radius
     float4 u_hand_light;     // torch in hand: xyz = position, w = light level (0 = none)
+    int4   u_gi_origin;      // bounce-light probe grid (gi_common.hlsl): min corner in probe coords, w = enabled
+    int4   u_gi_frame;       // x = first probe slot updated this frame, y = frame counter
 };
 
 #endif // CAMERA_UNIFORMS_HLSL

@@ -172,6 +172,10 @@ bench_run :: proc(gs: ^Game_State) {
         bench_hear_run(gs)
         return
     }
+    if bench_gi {
+        bench_gi_run(gs)
+        return
+    }
 
     gs.camera.fly_mode = true
     spawn := gs.camera.pos
@@ -384,6 +388,17 @@ bench_hud_shot :: proc(gs: ^Game_State, path: string) {
 }
 
 bench_screenshot :: proc(gs: ^Game_State, path: string) {
+    pixels := bench_frame_pixels(gs)
+    defer delete(pixels)
+    surf := SDL.CreateSurfaceFrom(gs.render_w, gs.render_h, .RGBA32, raw_data(pixels), gs.render_w * 4)
+    defer SDL.DestroySurface(surf)
+    cpath := strings.clone_to_cstring(path, context.temp_allocator)
+    if !SDL.SaveBMP(surf, cpath) { fmt.eprintln("SaveBMP failed:", SDL.GetError()) }
+}
+
+// The last frame (out_texture, tone-mapped) as RGBA8 pixels; the caller
+// deletes them.
+bench_frame_pixels :: proc(gs: ^Game_State) -> []u8 {
     w := u32(gs.render_w); h := u32(gs.render_h)
     size := w * h * 8
     transfer := SDL.CreateGPUTransferBuffer(gs.gpu_device, {usage = .DOWNLOAD, size = size})
@@ -401,7 +416,6 @@ bench_screenshot :: proc(gs: ^Game_State, path: string) {
 
     src := ([^]f16)(SDL.MapGPUTransferBuffer(gs.gpu_device, transfer, false))
     pixels := make([]u8, w * h * 4)
-    defer delete(pixels)
     for i in 0 ..< int(w * h) {
         for c in 0 ..< 3 {
             v := clamp(f32(src[i * 4 + c]), 0, 1)
@@ -410,11 +424,7 @@ bench_screenshot :: proc(gs: ^Game_State, path: string) {
         pixels[i * 4 + 3] = 255
     }
     SDL.UnmapGPUTransferBuffer(gs.gpu_device, transfer)
-
-    surf := SDL.CreateSurfaceFrom(i32(w), i32(h), .RGBA32, raw_data(pixels), i32(w * 4))
-    defer SDL.DestroySurface(surf)
-    cpath := strings.clone_to_cstring(path, context.temp_allocator)
-    if !SDL.SaveBMP(surf, cpath) { fmt.eprintln("SaveBMP failed:", SDL.GetError()) }
+    return pixels
 }
 
 // Brick counts for the resident world.

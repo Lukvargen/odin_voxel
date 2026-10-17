@@ -178,6 +178,24 @@ float3 true_sun_tint() {
     return lerp(c, float3(1.0, 0.96, 0.90), smoothstep(0.45, 0.95, elev));
 }
 
+// Ambient light from the open sky at full sky light: blue by day, dusky
+// lavender with the sun low (a cool fill against the warm low sun, so
+// shadows read blue at golden hour), deep blue at night.
+float3 sky_ambient() {
+    float3 day = lerp(float3(0.32, 0.31, 0.40), float3(0.49, 0.60, 0.84),
+                      smoothstep(0.0, 0.4, saturate(u_sun_true.y)));
+    return lerp(day, float3(0.036, 0.052, 0.100), u_sun_true.w);
+}
+
+// Fixed per-face dimming of the sky/torch light (as in Minecraft): tops get
+// it all, sides less, undersides least, so blocks keep their shape where the
+// sun doesn't reach.
+float face_shade(float3 n) {
+    if (n.y > 0.5)  return 1.0;
+    if (n.y < -0.5) return 0.5;
+    return abs(n.x) > 0.5 ? 0.8 : 0.65;
+}
+
 // voxel_chunk packs 4 voxels (1 byte each) per uint.
 uint load_voxel(int idx) {
     uint word = voxel_chunk[idx >> 2];

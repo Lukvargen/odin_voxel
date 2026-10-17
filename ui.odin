@@ -1648,6 +1648,10 @@ menu_graphics :: proc(gs: ^Game_State) {
         }
     }
     if clay.UI()(setting_row()) {
+        row_label("Bounce light")
+        toggle("GI", &gs.gi.enabled)
+    }
+    if clay.UI()(setting_row()) {
         row_label("Thermal clouds")
         toggle("Cloud", &gs.clouds_enabled)
     }

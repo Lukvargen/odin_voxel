@@ -5,18 +5,21 @@
 // shadow ray.
 
 // ---- Bindings ---------------------------------------------------------------
-// SPIR-V/SDL3 space0 order: RO storage bufs (t0..t7): voxel data, voxel
-// light, entities, far terrain. SDL allows at most 8 (see gpu.odin).
+// SPIR-V/SDL3 space0 order: RO storage textures (t0, t1): the bounce-light
+// probes; then RO storage bufs (t2..t9): voxel data, voxel light, entities,
+// far terrain. SDL allows at most 8 buffers (see gpu.odin).
 // RW textures (set 1): img_output (u0), depth_output (u1).
 // Shared constants/functions come from voxel_common.hlsl AFTER these decls.
-StructuredBuffer<uint>     voxel_chunk      : register(t0, space0);
-StructuredBuffer<int>      chunk_index      : register(t1, space0);
-StructuredBuffer<int2>     chunk_owner      : register(t2, space0);
-StructuredBuffer<uint>     voxel_mask       : register(t3, space0);
-StructuredBuffer<int>      light_index      : register(t4, space0); // per slot: light pool id, or -1-light if uniform
-StructuredBuffer<uint>     light_pool       : register(t5, space0); // 512 u16 light values per brick, two per uint
-StructuredBuffer<uint4>    ent_data         : register(t6, space0); // entity voxel models + instances (voxel_models.odin)
-StructuredBuffer<uint>     far_data         : register(t7, space0); // far terrain tile table, then cells (far.odin)
+Texture2D<float4>          gi_irr           : register(t0, space0); // probe light per direction (gi_common.hlsl)
+Texture2D<uint>            gi_vis           : register(t1, space0); // probe reach masks + owners
+StructuredBuffer<uint>     voxel_chunk      : register(t2, space0);
+StructuredBuffer<int>      chunk_index      : register(t3, space0);
+StructuredBuffer<int2>     chunk_owner      : register(t4, space0);
+StructuredBuffer<uint>     voxel_mask       : register(t5, space0);
+StructuredBuffer<int>      light_index      : register(t6, space0); // per slot: light pool id, or -1-light if uniform
+StructuredBuffer<uint>     light_pool       : register(t7, space0); // 512 u16 light values per brick, two per uint
+StructuredBuffer<uint4>    ent_data         : register(t8, space0); // entity voxel models + instances (voxel_models.odin)
+StructuredBuffer<uint>     far_data         : register(t9, space0); // far terrain tile table, then cells (far.odin)
 
 RWTexture2D<float4>        img_output        : register(u0, space1);
 RWTexture2D<float>         depth_output      : register(u1, space1); // primary-hit dist, 1e30 = sky
@@ -26,6 +29,7 @@ RWTexture2D<float>         depth_output      : register(u1, space1); // primary-
 #define HAS_VOXEL_LIGHT
 #include "entity_voxel.hlsl"
 #include "voxel_common.hlsl"
+#include "gi_common.hlsl"
 #include "far_field.hlsl"
 
 // ---- Helpers ----------------------------------------------------------------
@@ -111,26 +115,10 @@ float4 apply_fog(float4 color, float dist, float3 ray_dir) {
 }
 
 // ---- Light colors -------------------------------------------------------------
-
-// Ambient light from the open sky at full sky light: blue by day, dusky
-// lavender with the sun low (a cool fill against the warm low sun, so
-// shadows read blue at golden hour), deep blue at night.
-float3 sky_ambient() {
-    float3 day = lerp(float3(0.32, 0.31, 0.40), float3(0.49, 0.60, 0.84),
-                      smoothstep(0.0, 0.4, saturate(u_sun_true.y)));
-    return lerp(day, float3(0.036, 0.052, 0.100), u_sun_true.w);
-}
+// (sky_ambient and face_shade live in voxel_common.hlsl: the GI probes light
+// what their rays hit the same way.)
 
 #define MIN_AMBIENT       0.015                   // so pitch-black caves keep a hint of shape
-
-// Fixed per-face dimming of the sky/torch light (as in Minecraft): tops get
-// it all, sides less, undersides least, so blocks keep their shape where the
-// sun doesn't reach.
-float face_shade(float3 n) {
-    if (n.y > 0.5)  return 1.0;
-    if (n.y < -0.5) return 0.5;
-    return abs(n.x) > 0.5 ? 0.8 : 0.65;
-}
 
 // The torch in the player's hand (u_hand_light, gpu.odin): a point light
 // that falls off with distance as block light does with levels, with a
@@ -152,16 +140,31 @@ float3 hand_light(float3 p, float3 n, bool two_sided) {
     return TORCH_LIGHT_COLOR * (block_light_curve(level) * ndl * sh);
 }
 
-// Sun bounced off sunlit surfaces (grass, rock, sand): fills faces turned
-// sideways or down, and some from the walls onto the floor. Not only off
-// flat ground: a low sun lights walls and slopes square on, so a canyon or
-// a cave mouth at golden hour fills with warm light off the bright rock
-// beside it. Scaled by the face's sky light by the caller (how open it is).
+// A stand-in for bounce light where the GI probes don't reach (past their
+// grid): sun bounced off sunlit surfaces (grass, rock, sand), filling faces
+// turned sideways or down. Not only off flat ground: a low sun lights walls
+// and slopes square on, so a canyon at golden hour fills with warm light
+// off the bright rock beside it. Scaled by the face's sky light by the
+// caller (how open it is).
 float3 bounce_light(float3 n) {
     float facing = n.y > 0.5 ? 0.3 : (n.y < -0.5 ? 1.0 : 0.7);
     float up = saturate(light_dir_normalized.y);
     float lit = smoothstep(-0.02, 0.06, light_dir_normalized.y) * (0.5 + 0.5 * up);
     return sun_tint() * float3(0.85, 0.80, 0.62) * (u_sun_intensity * lit * 0.2 * facing);
+}
+
+// Light bounced onto a face of voxel vkey (normal n, hit at p) off the
+// surfaces around it: the GI probes (gi_common.hlsl), the stand-in past
+// their grid or where none reaches. in_voxel: a plant's or door's shape,
+// lit by the open voxel it stands in.
+float3 indirect_light(int3 vkey, float3 n, float3 p, bool in_voxel, float sky_level) {
+    float3 guess = bounce_light(n) * light_curve(sky_level);
+    int3   f = in_voxel ? vkey : vkey + int3(round(n));
+    float3 q = in_voxel ? float3(vkey) + 0.5 : p + n * 0.5;
+    float3 gi;
+    float  fade;
+    if (!gi_sample(f, q, n, guess, gi, fade)) return u_gi_frame.z == 2 ? float3(1, 0, 1) * 0.05 : guess;
+    return u_gi_frame.z == 2 ? gi : lerp(guess, gi, fade);
 }
 
 // Tone mapping lives in composite.hlsl — the LAST pass — so the volumetric
@@ -973,6 +976,9 @@ float4 shade_entity(EntityHit ehit, float3 dir, float t_off) {
     uint   lv    = sample_light(int3(floor(P + N * 0.6)));
     float3 ambient = sky_ambient() * light_curve(float(light_sky(lv))) * underwater_light(P + N * 0.3) + MIN_AMBIENT;
     float3 torch   = block_radiance(lv, torch_flicker(P));
+    float3 q = P + N * 0.6, gi;
+    float  gi_fade;
+    if (gi_sample(int3(floor(q)), q, N, float3(0, 0, 0), gi, gi_fade)) ambient += gi * gi_fade;
 
     float3 col = albedo * (ambient + sun + torch + hand_light(so, N, false));
 
@@ -1323,10 +1329,12 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
         if (shadow_factor > 0.0) shadow_factor *= underwater_sun(shadow_origin, l);
         lighting += sun_tint() * (n_dot_l * shadow_factor * u_sun_intensity);
     }
-    // Sunlight bounced off the ground fills faces that look sideways
-    // or down, so shadowed walls and overhangs keep some warmth and
-    // shape instead of flat sky blue.
-    lighting += bounce_light(surf_normal) * light_curve(sky_level) * uw;
+    // Light bounced off the surfaces around: shadowed walls and overhangs
+    // take on the sunlit ground's warmth, cave mouths fill from the rock
+    // the sun lands on.
+    float3 indirect = indirect_light(hit.vkey, surf_normal, hit_point, plant || door, sky_level) * uw;
+    if (u_gi_frame.z != 0) return float4(indirect, 1.0); // bench: the bounce light alone
+    lighting += indirect;
     lighting += hand_light(hit_point + surf_normal * epsilon, surf_normal, blades);
 
     // Leaf backlit glow: sun behind the leaves tints them warm
