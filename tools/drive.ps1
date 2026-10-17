@@ -10,6 +10,8 @@
 #   click,ms       - left click held ms
 #   rclick,ms      - right click held ms
 #   sleep,ms       - just wait
+#   sc,HEXVK       - tap a key by scan code (SendInput): SDL sees Space only this way
+#   schold,HEXVK,ms - hold a key by scan code for ms
 param([string]$Actions = "")
 Add-Type @'
 using System;
@@ -24,6 +26,17 @@ public class DrvNative {
     [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
     [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
+    [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint type);
+    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr extra; }
+    [StructLayout(LayoutKind.Explicit, Size = 40)] public struct INPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public KEYBDINPUT ki; }
+    [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
+    public static void ScanKey(uint vk, bool up) {
+        INPUT[] i = new INPUT[1];
+        i[0].type = 1; // keyboard
+        i[0].ki.wScan = (ushort)MapVirtualKey(vk, 0);
+        i[0].ki.dwFlags = 0x0008u | (up ? 0x0002u : 0u); // SCANCODE (| KEYUP)
+        SendInput(1, i, Marshal.SizeOf(typeof(INPUT)));
+    }
     // Foreground-lock workaround: attach our thread's input queue to the
     // current foreground thread, then the OS allows SetForegroundWindow.
     public static bool ForceForeground(IntPtr h) {
@@ -74,6 +87,8 @@ foreach ($act in $Actions.Split(';')) {
         "click"   { [DrvNative]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds ([int]$parts[1]); [DrvNative]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero) }
         "rclick"  { [DrvNative]::mouse_event(0x0008, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds ([int]$parts[1]); [DrvNative]::mouse_event(0x0010, 0, 0, 0, [UIntPtr]::Zero) }
         "sleep"   { Start-Sleep -Milliseconds ([int]$parts[1]) }
+        "sc"      { $vk = [uint32][Convert]::ToInt32($parts[1], 16); [DrvNative]::ScanKey($vk, $false); Start-Sleep -Milliseconds 50; [DrvNative]::ScanKey($vk, $true) }
+        "schold"  { $vk = [uint32][Convert]::ToInt32($parts[1], 16); [DrvNative]::ScanKey($vk, $false); Start-Sleep -Milliseconds ([int]$parts[2]); [DrvNative]::ScanKey($vk, $true) }
         default   { }
     }
     Start-Sleep -Milliseconds 120

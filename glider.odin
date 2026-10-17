@@ -1,5 +1,6 @@
 package main
 
+import "base:runtime"
 import "core:math"
 import la "core:math/linalg"
 import "core:time"
@@ -13,9 +14,10 @@ import "core:time"
 // Ctrl holds the aim still and lets the mouse look around; the view eases
 // back onto the aim when Ctrl is released.
 //
-// Air: a slowly turning wind, thermals (columns of rising air on a hashed
-// grid, with sinking air around their edge) and ridge lift where the wind
-// blows up a slope. Units are voxels ~ metres, seconds.
+// Air: a slowly turning wind, thermals (columns of rising air off the
+// hottest ground, with sinking air around their edge, strong by day and gone
+// at night) and ridge lift where the wind blows up a slope. Units are voxels
+// ~ metres, seconds.
 
 GLIDER_GRAVITY   : f32 = f32(16.0)  // lighter than walking (36) so flight is floaty
 GLIDER_LIFT_K    : f32 = f32(0.14)  // 1/2 rho S / m, folded into one constant
@@ -26,12 +28,16 @@ GLIDER_STALL_AOA :: f32(0.245) // ~14 degrees
 GLIDER_MAX_AOA   :: f32(0.21)  // what the pilot will pull to without flaring
 GLIDER_FLARE_AOA :: f32(0.45)  // S: flare/brake, deliberately past the stall
 GLIDER_MIN_AOA   :: f32(-0.07)
+GLIDER_BAR_AOA   :: f32(0.07)  // W, the bar pulled in all the way: no slower than ~26 m/s
+GLIDER_BAR_SPEED :: f32(26)    // what the pilot dives for on the bar (trim is ~15), sinking faster
+BAR_VIEW_DIP     :: f32(5)     // degrees the view tips down with the bar all the way in
 GLIDER_MAX_G     :: f32(3.5)   // pilot won't pull more than this many g (in glider gravity)
 GLIDER_MAX_BANK  :: f32(1.10)  // ~63 degrees
 GLIDER_SUBSTEP   :: f32(1.0 / 240.0)
 GLIDER_CRASH_SPEED : f32 = f32(14.0) // wall hit faster than this throws you off the glider
 
-THERMAL_CELL :: 168 // one possible thermal per CELL x CELL voxels (112 design)
+THERMAL_CELL  :: 168 // one possible thermal per CELL x CELL voxels (112 design)
+WINGTIP_REACH :: f32(8) // where the wing feels a thermal, each side (wider than the wing: a usable cue)
 
 Glider :: struct {
     equipped:  bool,
@@ -40,8 +46,10 @@ Glider :: struct {
 
     aim_yaw, aim_pitch:   f32, // degrees, same convention as Camera.yaw/pitch
     look_yaw, look_pitch: f32, // Ctrl free-look offset from the aim (degrees)
+    look_armed:           bool, // Ctrl let go since the wing opened (a sprint's Ctrl isn't a look)
 
     bank, bank_vel: f32, // radians, positive = left wing down (turning left)
+    bar:            f32, // 0..1, how far the speed bar (W) is pulled in: eased, so the nose doesn't drop all at once
     turn_rate:      f32, // degrees/s, smoothed (damps the bank autopilot)
     aoa, aoa_vel:   f32, // angle of attack, radians
     heading:        f32, // degrees, direction of travel through the air
@@ -55,12 +63,22 @@ Glider :: struct {
     vario:     f32, // smoothed vertical speed
     agl:       f32, // height above whatever is below
     lift_here: f32, // updraft at the pilot (thermal + ridge)
+    lift_side: f32, // thermal lift under the left wingtip less the right's, smoothed
+    heat:      f32, // 0..1, how hard the sun drives the thermals now (0 at night)
     stall:     f32, // 0..1, how far past the stall
+
+    // The thermals around the pilot (near_thermals_update), for the lift.
+    near:      [MAX_NEAR_THERMALS]Near_Thermal,
+    near_n:    int,
+    near_cell: [2]int,
+    near_ok:   bool,
 
     // Feel.
     shake:      f32, // buffet / turbulence amplitude, decays
     shake_time: f32,
     land_dip:   f32, // camera drops then springs back on touchdown
+    kick, kick_vel: f32, // the seat's jolt flying into rising (up) or sinking air, springing back
+    lift_prev:  f32,
     wind_time:  f32,
 }
 
@@ -87,17 +105,97 @@ Thermal :: struct {
     top:      f32,    // height above ground where it fades out
 }
 
-// The thermal of grid cell (gx, gz), if that cell has one (~60% do).
-thermal_cell :: proc(gx, gz: int) -> (th: Thermal, ok: bool) {
-    if thermal_hash(gx, gz, 1) > 0.62 { return }
-    th.centre = {
-        (f32(gx) + 0.2 + 0.6 * thermal_hash(gx, gz, 2)) * THERMAL_CELL,
-        (f32(gz) + 0.2 + 0.6 * thermal_hash(gx, gz, 3)) * THERMAL_CELL,
+THERMAL_STRONG :: 4.5 * TERRAIN_SCALE // m/s: a cumulus over it, eagles in it
+
+// The thermal of grid cell (gx, gz), if it has one: off the hottest ground
+// in the cell, as a pilot would read the land. Worked out once per cell
+// (it samples the terrain) and kept.
+thermal_cell :: proc(gx, gz: int) -> (Thermal, bool) {
+    key := [2]int{gx, gz}
+    if c, hit := thermal_cache[key]; hit { return c.th, c.ok }
+    if thermal_cache == nil { thermal_cache = make(map[[2]int]Cached_Thermal, 1024, runtime.heap_allocator()) }
+    if len(thermal_cache) > 8192 { clear(&thermal_cache) }
+    th, ok := thermal_from_terrain(gx, gz)
+    thermal_cache[key] = {th, ok}
+    return th, ok
+}
+
+@(private="file")
+Cached_Thermal :: struct { th: Thermal, ok: bool }
+@(private="file")
+thermal_cache: map[[2]int]Cached_Thermal
+
+// How well the ground heats in the sun: bare and dry best, forest and snow
+// little, water not at all.
+@(private="file")
+ground_heat :: proc(t: Terrain_Sample) -> f32 {
+    if t.height <= SEA_LEVEL { return 0 }
+    switch t.biome {
+    case .Ocean, .River: return 0
+    case .Desert, .Badlands: return 1
+    case .Savanna:   return 0.9
+    case .Mountains: return 0.8
+    case .Plains:    return 0.75
+    case .Beach:     return 0.55
+    case .Forest:    return 0.45
+    case .Taiga:     return 0.4
+    case .Peaks:     return 0.35
+    case .Snowy:     return 0.3
     }
+    return 0.5
+}
+
+// A 5 x 5 grid of terrain over the cell; each inner point scored by its
+// ground (ground_heat), how square it faces the midday sun (south slopes
+// bake, north ones stay cool) and how it stands above its neighbours (hot
+// air breaks away off rises and crests). The best one, with some luck,
+// makes a thermal if it's hot enough, stronger and taller the hotter.
+@(private="file")
+thermal_from_terrain :: proc(gx, gz: int) -> (th: Thermal, ok: bool) {
+    N :: 5
+    step := f32(THERMAL_CELL) * 0.8 / (N - 1)
+    pos :: proc(gx, gz, i, j: int, step: f32) -> [2]f32 {
+        return {f32(gx) * THERMAL_CELL + THERMAL_CELL * 0.1 + f32(i) * step, f32(gz) * THERMAL_CELL + THERMAL_CELL * 0.1 + f32(j) * step}
+    }
+    h, heat: [N][N]f32
+    for j in 0 ..< N {
+        for i in 0 ..< N {
+            p := pos(gx, gz, i, j, step)
+            t := terrain_at(int(p.x), int(p.y))
+            h[j][i], heat[j][i] = f32(t.height), ground_heat(t)
+        }
+    }
+    noon := sun_dir_at(12)
+    best: f32 = 0
+    bi, bj := 0, 0
+    for j in 1 ..< N - 1 {
+        for i in 1 ..< N - 1 {
+            if heat[j][i] <= 0 { continue }
+            slope := [2]f32{(h[j][i + 1] - h[j][i - 1]) / (2 * step), (h[j + 1][i] - h[j - 1][i]) / (2 * step)}
+            n := la.normalize([3]f32{-slope.x, 1, -slope.y})
+            sun := clamp(la.dot(n, noon) / noon.y, 0.4, 1.3)
+            around: f32 = 0
+            for dj in -1 ..= 1 { for di in -1 ..= 1 { around += h[j + dj][i + di] } }
+            rise := h[j][i] - (around - h[j][i]) / 8
+            trigger := 1 + 0.6 * clamp(rise / (20 * TERRAIN_SCALE), -0.5, 1)
+            if score := heat[j][i] * sun * trigger; score > best { best, bi, bj = score, i, j }
+        }
+    }
+    s := best * (0.5 + thermal_hash(gx, gz, 1))
+    if s < 0.62 { return }
+    hot := clamp((s - 0.62) / 0.6, 0, 1)
+    jitter := [2]f32{thermal_hash(gx, gz, 2) - 0.5, thermal_hash(gx, gz, 3) - 0.5} * step * 0.6
+    th.centre   = pos(gx, gz, bi, bj, step) + jitter
     th.radius   = (12 + 16 * thermal_hash(gx, gz, 4)) * TERRAIN_SCALE
-    th.strength = (3.0 + 4.5 * thermal_hash(gx, gz, 5)) * TERRAIN_SCALE
-    th.top      = (90 + 110 * thermal_hash(gx, gz, 6)) * TERRAIN_SCALE
+    th.strength = (2.5 + 5 * hot) * TERRAIN_SCALE
+    th.top      = (80 + 120 * hot) * TERRAIN_SCALE * (0.85 + 0.3 * thermal_hash(gx, gz, 6))
     return th, true
+}
+
+// How hard the sun drives the thermals: full from mid-morning, fading as it
+// sinks, none at night.
+thermal_heat :: proc(d: Day_Clock) -> f32 {
+    return math.smoothstep(f32(0), 0.35, day_sun(d).y)
 }
 
 // Cumulus clouds mark strong thermals (the same ones the eagles circle).
@@ -123,7 +221,7 @@ sky_thermals_update :: proc(gs: ^Game_State) {
     for dz in -2 ..= 2 {
         for dx in -2 ..= 2 {
             th := thermal_cell(cell.x + dx, cell.y + dz) or_continue
-            if th.strength < 4.5 * TERRAIN_SCALE || gs.sky_thermal_count >= MAX_SKY_THERMALS { continue }
+            if th.strength < THERMAL_STRONG || gs.sky_thermal_count >= MAX_SKY_THERMALS { continue }
             ground := max(f32(surface_height_at(int(th.centre.x), int(th.centre.y))), SEA_LEVEL)
             st := Sky_Thermal{
                 centre   = th.centre,
@@ -144,32 +242,58 @@ sky_thermals_update :: proc(gs: ^Game_State) {
     }
 }
 
-// Rising air at p from thermals: a soft-edged core with a ring of sinking
-// air around it, drifting downwind with height like a real thermal leans.
-// `ground` is the terrain height under p; thermals weaken toward their top.
-thermal_lift :: proc(p: [3]f32, ground: f32, wind: [3]f32) -> f32 {
-    height := p.y - ground
-    if height < 3 { return 0 }
-    // Lean: the column drifts with the wind as it rises.
-    q := p - wind * (height * 0.08)
-    cx := int(math.floor(q.x / THERMAL_CELL))
-    cz := int(math.floor(q.z / THERMAL_CELL))
+// Rising air at p from the thermals near the pilot: a soft-edged core with
+// a ring of sinking air around it, the column leaning downwind as it rises
+// and weakening toward its top, its height taken from its own ground (a
+// thermal off a hilltop doesn't vanish over the valley beside it).
+thermal_lift :: proc(g: ^Glider, p: [3]f32, wind: [3]f32) -> f32 {
     lift: f32 = 0
-    for dz in -1 ..= 1 {
-        for dx in -1 ..= 1 {
-            th := thermal_cell(cx + dx, cz + dz) or_continue
-            d := la.length([2]f32{q.x, q.z} - th.centre) / th.radius
-            fade := clamp((th.top - height) / (30 * TERRAIN_SCALE), 0, 1) * clamp(height / (12 * TERRAIN_SCALE), 0, 1)
-            if d < 1 {
-                k := 1 - d * d
-                lift += th.strength * k * k * fade
-            } else if d < 1.8 {
-                s := math.sin((d - 1) / 0.8 * math.PI)
-                lift -= 0.9 * TERRAIN_SCALE * s * fade
-            }
+    for t in g.near[:g.near_n] {
+        centre, core := thermal_core_at(t, p.y, wind)
+        core *= g.heat
+        if core <= 0 { continue }
+        d := la.length(p.xz - centre) / t.radius
+        if d < 1 {
+            k := 1 - d * d
+            lift += core * k * k
+        } else if d < 1.8 {
+            s := math.sin((d - 1) / 0.8 * math.PI)
+            lift -= 0.9 * TERRAIN_SCALE * s * core / t.strength
         }
     }
     return lift
+}
+
+// A thermal and the ground under its foot: where its column is at any height.
+Near_Thermal :: struct { using th: Thermal, ground: f32 }
+MAX_NEAR_THERMALS :: 49 // the 7 x 7 cells around the pilot
+NEAR_CELLS        :: 3
+
+// The thermals of the cells around the pilot, with their ground; redone on
+// entering another cell.
+near_thermals_update :: proc(gs: ^Game_State) {
+    g := &gs.glider
+    p := gs.camera.pos
+    cell := [2]int{int(math.floor(p.x / THERMAL_CELL)), int(math.floor(p.z / THERMAL_CELL))}
+    if g.near_ok && cell == g.near_cell { return }
+    g.near_cell, g.near_ok, g.near_n = cell, true, 0
+    for dz in -NEAR_CELLS ..= NEAR_CELLS {
+        for dx in -NEAR_CELLS ..= NEAR_CELLS {
+            th := thermal_cell(cell.x + dx, cell.y + dz) or_continue
+            ground := max(f32(surface_height_at(int(th.centre.x), int(th.centre.y))), SEA_LEVEL)
+            g.near[g.near_n] = {th = th, ground = ground}
+            g.near_n += 1
+        }
+    }
+}
+
+// Where a thermal's core is at height y, and how much it lifts there (the
+// core's fade with height, as thermal_lift has it, times its strength).
+thermal_core_at :: proc(t: Near_Thermal, y: f32, wind: [3]f32) -> (centre: [2]f32, lift: f32) {
+    height := y - t.ground
+    centre = t.centre + wind.xz * (max(height, 0) * 0.08)
+    fade := clamp((t.top - height) / (30 * TERRAIN_SCALE), 0, 1) * clamp(height / (12 * TERRAIN_SCALE), 0, 1)
+    return centre, t.strength * fade
 }
 
 // Ridge lift: wind blowing into rising ground is pushed upward. Strongest
@@ -253,20 +377,28 @@ glider_toggle_deploy :: proc(gs: ^Game_State) {
     g.aim_yaw   = cam.yaw
     g.aim_pitch = clamp(cam.pitch, -60, 30)
     g.look_yaw, g.look_pitch = 0, 0
-    // The wing catching air: a gentle push forward so a deploy from a jump
-    // doesn't start deep in the stall.
+    g.look_armed = false
+    g.lift_side = 0
+    g.lift_prev = 0
+    // Launch where the pilot looks, through the air: whatever way they were
+    // drifting (a strafe, the last flight's speed) turns that way, its speed
+    // kept, and the wing catching air pushes it up to flying speed so a
+    // deploy from a jump doesn't start deep in the stall. Starting off the
+    // look, or measured over the ground instead of through the air (the
+    // wind), the bank autopilot swerves to correct it.
+    wind := glider_wind(g.wind_time)
     flat := camera_flat_forward(cam^)
-    horiz := [3]f32{cam.velocity.x, 0, cam.velocity.z}
-    along := la.dot(horiz, flat)
-    if along < 11 { cam.velocity += flat * (11 - along) * 0.85 }
+    s := la.length((cam.velocity - wind).xz)
+    if s < 11 { s += (11 - s) * 0.85 }
+    cam.velocity.xz = flat.xz * s + wind.xz
     cam.velocity.y = max(cam.velocity.y * 0.5, -6) // the canopy bites
-    v := cam.velocity
+    v := cam.velocity - wind
     g.heading    = math.to_degrees(math.atan2(v.x, v.z))
     g.path_angle = math.asin(clamp(v.y / max(la.length(v), 0.01), -1, 1))
     g.aoa, g.aoa_vel   = 0.1, 0
     g.bank, g.bank_vel = 0, 0
+    g.bar = 0
     g.turn_rate = 0
-    g.chase_dist = 0.5
 }
 
 @(private="file")
@@ -286,7 +418,9 @@ glider_update :: proc(gs: ^Game_State, mouse_dx, mouse_dy, dt: f32,
     t0 := time.tick_now()
     defer profile_add(.Glider, t0)
 
-    if free_look {
+    // Ctrl still held from a sprint off the cliff steers, until let go.
+    if !free_look { g.look_armed = true }
+    if free_look && g.look_armed {
         g.look_yaw   = clamp(g.look_yaw + mouse_dx * 0.1, -170, 170)
         g.look_pitch = clamp(g.look_pitch - mouse_dy * 0.1, -85, 85)
     } else {
@@ -302,9 +436,23 @@ glider_update :: proc(gs: ^Game_State, mouse_dx, mouse_dy, dt: f32,
 
     // Air at the pilot, sampled once per frame.
     wind := glider_wind(g.wind_time)
+    g.heat = thermal_heat(gs.day)
+    near_thermals_update(gs)
     ridge, ground := ridge_lift(cam.pos, wind)
-    g.lift_here = ridge + thermal_lift(cam.pos, ground, wind)
+    g.lift_here = ridge + thermal_lift(g, cam.pos, wind)
     air := wind + [3]f32{0, g.lift_here, 0}
+    // A thermal lifts the wingtip nearer its core first: the wing rolls
+    // away from the lift (glider_step), and the HUD points to it. Turn
+    // toward the lifted wing to centre.
+    fwd, _ := glider_axes(g.heading, 0, 0)
+    left := [3]f32{fwd.z, 0, -fwd.x} * WINGTIP_REACH
+    side := thermal_lift(g, cam.pos + left, wind) - thermal_lift(g, cam.pos - left, wind)
+    g.lift_side += (side - g.lift_side) * min(dt * 6, 1)
+    // Felt through the seat: air rising faster shoves the pilot up, a sink
+    // drops them (glider_view_update springs it back). The jolt's what tells
+    // you you've hit a thermal, before the climb does.
+    g.kick_vel += clamp(g.lift_here - g.lift_prev, -2, 2) * 0.5
+    g.lift_prev = g.lift_here
 
     steps := clamp(int(math.ceil(dt / GLIDER_SUBSTEP)), 1, 32)
     h := dt / f32(steps)
@@ -312,9 +460,10 @@ glider_update :: proc(gs: ^Game_State, mouse_dx, mouse_dy, dt: f32,
         if !glider_step(gs, h, air, speed_bar, flare, roll_left, roll_right) { break }
     }
 
-    // ─ Camera: view = aim + free look, plus feel effects. ─
+    // ─ Camera: view = aim + free look, plus feel effects. The bar pulled in
+    // tips the view nose-down a little, as the whole wing does. ─
     cam.yaw   = g.aim_yaw + g.look_yaw
-    cam.pitch = clamp(g.aim_pitch + g.look_pitch, -89, 89)
+    cam.pitch = clamp(g.aim_pitch + g.look_pitch - BAR_VIEW_DIP * math.smoothstep(f32(0), 1, g.bar), -89, 89)
 
     // Variometer and height above ground.
     g.vario += (cam.velocity.y - g.vario) * min(dt * 3, 1)
@@ -353,6 +502,8 @@ glider_step :: proc(gs: ^Game_State, dt: f32, air: [3]f32,
     target_bank := clamp(math.to_radians(err) * 1.3, -GLIDER_MAX_BANK, GLIDER_MAX_BANK)
     if roll_left  { target_bank += 0.45 }
     if roll_right { target_bank -= 0.45 }
+    // The lifted wing rises (positive lift_side: the left; bank + is left down).
+    target_bank -= clamp(g.lift_side * 0.09, -0.3, 0.3)
     target_bank = clamp(target_bank, -GLIDER_MAX_BANK, GLIDER_MAX_BANK)
     spring(&g.bank, &g.bank_vel, target_bank, 4.5, dt)
 
@@ -360,12 +511,18 @@ glider_step :: proc(gs: ^Game_State, dt: f32, air: [3]f32,
     // pitch, within what the wing and the pilot can take.
     q := GLIDER_LIFT_K * V * V
     gamma_t := math.to_radians(clamp(g.aim_pitch, -75, 45))
+    // The bar pulled in (W, eased in): the pilot dives below the aim until
+    // up to bar speed, then holds it, the wing kept flat so it can't slow.
+    // (Only flattening the wing drops the nose all at once and plunges.)
+    g.bar = clamp(g.bar + (speed_bar ? dt : -dt) / 1.5, 0, 1)
+    bar := math.smoothstep(f32(0), 1, g.bar)
+    gamma_t -= bar * clamp((GLIDER_BAR_SPEED - V) * 0.04, 0, 0.45)
     gamma_rate := clamp((gamma_t - g.path_angle) * 2.2, -1.2, 1.2)
     want_lift := (GLIDER_GRAVITY * math.cos(g.path_angle) + V * gamma_rate) / max(math.cos(g.bank), 0.45)
     want_lift = clamp(want_lift, -0.5 * GLIDER_GRAVITY, GLIDER_MAX_G * GLIDER_GRAVITY)
     aoa_t := want_lift / (q * GLIDER_CL_SLOPE)
     max_aoa := GLIDER_MAX_AOA
-    if speed_bar { max_aoa = 0.06 } // bar pulled in: nose down, fly fast
+    max_aoa = math.lerp(max_aoa, GLIDER_BAR_AOA, bar)
     aoa_t = clamp(aoa_t, GLIDER_MIN_AOA, max_aoa)
     if flare { aoa_t = GLIDER_FLARE_AOA }
     spring(&g.aoa, &g.aoa_vel, aoa_t, 6, dt)
@@ -443,7 +600,7 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
     target_fov:  f32 = 1
     if g.deployed {
         target_roll = g.bank * 0.45
-        target_fov  = 1 + clamp((g.airspeed - 12) / 35, 0, 1) * 0.28
+        target_fov  = 1 + clamp((g.airspeed - 13) / 22, 0, 1) * 0.28 // trim narrow, the bar's speed clearly wider
     } else if cam.sprinting {
         target_fov = 1.1 // the sprint FOV kick
     }
@@ -459,8 +616,11 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
         a * (math.sin(t * 37 + 0.6) * 0.6 + math.sin(t * 71) * 0.4),
     }
 
-    // Landing dip springs back.
+    // Landing dip springs back, and the seat's kick (a little bounce).
     g.land_dip -= g.land_dip * min(dt * 6, 1)
+    g.kick_vel += (-40 * g.kick - 7 * g.kick_vel) * dt
+    g.kick += g.kick_vel * dt
+    g.kick = clamp(g.kick, -0.5, 0.5)
 
     // Third-person chase camera, pulled in when terrain is in the way.
     want: f32 = 0
@@ -476,7 +636,7 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
     }
     rate: f32 = want < g.chase_dist ? 12 : 4 // pull in fast, ease out slowly
     g.chase_dist += (want - g.chase_dist) * min(dt * rate, 1)
-    cam.view_offset = {0, g.land_dip - cam.crouch * CROUCH_VIEW_DROP, 0}
+    cam.view_offset = {0, g.land_dip + g.kick - cam.crouch * CROUCH_VIEW_DROP, 0}
     if g.chase_dist > 0.05 {
         cam.view_offset += back * g.chase_dist + [3]f32{0, 1.2 * clamp(g.chase_dist / 3, 0, 1), 0}
     }
@@ -491,13 +651,15 @@ glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     if !g.deployed || !ent_begin(f) { return }
     ent_scale_about(f, gs.camera.pos, world_scale)
     // The whole pilot in the chase view; from the eyes, just the arms.
-    glider_wing_parts(f, gs.camera.pos, g.heading, g.path_angle + g.aoa, g.bank, g.deploy_t, PLAYER_TINT, pilot = g.chase_dist > 1.5)
+    glider_wing_parts(f, gs.camera.pos, g.heading, g.path_angle + g.aoa, g.bank, g.deploy_t, PLAYER_TINT, pilot = g.chase_dist > 1.5, bar = g.bar)
     ent_end(f)
 }
 
 // A glider with its pilot at the eye p: heading (degrees), pitch and bank
-// (radians), unfolded 0..1. Inside an ent_begin / ent_end.
-glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy_t: f32, tint: [3]f32, pilot: bool) {
+// (radians), unfolded 0..1, the speed bar pulled in 0..1 (the base bar
+// drawn in to the chest: what tells you W is held). Inside an ent_begin /
+// ent_end.
+glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy_t: f32, tint: [3]f32, pilot: bool, bar: f32 = 0) {
     fwd, up := glider_axes(heading, pitch, bank)
     left := la.cross(up, fwd)
     rot := basis_from_axes(left, up, fwd)
@@ -506,16 +668,18 @@ glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy
     // A-frame (two downtubes and the base bar) and the arms holding the bar.
     at := proc(p: [3]f32, rot: Basis, b: [3]f32) -> [3]f32 { return p + rot * b }
     apex := at(p, rot, {0, 1.25, 0.15})
-    bar_l := at(p, rot, {0.75, -0.45, 0.75})
-    bar_r := at(p, rot, {-0.75, -0.45, 0.75})
+    pull := math.smoothstep(f32(0), 1, bar)
+    grip := [3]f32{0.46, -0.42 + 0.07 * pull, 0.72 - 0.24 * pull} // the right hand on the bar; the left mirrors it
+    bar_l := at(p, rot, {0.75, grip.y - 0.03, grip.z + 0.03})
+    bar_r := at(p, rot, {-0.75, grip.y - 0.03, grip.z + 0.03})
     ent_segment(f, .Rod, apex, bar_l, up)
     ent_segment(f, .Rod, apex, bar_r, up)
     ent_segment(f, .Rod, bar_l, bar_r, up)
     if pilot {
-        pilot_add_parts(f, p, rot, tint)
+        pilot_add_parts(f, p, rot, tint, grip)
     } else {
-        ent_segment(f, .Arm, at(p, rot, {0.2, -0.16, -0.05}), at(p, rot, {0.48, -0.42, 0.72}), up, tint)
-        ent_segment(f, .Arm, at(p, rot, {-0.2, -0.16, -0.05}), at(p, rot, {-0.48, -0.42, 0.72}), up, tint)
+        ent_segment(f, .Arm, at(p, rot, {0.2, -0.16, -0.05}), at(p, rot, grip), up, tint)
+        ent_segment(f, .Arm, at(p, rot, {-0.2, -0.16, -0.05}), at(p, rot, grip * {-1, 1, 1}), up, tint)
     }
 }
 

@@ -673,13 +673,20 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         atmos          = {gs.sky.mist, 0, 0, 0},
     }
     sky_thermals_update(gs)
-    for th, i in gs.sky_thermals[:gs.sky_thermal_count] {
-        // The column leans downwind ~0.08 m per metre of height.
-        c := th.centre + glider_wind(gs.glider.wind_time).xz * ((CUMULUS_BASE - th.ground) * 0.08)
-        uniform.thermals[i] = {c.x, c.y, th.cloud_r, th.strength}
-        for k in 0 ..< 4 { uniform.cloud_puffs[i * 4 + k] = th.puffs[k] }
+    // The cumulus shrink as the sun sinks and the thermals under them die,
+    // and are gone by night.
+    heat := thermal_heat(gs.day)
+    clouds := 0
+    if heat > 0.05 {
+        for th in gs.sky_thermals[:gs.sky_thermal_count] {
+            // The column leans downwind ~0.08 m per metre of height.
+            c := th.centre + glider_wind(gs.glider.wind_time).xz * ((CUMULUS_BASE - th.ground) * 0.08)
+            uniform.thermals[clouds] = {c.x, c.y, th.cloud_r * (0.4 + 0.6 * heat), th.strength}
+            for k in 0 ..< 4 { uniform.cloud_puffs[clouds * 4 + k] = th.puffs[k] }
+            clouds += 1
+        }
     }
-    uniform.thermal_count.x = i32(gs.sky_thermal_count)
+    uniform.thermal_count.x = i32(clouds)
     uniform.hand_light = hand_light(gs, render_pos, fwd, right, up)
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 

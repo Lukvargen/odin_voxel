@@ -357,6 +357,28 @@ bench_carve_cave :: proc(gs: ^Game_State) {
 }
 
 // Save the current out_texture (tone-mapped RGBA16F) as a BMP.
+// A frame with the HUD over it (ui_init first), 1280 x 720, saved as a BMP.
+bench_hud_shot :: proc(gs: ^Game_State, path: string) {
+    flush_gpu_uploads(gs)
+    if fence := gpu_render(gs, want_fence = true); fence != nil {
+        _ = SDL.WaitForGPUFences(gs.gpu_device, true, &fence, 1)
+        SDL.ReleaseGPUFence(gs.gpu_device, fence)
+    }
+    r := gs.ui.renderer_data.renderer
+    target := SDL.CreateTexture(r, .RGBA32, .TARGET, 1280, 720)
+    _ = SDL.SetRenderTarget(r, target)
+    ui_draw(gs, 1.0 / 60.0) // Clay measures on the first layout, positions on the second
+    ui_draw(gs, 0)
+    surf := SDL.RenderReadPixels(r, nil)
+    if surf == nil || !SDL.SaveBMP(surf, strings.clone_to_cstring(path, context.temp_allocator)) {
+        fmt.eprintln("bench: couldn't save", path, SDL.GetError())
+    }
+    SDL.DestroySurface(surf)
+    _ = SDL.SetRenderTarget(r, nil)
+    SDL.DestroyTexture(target)
+    free_all(context.temp_allocator)
+}
+
 bench_screenshot :: proc(gs: ^Game_State, path: string) {
     w := u32(gs.render_w); h := u32(gs.render_h)
     size := w * h * 8
@@ -408,6 +430,113 @@ bench_world_stats :: proc(gs: ^Game_State) {
     fmt.printf("bench: far tiles %d of %d\n", far, len(gs.far_tiles))
 }
 
+// Opening the wing hands-off, from a few starts: it should settle straight
+// toward where the pilot looked, not swerve. Prints the worst bank and how
+// far off the look the heading ends.
+bench_glider_deploys :: proc(gs: ^Game_State, at: [3]f32) {
+    g := &gs.glider
+    cam := &gs.camera
+    Start :: struct { name: string, vel: [3]f32, wind_t: f32 }
+    starts := []Start{
+        {"from a drop",            {0, -8, 0},   0},
+        {"walking jump",           {3, 2, 5},    0},
+        {"sideways momentum",      {-14, -3, 6}, 0},
+        {"drop, other wind",       {0, -8, 0},   900},
+    }
+    for st in starts {
+        cam.pos, cam.velocity, cam.on_ground = at, st.vel, false
+        cam.yaw, cam.pitch = 30, -5
+        g.wind_time = st.wind_t
+        glider_toggle_deploy(gs)
+        worst: f32 = 0
+        for _ in 0 ..< 180 { // 3 s, no input
+            glider_update(gs, 0, 0, 1.0 / 60, false, false, false, false, false)
+            worst = max(worst, abs(g.bank))
+            if !g.deployed { break }
+        }
+        fmt.printf("  deploy %-20s worst bank %5.1f°  heading off the look by %+6.1f° after 3 s\n",
+            st.name, worst * 57.3, wrap_angle(g.heading - 30))
+        if g.deployed { glider_toggle_deploy(gs) }
+    }
+
+    // A strong thermal near the start, passed with its core off the left
+    // wing: the left wing should lift (bank right, negative) and the HUD's
+    // lift_side point left (positive).
+    // Where thermals form: 30 x 30 cells around the start, by the ground
+    // under each cell's middle, and what working them out costs.
+    {
+        cx, cz := int(math.floor(at.x / THERMAL_CELL)), int(math.floor(at.z / THERMAL_CELL))
+        cells, have, strong: [Biome]int
+        sum: [Biome]f32
+        t0 := time.tick_now()
+        for dz in -15 ..< 15 { for dx in -15 ..< 15 {
+            gx, gz := cx + dx + 1000, cz + dz // fresh cells, not cached by the flights below
+            th, ok := thermal_cell(gx, gz)
+            b := terrain_at(int((f32(gx) + 0.5) * THERMAL_CELL), int((f32(gz) + 0.5) * THERMAL_CELL)).biome
+            cells[b] += 1
+            if ok {
+                have[b] += 1
+                sum[b] += th.strength / TERRAIN_SCALE
+                if th.strength >= THERMAL_STRONG { strong[b] += 1 }
+            }
+        }}
+        ms := time.duration_milliseconds(time.tick_since(t0))
+        fmt.printf("  thermals: %.3f ms per cell (900 cells)\n", ms / 900)
+        for b in Biome {
+            if cells[b] == 0 { continue }
+            fmt.printf("    %-10s %4d cells  %3.0f%% have one  %3.0f%% strong  avg %.1f m/s (design)\n", b, cells[b],
+                100 * f32(have[b]) / f32(cells[b]), 100 * f32(strong[b]) / f32(cells[b]), have[b] > 0 ? sum[b] / f32(have[b]) : 0)
+        }
+    }
+
+    best, ground, y, found := bench_strong_thermal(at)
+    if !found { return }
+    g.wind_time = 0
+    day_set_hour(gs, 13, settle = true) // full sun for the pass
+    defer day_set_hour(gs, DAY_START_HOUR, settle = true)
+    fmt.printf("  heat at 13:00 %.2f, at %.1f h %.2f, at 22 h %.2f\n", thermal_heat(gs.day),
+        f32(DAY_START_HOUR), thermal_heat({hour = DAY_START_HOUR}), thermal_heat({hour = 22}))
+    core, core_lift := thermal_core_at({th = best, ground = ground}, y, glider_wind(0))
+    // Heading +z (yaw 0), the core 0.6 radii off the left wing.
+    fwd, _ := glider_axes(0, 0, 0)
+    left := [3]f32{fwd.z, 0, -fwd.x}
+    fmt.printf("  thermal: strength %.1f radius %.0f, %.1f m/s in the core at the pass's height\n", best.strength, best.radius, core_lift)
+    start := [3]f32{core.x, y, core.y} - left * best.radius * 0.6 - fwd * 60
+    cam.pos, cam.velocity, cam.on_ground = start, {0, -2, 14}, false
+    cam.yaw, cam.pitch = 0, -5
+    glider_toggle_deploy(gs)
+    g.deploy_t = 1
+    kick_up, kick_down: f32
+    for i in 0 ..< 360 {
+        glider_update(gs, 0, 0, 1.0 / 60, false, false, false, false, false)
+        glider_view_update(gs, 1.0 / 60)
+        kick_up, kick_down = max(kick_up, g.kick), min(kick_down, g.kick)
+        if !g.deployed { break }
+        if i % 30 == 29 {
+            fmt.printf("  thermal pass t=%.1f  lift %+5.2f  lift_side %+5.2f  bank %+5.1f°  hdg %+6.1f  vario %+5.2f\n",
+                f32(i + 1) / 60, g.lift_here, g.lift_side, g.bank * 57.3, wrap_angle(g.heading), g.vario)
+        }
+    }
+    fmt.printf("  seat kick: up to %+.2f m, down to %+.2f m\n", kick_up, kick_down)
+    if g.deployed { glider_toggle_deploy(gs) }
+}
+
+
+@(private="file")
+wrap_angle :: proc(a: f32) -> f32 { return math.mod(a + 540, 360) - 180 }
+
+// The strongest thermal within three cells of `at`, its ground, and a height
+// 60 m (design) up it.
+bench_strong_thermal :: proc(at: [3]f32) -> (best: Thermal, ground, y: f32, found: bool) {
+    cx, cz := int(math.floor(at.x / THERMAL_CELL)), int(math.floor(at.z / THERMAL_CELL))
+    for dz in -3 ..= 3 { for dx in -3 ..= 3 {
+        th := thermal_cell(cx + dx, cz + dz) or_continue
+        if !found || th.strength > best.strength { best, found = th, true }
+    }}
+    ground = max(f32(surface_height_at(int(best.centre.x), int(best.centre.y))), SEA_LEVEL)
+    return best, ground, ground + 60 * TERRAIN_SCALE, found
+}
+
 // Scripted flight: prints the flight model's numbers for a few manoeuvres,
 // then times and screenshots first-person, look-up and chase views.
 bench_glider_run :: proc(gs: ^Game_State) {
@@ -420,6 +549,10 @@ bench_glider_run :: proc(gs: ^Game_State) {
     cam.on_ground = false
     cam.yaw, cam.pitch = 30, -5
     g.equipped = true
+    bench_glider_deploys(gs, {spawn.x, surf + 180, spawn.z})
+    cam.pos = {spawn.x, surf + 180, spawn.z}
+    cam.velocity = {}
+    cam.yaw, cam.pitch = 30, -5
     glider_toggle_deploy(gs)
 
     dt := f32(1.0 / 60.0)
@@ -428,11 +561,12 @@ bench_glider_run :: proc(gs: ^Game_State) {
         {"trim (aim -6)",      8, -6,  0,   false, false},
         {"aim level",          5,  0,  0,   false, false},
         {"turn left 180",      5, -6,  180, false, false},
-        {"dive (aim -60)",     4, -60, 0,   false, false},
-        {"pull up (aim +30)",  3,  30, 0,   false, false},
         {"speed bar",          6, -6,  0,   true,  false},
+        {"bar released",       5, -6,  0,   false, false},
         {"flare",              2, -6,  0,   false, true},
         {"recover",            5, -10, 0,   false, false},
+        {"dive (aim -60)",     4, -60, 0,   false, false},
+        {"pull up (aim +30)",  3,  30, 0,   false, false},
     }
     for ph in phases {
         start_yaw := g.aim_yaw
@@ -487,18 +621,20 @@ bench_glider_run :: proc(gs: ^Game_State) {
         floor_div(int(cam.pos.y), CHUNK_VOXELS),
         floor_div(int(cam.pos.z), CHUNK_VOXELS),
     }
-    shots := []struct{ name: string, look_pitch, look_yaw: f32, third: bool }{
-        {"glider_fp",    0,   0,  false},
-        {"glider_up",    70,  20, false},
-        {"glider_down",  -55, 0,  false},
-        {"glider_chase", -10, 0,  true},
+    shots := []struct{ name: string, look_pitch, look_yaw: f32, third: bool, bar: f32 }{
+        {"glider_fp",     0,   0,  false, 0},
+        {"glider_fp_bar", 0,   0,  false, 1},
+        {"glider_up",     70,  20, false, 0},
+        {"glider_down",   -55, 0,  false, 0},
+        {"glider_chase",  -10, 0,  true,  0},
     }
     for sh in shots {
         g.look_pitch, g.look_yaw = sh.look_pitch, sh.look_yaw
+        g.bar = sh.bar
         g.third_person = sh.third
         g.chase_dist = sh.third ? 6.5 : 0
         cam.yaw   = g.aim_yaw + g.look_yaw
-        cam.pitch = clamp(g.aim_pitch + g.look_pitch, -89, 89)
+        cam.pitch = clamp(g.aim_pitch + g.look_pitch - BAR_VIEW_DIP * g.bar, -89, 89)
         cam.roll  = g.bank * 0.45
         cam.view_offset = {}
         if sh.third {

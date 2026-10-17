@@ -391,7 +391,7 @@ basis_hang_along :: proc(d, ref: [3]f32) -> Basis {
 
 // The pilot lying prone under the glider (body frame rot at the eye `p`),
 // hands on the base bar. Third person only.
-pilot_add_parts :: proc(f: ^Ent_Frame, p: [3]f32, rot: Basis, tint := PLAYER_TINT) {
+pilot_add_parts :: proc(f: ^Ent_Frame, p: [3]f32, rot: Basis, tint := PLAYER_TINT, grip := [3]f32{0.48, -0.42, 0.72}) {
     prone := rot * basis_rot_x(math.PI / 2) // humanoid up -> glider forward, face -> down
     feet := p + rot * [3]f32{0, 0.22, -1.56}
     hips := [3]f32{0, 0.74, 0}
@@ -402,7 +402,7 @@ pilot_add_parts :: proc(f: ^Ent_Frame, p: [3]f32, rot: Basis, tint := PLAYER_TIN
     up := rot * [3]f32{0, 1, 0}
     for side in ([2]f32{1, -1}) {
         shoulder := feet + prone * (hips + [3]f32{0.27 * side, 0.52, 0})
-        hand := p + rot * [3]f32{0.5 * side, -0.42, 0.72}
+        hand := p + rot * [3]f32{grip.x * side, grip.y, grip.z}
         d := hand - shoulder
         ent_part(f, .Hum_Arm, shoulder, basis_hang_along(d, up), {1, la.length(d) / 0.53, 1}, tint)
     }

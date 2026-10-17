@@ -1,7 +1,6 @@
 package main
 
 import "core:fmt"
-import "core:strings"
 import "core:time"
 import SDL "vendor:sdl3"
 
@@ -51,25 +50,7 @@ bench_build_run :: proc(gs: ^Game_State) {
     before := checksum(gs, base)
 
     shot :: proc(gs: ^Game_State, dir, name: string) {
-        flush_gpu_uploads(gs)
-        if fence := gpu_render(gs, want_fence = true); fence != nil {
-            _ = SDL.WaitForGPUFences(gs.gpu_device, true, &fence, 1)
-            SDL.ReleaseGPUFence(gs.gpu_device, fence)
-        }
-        r := gs.ui.renderer_data.renderer
-        target := SDL.CreateTexture(r, .RGBA32, .TARGET, 1280, 720)
-        _ = SDL.SetRenderTarget(r, target)
-        ui_draw(gs, 1.0 / 60.0) // Clay measures on the first layout, positions on the second
-        ui_draw(gs, 0)
-        surf := SDL.RenderReadPixels(r, nil)
-        path := fmt.tprintf("%s/build_%s.bmp", dir, name)
-        if surf == nil || !SDL.SaveBMP(surf, strings.clone_to_cstring(path, context.temp_allocator)) {
-            fmt.eprintln("bench build: couldn't save", path, SDL.GetError())
-        }
-        SDL.DestroySurface(surf)
-        _ = SDL.SetRenderTarget(r, nil)
-        SDL.DestroyTexture(target)
-        free_all(context.temp_allocator)
+        bench_hud_shot(gs, fmt.tprintf("%s/build_%s.bmp", dir, name))
     }
     timed :: proc(gs: ^Game_State, what: string, r: Edit_Region, block: Block_Type, mask := Build_Mask.All) {
         t0 := time.tick_now()

@@ -7,8 +7,9 @@ package main
 // While playing there's little on screen: the crosshair and target outline,
 // the hotbar (put away with the sword drawn), toasts, the biome's name for a
 // moment when you enter one, health only while hurt, and damage numbers over
-// what you hit. The glider's instruments while gliding, the controls card on
-// H, the debug panel on F3; F1 hides it all.
+// what you hit. Gliding, nothing but where you're steering while looking
+// around (the flight shows in the world). The controls card on H, the debug
+// panel on F3; F1 hides it all.
 // Screens: the pause menu (Esc) with graphics / sound / controls tabs, and the
 // block picker (E).
 
@@ -570,19 +571,6 @@ anchored :: proc(at: clay.FloatingAttachPointType, offset: [2]f32, z: i16 = 10) 
     }
 }
 
-// A small rounded tag: "FLYING", "THERMAL", ...
-@(private="file")
-chip :: proc(label: string, color: clay.Color, filled := false) {
-    if clay.UI()({
-        layout = {padding = {7, 7, 3, 3}},
-        backgroundColor = filled ? color : {color.r, color.g, color.b, 42},
-        cornerRadius = clay.CornerRadiusAll(4),
-        border = filled ? {} : {{color.r, color.g, color.b, 90}, clay.BorderOutside(1)},
-    }) {
-        text(label, filled ? COLOR_ON_ACCENT : color, 11, FONT_ID_TITLE)
-    }
-}
-
 // A section heading: an amber tick, then the words.
 @(private="file")
 heading :: proc(s: string, a: f32 = 1) {
@@ -647,9 +635,6 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
         crosshair_bar("CrossH", cx - 9, cy - 1, 18, 2)
         crosshair_bar("CrossV", cx - 1, cy - 9, 2, 18)
     }
-
-    // The compass only while gliding, when where you're heading matters.
-    if gliding { compass_layout(gs) }
 
     // Entering a biome: its name for a moment. At startup, where the
     // controls are.
@@ -809,54 +794,6 @@ chat_layout :: proc(gs: ^Game_State, h: f32) {
     }
 }
 
-// A ribbon along the top: the winds and ticks between, turning with you.
-@(private="file")
-compass_layout :: proc(gs: ^Game_State) {
-    WIDTH :: f32(300)
-    SPAN  :: f32(110) // degrees shown across the ribbon
-    // Compass bearing: yaw 0 looks along +Z (south, 180), yaw 90 along +X (east, 90).
-    yaw := gs.glider.deployed ? gs.glider.heading : gs.camera.yaw
-    bearing := math.mod(math.mod(180 - yaw, 360) + 360, 360)
-    if clay.UI(clay.ID("Compass"))({
-        layout = {sizing = {clay.SizingFixed(WIDTH), clay.SizingFixed(26)}},
-        floating = anchored(.CenterTop, {0, 14}),
-        custom = deco(.Glass_Soft, radius = 13),
-        clip = {horizontal = true},
-    }) {
-        LABELS :: [8]string{"N", "NE", "E", "SE", "S", "SW", "W", "NW"}
-        labels := LABELS
-        for k in 0 ..< 24 {
-            mark := f32(k) * 15
-            d := math.mod(mark - bearing + 540, 360) - 180
-            if abs(d) > SPAN / 2 { continue }
-            x := WIDTH / 2 + d / SPAN * WIDTH
-            edge := 1 - math.smoothstep(f32(0.55), 1, abs(d) / (SPAN / 2))
-            if k % 3 == 0 {
-                label := labels[k / 3]
-                main_wind := len(label) == 1
-                col := label == "N" ? COLOR_BAD : (main_wind ? COLOR_TEXT : COLOR_TEXT_DIM)
-                if clay.UI(clay.ID("Wind", u32(k)))({
-                    floating = {attachTo = .Parent, offset = {x, 13}, zIndex = 12, attachment = {.CenterCenter, .LeftTop}, pointerCaptureMode = .Passthrough},
-                }) {
-                    text(label, fade(col, edge), main_wind ? 14 : 11, FONT_ID_TITLE)
-                }
-            } else {
-                if clay.UI(clay.ID("Tick", u32(k)))({
-                    layout = {sizing = {clay.SizingFixed(1), clay.SizingFixed(6)}},
-                    floating = {attachTo = .Parent, offset = {x, 13}, zIndex = 12, attachment = {.CenterCenter, .LeftTop}, pointerCaptureMode = .Passthrough},
-                    backgroundColor = fade(COLOR_TEXT_DIM, edge * 0.8),
-                }) {}
-            }
-        }
-        // Where you're facing: a small amber notch.
-        if clay.UI(clay.ID("CompassNotch"))({
-            layout = {sizing = {clay.SizingFixed(2), clay.SizingFixed(5)}},
-            floating = {attachTo = .Parent, offset = {WIDTH / 2, 0}, zIndex = 13, attachment = {.CenterTop, .LeftTop}, pointerCaptureMode = .Passthrough},
-            backgroundColor = COLOR_ACCENT,
-        }) {}
-    }
-}
-
 // Nine slots along the bottom, the selected block's name over them.
 @(private="file")
 hotbar_layout :: proc(gs: ^Game_State) {
@@ -868,8 +805,6 @@ hotbar_layout :: proc(gs: ^Game_State) {
         if ui.block_name_t > 0 {
             a := min(ui.block_name_t / 0.5, 1)
             text(block_name(gs.selected_block), fade(COLOR_TEXT, a), 16, FONT_ID_TITLE)
-        } else if gs.glider.equipped {
-            text("Glider ready: jump, then Space in the air", COLOR_ACCENT, 14, FONT_ID_TITLE)
         }
         if clay.UI(clay.ID("Hotbar"))({
             layout = {padding = clay.PaddingAll(7), childGap = 5, childAlignment = {y = .Center}},
@@ -1145,6 +1080,27 @@ draw_block_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, b: Block_Type) {
     SDL.RenderGeometry(r, nil, &verts[0], c.int(nv), &idx[0], c.int(ni))
 }
 
+// A world-space line (p, q relative to the eye) onto the screen, clipped
+// against a near plane; o shifts it (a shadow line under a light one).
+@(private="file")
+view_line :: proc(r: ^SDL.Renderer, p, q: [3]f32, fwd, right, up: [3]f32, w, h: f32, o: f32 = 0, thick := false) {
+    NEAR :: 0.05
+    project :: proc(p: [3]f32, fwd, right, up: [3]f32, w, h: f32) -> [2]f32 {
+        d := la.dot(p, fwd)
+        nx := la.dot(p, right) / d / la.length2(right)
+        ny := la.dot(p, up) / d / la.length2(up)
+        return {(nx + 1) * 0.5 * w, (1 - ny) * 0.5 * h}
+    }
+    p, q := p, q
+    dp, dq := la.dot(p, fwd), la.dot(q, fwd)
+    if dp < NEAR && dq < NEAR { return }
+    if dp < NEAR { p = la.lerp(p, q, (NEAR - dp) / (dq - dp)) }
+    if dq < NEAR { q = la.lerp(q, p, (NEAR - dq) / (dp - dq)) }
+    s, e := project(p, fwd, right, up, w, h), project(q, fwd, right, up, w, h)
+    SDL.RenderLine(r, s.x + o, s.y + o, e.x + o, e.y + o)
+    if thick { SDL.RenderLine(r, s.x + 0.5, s.y + 0.5, e.x + 0.5, e.y + 0.5) }
+}
+
 // What a click would edit, outlined: the voxel you point at (and the brush),
 // the area being dragged out, or the shape (build_tools.odin). Fills are
 // light, clears red, and anything too big to apply amber.
@@ -1156,13 +1112,6 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
     CLEAR_COL :: [3]u8{255, 110, 95}
     eye := camera_view_eye(gs.camera)
     fwd, right, up := camera_view_basis(gs.camera, w / h)
-    // Point -> pixels; the edge is clipped against a near plane first.
-    project :: proc(p: [3]f32, fwd, right, up: [3]f32, w, h: f32) -> [2]f32 {
-        d := la.dot(p, fwd)
-        nx := la.dot(p, right) / d / la.length2(right)
-        ny := la.dot(p, up) / d / la.length2(up)
-        return {(nx + 1) * 0.5 * w, (1 - ny) * 0.5 * h}
-    }
     lo, hi := pv.segs[0][0], pv.segs[0][0]
     for sg in pv.segs { lo, hi = la.min(lo, sg[0], sg[1]), la.max(hi, sg[0], sg[1]) }
     dist := la.length(la.clamp(eye, lo, hi) - eye)
@@ -1175,7 +1124,6 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
     }
     r := gs.ui.renderer_data.renderer
     SDL.SetRenderDrawBlendMode(r, {.BLEND})
-    NEAR :: 0.05
     // The faint carve and cursor outlines first, then the main one (a dark
     // line under a light one), then the area's pushed face.
     for pass in 0 ..< 5 {
@@ -1198,15 +1146,7 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
             SDL.SetRenderDrawColor(r, u8(COLOR_ACCENT.r), u8(COLOR_ACCENT.g), u8(COLOR_ACCENT.b), alpha)
         }
         for sg in segs {
-            p, q := sg[0] - eye, sg[1] - eye
-            dp, dq := la.dot(p, fwd), la.dot(q, fwd)
-            if dp < NEAR && dq < NEAR { continue }
-            if dp < NEAR { p = la.lerp(p, q, (NEAR - dp) / (dq - dp)) }
-            if dq < NEAR { q = la.lerp(q, p, (NEAR - dq) / (dp - dq)) }
-            s, e := project(p, fwd, right, up, w, h), project(q, fwd, right, up, w, h)
-            o: f32 = pass == 2 ? 1 : 0
-            SDL.RenderLine(r, s.x + o, s.y + o, e.x + o, e.y + o)
-            if pass >= 3 { SDL.RenderLine(r, s.x + 0.5, s.y + 0.5, e.x + 0.5, e.y + 0.5) }
+            view_line(r, sg[0] - eye, sg[1] - eye, fwd, right, up, w, h, pass == 2 ? 1 : 0, pass >= 3)
         }
     }
 }
@@ -1456,73 +1396,16 @@ hud_marker :: proc(id: string, x, y, size: f32, color: clay.Color, filled: bool)
     }) {}
 }
 
-// One instrument: a big number over its unit and name.
-@(private="file")
-gauge :: proc(value, unit, name: string, color: clay.Color) {
-    if clay.UI()({layout = {layoutDirection = .TopToBottom, sizing = {clay.SizingFixed(96), clay.SizingFit()}, childAlignment = {x = .Center}, childGap = 1}}) {
-        if clay.UI()({layout = {childGap = 3, childAlignment = {y = .Bottom}}}) {
-            text(value, color, 26, FONT_ID_TITLE)
-            text(unit, COLOR_TEXT_DIM, 12)
-        }
-        text(name, COLOR_TEXT_FAINT, 10, FONT_ID_TITLE)
-    }
-}
-
-// Hang glider: instruments, aim and flight-path markers, stall warning.
+// Hang glider: no instruments; the flight shows in the world (the wind's
+// rush and the FOV for speed, the buffet and the cloth's flutter for a
+// stall, the seat's kick for lift, the wing lifting toward a thermal). Only
+// while Ctrl looks around: a ring where the glider is being steered.
 glider_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     g := &gs.glider
-    if !g.deployed { return }
-
-    // Where the mouse is steering (moves off-centre while free-looking),
-    // and where the glider is actually going.
+    if !g.deployed || abs(g.look_yaw) + abs(g.look_pitch) < 3 { return }
     aim := camera_forward(Camera{yaw = g.aim_yaw, pitch = g.aim_pitch})
     if x, y, ok := glider_project(gs.camera, aim, w, h); ok {
         hud_marker("GliderAim", x, y, 18, {255, 250, 240, 200}, false)
-    }
-    if v := gs.camera.velocity; v.x*v.x + v.y*v.y + v.z*v.z > 1 {
-        if x, y, ok := glider_project(gs.camera, v, w, h); ok {
-            hud_marker("GliderPath", x, y, 8, COLOR_GOOD, true)
-        }
-    }
-
-    if g.stall > 0.25 {
-        if clay.UI(clay.ID("Stall"))({layout = {padding = {16, 16, 7, 8}}, floating = anchored(.CenterCenter, {0, -70}, 20),
-            backgroundColor = {196, 52, 40, 225}, cornerRadius = clay.CornerRadiusAll(7),
-            border = {{255, 160, 140, 120}, clay.BorderOutside(1)}}) {
-            text("STALL   push forward", COLOR_TEXT, 17, FONT_ID_TITLE)
-        }
-    }
-
-    if clay.UI(clay.ID("GliderHud"))({
-        layout = {layoutDirection = .TopToBottom, padding = {16, 16, 11, 11}, childGap = 8, childAlignment = {x = .Center}},
-        floating = anchored(.CenterBottom, {0, -14}),
-        custom = deco(.Glass_Soft, radius = 10),
-    }) {
-        if clay.UI()({layout = {childGap = 10, childAlignment = {y = .Center}}}) {
-            gauge(fmt.tprintf("%.0f", g.airspeed * 3.6), "km/h", "AIRSPEED", COLOR_TEXT)
-            // Vario: the number, and a bar filling up (climb) or down (sink) from the middle.
-            vcol := COLOR_TEXT
-            if g.vario >  0.3 { vcol = COLOR_GOOD }
-            if g.vario < -2.5 { vcol = COLOR_BAD }
-            if clay.UI()({layout = {layoutDirection = .TopToBottom, sizing = {clay.SizingFixed(10), clay.SizingFixed(52)}},
-                backgroundColor = COLOR_BAR_BG, cornerRadius = clay.CornerRadiusAll(3)}) {
-                if clay.UI(clay.ID("VarioTick"))({layout = {sizing = {clay.SizingFixed(16), clay.SizingFixed(2)}},
-                    floating = {attachTo = .Parent, zIndex = 12, attachment = {.CenterCenter, .CenterCenter}, pointerCaptureMode = .Passthrough},
-                    backgroundColor = {255, 255, 255, 160}}) {}
-                t := clamp(g.vario / 5, -1, 1)
-                up := max(t, 0) * 0.5
-                down := max(-t, 0) * 0.5
-                if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingPercent(0.5 - up)}}}) {}
-                if up > 0.01 { if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingPercent(up)}}, backgroundColor = COLOR_GOOD, cornerRadius = clay.CornerRadiusAll(3)}) {} }
-                if down > 0.01 { if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingPercent(down)}}, backgroundColor = COLOR_BAD, cornerRadius = clay.CornerRadiusAll(3)}) {} }
-            }
-            gauge(fmt.tprintf("%+.1f", g.vario), "m/s", "VARIO", vcol)
-            gauge(fmt.tprintf("%.0f", max(g.agl, 0)), "m", "HEIGHT", COLOR_TEXT)
-        }
-        if clay.UI()({layout = {childGap = 8, childAlignment = {y = .Center}}}) {
-            if g.lift_here > 0.8 { chip("THERMAL", COLOR_GOOD, true) }
-            text("mouse steer   Ctrl look   W fast   S flare   A/D lean   F5 view   Space let go", COLOR_TEXT_FAINT, 12)
-        }
     }
 }
 
