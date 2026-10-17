@@ -276,16 +276,9 @@ gpu_init :: proc(gs: ^Game_State) {
     // 1 byte/voxel, read by the shader as StructuredBuffer<uint> (4 voxels
     // per uint); the mask pool is 16 uints (512 occupancy bits) per brick.
     // Both are filled per brick by flush_gpu_uploads.
-    voxel_buf_size := u32(MAX_RESIDENT_BRICKS * VOXELS_PER_BRICK)
-    mask_buf_size  := u32(MAX_RESIDENT_BRICKS * MASK_U32_PER_BRICK * size_of(u32))
     index_buf_size := u32(len(gs.gpu_index)  * size_of(i32))
     region_bytes   := u32(REGION_COUNT * size_of(u32)) // after the index (see pipeline above)
-
-    gs.voxel_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
-        usage = {.COMPUTE_STORAGE_READ},
-        size  = voxel_buf_size,
-    })
-    assert(gs.voxel_buf != nil, "Failed to create voxel buffer")
+    gpu_create_pool_buffers(gs)
 
     gs.index_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
         usage = {.COMPUTE_STORAGE_READ},
@@ -307,17 +300,6 @@ gpu_init :: proc(gs: ^Game_State) {
         size  = light_index_size,
     })
     assert(gs.light_index_buf != nil, "Failed to create light index buffer")
-    gs.light_pool_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
-        usage = {.COMPUTE_STORAGE_READ},
-        size  = MAX_LIGHT_BRICKS * LIGHT_BRICK_BYTES,
-    })
-    assert(gs.light_pool_buf != nil, "Failed to create light pool buffer")
-
-    gs.mask_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
-        usage = {.COMPUTE_STORAGE_READ},
-        size  = mask_buf_size,
-    })
-    assert(gs.mask_buf != nil, "Failed to create mask buffer")
 
     gs.region_dirty = true
 
@@ -342,6 +324,50 @@ gpu_init :: proc(gs: ^Game_State) {
 Staging :: struct {
     buf:  ^SDL.GPUTransferBuffer,
     size: int,
+}
+
+// The buffers the brick pools fill, sized to the pools (world.odin
+// brick_cap_for / light_cap_for): voxels at a byte a voxel, the shader
+// reading them as StructuredBuffer<uint> (4 voxels per uint); occupancy
+// masks, 16 uints (512 bits) a brick; light bricks, a u16 a voxel.
+gpu_create_pool_buffers :: proc(gs: ^Game_State) {
+    bricks := len(gs.brick_pool.free_ids)
+    make_buf :: proc(gs: ^Game_State, size: int, what: string) -> ^SDL.GPUBuffer {
+        b := SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{usage = {.COMPUTE_STORAGE_READ}, size = u32(size)})
+        fmt.assertf(b != nil, "Failed to create the %s buffer", what)
+        return b
+    }
+    gs.voxel_buf      = make_buf(gs, bricks * VOXELS_PER_BRICK, "voxel")
+    gs.mask_buf       = make_buf(gs, bricks * MASK_U32_PER_BRICK * size_of(u32), "mask")
+    gs.light_pool_buf = make_buf(gs, len(gs.light_pool.free_ids) * LIGHT_BRICK_BYTES, "light pool")
+}
+
+// A new view distance: the brick pools and their GPU buffers made again at
+// its size, and every loaded chunk given bricks in them and re-sent (the
+// next frames' uploads; a hitch of a moment, only when the setting
+// changes). The old buffers go once the GPU is done with them.
+gpu_resize_pools :: proc(gs: ^Game_State) {
+    bricks, lights := brick_cap_for(view_radius), light_cap_for(view_radius)
+    if bricks == len(gs.brick_pool.free_ids) && lights == len(gs.light_pool.free_ids) { return }
+    for slot in 0 ..< len(gs.gpu_index) {
+        if gs.gpu_index[slot] >= 0 { set_slot_index(gs, slot, -1) }
+        if gs.gpu_light_index[slot] >= 0 { gs.gpu_light_index[slot] = light_index_uniform(LIGHT_SKY) }
+    }
+    delete(gs.brick_pool.free_ids)
+    delete(gs.light_pool.free_ids)
+    pool_init(&gs.brick_pool, bricks)
+    pool_init(&gs.light_pool, lights)
+    clear(&gs.brick_starved)
+    clear(&gs.light_starved)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.voxel_buf)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.mask_buf)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.light_pool_buf)
+    gpu_create_pool_buffers(gs)
+    for slot in 0 ..< len(gs.gpu_index) {
+        if gs.gpu_chunk_owner[slot][0] == 0x7fffffff { continue }
+        gpu_sync_slot(gs, slot)
+        append(&gs.light_dirty, slot)
+    }
 }
 
 staging_map :: proc(gs: ^Game_State, st: ^Staging, size: int) -> rawptr {
@@ -380,7 +406,15 @@ flush_gpu_uploads :: proc(gs: ^Game_State) {
         gs.upload_cmd = nil
         profile_add(.Upload_All, t0)
     }
+    // A big one-off upload (loading in, a new view distance) grew a staging
+    // buffer far past what a frame needs: let it go (released once the GPU
+    // is done with it) rather than keep hundreds of MB for good.
+    for st in ([3]^Staging{&gs.stage_voxel, &gs.stage_light, &gs.stage_far}) {
+        if st.size > STAGING_KEEP { staging_release(gs, st) }
+    }
 }
+
+STAGING_KEEP :: 32 << 20
 
 // Flush all dirty chunk slots accumulated this frame: each mixed chunk's voxels plus its occupancy mask (built here
 // from the voxels), and the slot tables if they changed. Upload cost is
@@ -388,6 +422,11 @@ flush_gpu_uploads :: proc(gs: ^Game_State) {
 // overhead), not bytes, so the transfer buffer is packed in destination
 // order and emitted as a few coalesced uploads over contiguous runs.
 flush_voxel_uploads :: proc(gs: ^Game_State) {
+    // Chunks that found the voxel pool full (drawn as air) get bricks as
+    // they come free.
+    for len(gs.brick_starved) > 0 && gs.brick_pool.free_top > 0 {
+        gpu_sync_slot(gs, pop(&gs.brick_starved))
+    }
     if len(gs.dirty_slots) == 0 && !gs.index_dirty && !gs.owner_dirty && !gs.region_dirty { return }
     t_up := time.tick_now()
     defer profile_add(.GPU_Upload, t_up)
@@ -550,7 +589,7 @@ flush_light_uploads :: proc(gs: ^Game_State) {
             if lid < 0 {
                 if !g_light_pool_warned {
                     g_light_pool_warned = true
-                    fmt.eprintln("WARNING: light pool exhausted; raise MAX_LIGHT_BRICKS.")
+                    fmt.eprintln("WARNING: light pool exhausted (chunks wait as full sky); raise MAX_LIGHT_BRICKS.")
                     ui_toast(gs, "Light memory full: some places light wrong (try a shorter view distance)", 4)
                 }
                 gs.gpu_light_index[slot] = light_index_uniform(LIGHT_SKY)

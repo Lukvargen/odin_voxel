@@ -54,7 +54,7 @@ bench_relight_run :: proc(gs: ^Game_State) {
     n := light_relight_near(gs, 6)
     fmt.printf("relight: F9 relit %d columns in %.1f ms\n", n, time.duration_milliseconds(time.tick_since(t1)))
     report(gs, "after F9 relight", {f32(x), f32(g), f32(z)}, 64)
-    fmt.printf("relight: light bricks peak %d of %d so far\n", bench_peak_bricks, MAX_LIGHT_BRICKS)
+    fmt.printf("relight: light bricks peak %d of %d so far\n", bench_peak_bricks, len(gs.light_pool.free_ids))
     gpu_check(gs, "after the flight")
 
     // A long wander, as when exploring: the column ring fills and wraps,
@@ -66,12 +66,25 @@ bench_relight_run :: proc(gs: ^Game_State) {
         stream_frame(gs)
     }
     fmt.printf("relight: wandered to %.0f,%.0f; %d columns loaded, light bricks %d of %d used\n",
-        cam.pos.x, cam.pos.z, len(gs.columns), MAX_LIGHT_BRICKS - gs.light_pool.free_top, MAX_LIGHT_BRICKS)
+        cam.pos.x, cam.pos.z, len(gs.columns), len(gs.light_pool.free_ids) - gs.light_pool.free_top, len(gs.light_pool.free_ids))
     gpu_check(gs, "after the wander (streaming)")
     t0 = time.now()
     for !streaming_idle(gs) && time.duration_seconds(time.since(t0)) < 120 { stream_frame(gs) }
     gpu_check(gs, "after the wander (idle)")
-    fmt.printf("relight: light bricks peak %d of %d overall\n", bench_peak_bricks, MAX_LIGHT_BRICKS)
+    fmt.printf("relight: light bricks peak %d of %d overall\n", bench_peak_bricks, len(gs.light_pool.free_ids))
+
+    // A shorter view distance and back: pools and buffers made again at the
+    // new size, everything loaded re-sent.
+    for radius in ([2]int{VIEW_RADII[0], VIEW_RADII[2]}) {
+        t2 := time.tick_now()
+        set_view_radius(gs, radius)
+        stream_frame(gs)
+        ms := time.duration_milliseconds(time.tick_since(t2))
+        for !streaming_idle(gs) && time.duration_seconds(time.since(t0)) < 600 { stream_frame(gs) }
+        fmt.printf("relight: view radius %d: switch frame %.0f ms; pools %d voxel + %d light bricks; %d columns\n",
+            radius, ms, len(gs.brick_pool.free_ids), len(gs.light_pool.free_ids), len(gs.columns))
+        gpu_check(gs, fmt.tprintf("view radius %d", radius))
+    }
 
     stream_frame :: proc(gs: ^Game_State) {
         new_pc := [3]int{
@@ -87,7 +100,7 @@ bench_relight_run :: proc(gs: ^Game_State) {
         integrate_ready_chunks(gs)
         stitch_pending_columns(gs)
         flush_gpu_uploads(gs)
-        bench_peak_bricks = max(bench_peak_bricks, MAX_LIGHT_BRICKS - gs.light_pool.free_top)
+        bench_peak_bricks = max(bench_peak_bricks, len(gs.light_pool.free_ids) - gs.light_pool.free_top)
         free_all(context.temp_allocator)
         time.sleep(time.Millisecond * 2)
     }
@@ -139,13 +152,15 @@ bench_relight_run :: proc(gs: ^Game_State) {
 gpu_check :: proc(gs: ^Game_State, what: string) {
     flush_gpu_uploads(gs)
     idx_bytes := len(gs.gpu_light_index) * size_of(i32)
-    pool_bytes := MAX_LIGHT_BRICKS * LIGHT_BRICK_BYTES
-    xfer := SDL.CreateGPUTransferBuffer(gs.gpu_device, {usage = .DOWNLOAD, size = u32(idx_bytes + pool_bytes)})
+    pool_bytes := len(gs.light_pool.free_ids) * LIGHT_BRICK_BYTES
+    vox_bytes := len(gs.brick_pool.free_ids) * VOXELS_PER_BRICK
+    xfer := SDL.CreateGPUTransferBuffer(gs.gpu_device, {usage = .DOWNLOAD, size = u32(idx_bytes + pool_bytes + vox_bytes)})
     defer SDL.ReleaseGPUTransferBuffer(gs.gpu_device, xfer)
     cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
     cp := SDL.BeginGPUCopyPass(cmd)
     SDL.DownloadFromGPUBuffer(cp, {buffer = gs.light_index_buf, offset = 0, size = u32(idx_bytes)}, {transfer_buffer = xfer, offset = 0})
     SDL.DownloadFromGPUBuffer(cp, {buffer = gs.light_pool_buf, offset = 0, size = u32(pool_bytes)}, {transfer_buffer = xfer, offset = u32(idx_bytes)})
+    SDL.DownloadFromGPUBuffer(cp, {buffer = gs.voxel_buf, offset = 0, size = u32(vox_bytes)}, {transfer_buffer = xfer, offset = u32(idx_bytes + pool_bytes)})
     SDL.EndGPUCopyPass(cp)
     fence := SDL.SubmitGPUCommandBufferAndAcquireFence(cmd)
     _ = SDL.WaitForGPUFences(gs.gpu_device, true, &fence, 1)
@@ -154,8 +169,10 @@ gpu_check :: proc(gs: ^Game_State, what: string) {
     defer SDL.UnmapGPUTransferBuffer(gs.gpu_device, xfer)
     gidx := ([^]i32)(rawptr(base))
     gpool := ([^]u16)(rawptr(base + uintptr(idx_bytes)))
+    gvox := ([^]u8)(rawptr(base + uintptr(idx_bytes + pool_bytes)))
 
     chunks, index_wrong, brick_wrong, voxels_wrong := 0, 0, 0, 0
+    vox_wrong, vox_missing := 0, 0
     shared := 0
     owners := make(map[i32]int, context.temp_allocator) // light brick -> slot using it
     first: string
@@ -166,6 +183,13 @@ gpu_check :: proc(gs: ^Game_State, what: string) {
         c := world_chunk(gs, key)
         if c == nil { continue }
         chunks += 1
+        if vi := gs.gpu_index[slot]; vi >= 0 && c.voxels != nil {
+            for k in 0 ..< VOXELS_PER_BRICK {
+                if gvox[int(vi) * VOXELS_PER_BRICK + k] != c.voxels[k] { vox_wrong += 1; break }
+            }
+        } else if c.voxels != nil && vi < 0 {
+            vox_missing += 1
+        }
         g := gidx[slot]
         if g != gs.gpu_light_index[slot] {
             index_wrong += 1
@@ -196,5 +220,6 @@ gpu_check :: proc(gs: ^Game_State, what: string) {
     }
     fmt.printf("relight: GPU check %-28s %d chunks: %d wrong index, %d stale bricks (%d voxels), %d bricks shared\n",
         what, chunks, index_wrong, brick_wrong, voxels_wrong, shared)
+    fmt.printf("relight:   voxels: %d bricks differ from the CPU, %d mixed chunks without a brick\n", vox_wrong, vox_missing)
     if first != "" { fmt.println("relight:   first:", first) }
 }

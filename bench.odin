@@ -427,8 +427,8 @@ bench_world_stats :: proc(gs: ^Game_State) {
     }
     fmt.printf("bench: %d columns, chunks: %d air, %d uniform solid, %d mixed\n", len(gs.columns), air, solid, mixed)
     fmt.printf("bench: voxel bricks %d of %d, light bricks %d of %d\n",
-        MAX_RESIDENT_BRICKS - gs.brick_pool.free_top, MAX_RESIDENT_BRICKS,
-        MAX_LIGHT_BRICKS - gs.light_pool.free_top, MAX_LIGHT_BRICKS)
+        len(gs.brick_pool.free_ids) - gs.brick_pool.free_top, len(gs.brick_pool.free_ids),
+        len(gs.light_pool.free_ids) - gs.light_pool.free_top, len(gs.light_pool.free_ids))
     far := 0
     for t in gs.far_tiles { if t.x != FAR_NO_TILE { far += 1 } }
     fmt.printf("bench: far tiles %d of %d\n", far, len(gs.far_tiles))

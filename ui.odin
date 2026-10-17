@@ -1380,9 +1380,14 @@ debug_layout :: proc(gs: ^Game_State) {
             if d.x * d.x + d.y * d.y <= LIGHT_STITCH_NEAR * LIGHT_STITCH_NEAR { near += 1 }
         }
         line("stitch", fmt.tprintf("%d queued, %d near   F9 relight here", len(gs.stitch_queue), near))
-        used := MAX_LIGHT_BRICKS - int(gs.light_pool.free_top)
-        line("light mem", fmt.tprintf("%d of %d bricks (%.0f%%)%s", used, MAX_LIGHT_BRICKS, 100 * f32(used) / MAX_LIGHT_BRICKS,
-            len(gs.light_starved) > 0 ? fmt.tprintf("  %d WAITING", len(gs.light_starved)) : ""))
+        pool_line :: proc(name: string, p: Brick_Pool, waiting, brick_bytes: int) {
+            cap := len(p.free_ids)
+            used := cap - p.free_top
+            line(name, fmt.tprintf("%d of %d (%.0f%%, %d MB)%s", used, cap, 100 * f32(used) / f32(max(cap, 1)), cap * brick_bytes >> 20,
+                waiting > 0 ? fmt.tprintf("  %d WAITING", waiting) : ""))
+        }
+        pool_line("voxel mem", gs.brick_pool, len(gs.brick_starved), VOXELS_PER_BRICK + MASK_U32_PER_BRICK * 4)
+        pool_line("light mem", gs.light_pool, len(gs.light_starved), LIGHT_BRICK_BYTES)
         line("columns", fmt.tprintf("%d loaded, %d pending", len(gs.columns), worker_pool_pending_count(&gs.pool)))
         line("entities", fmt.tprintf("%d drawn", gs.entity_count))
         line("render", fmt.tprintf("%dx%d (%.0f%%)  aa%d  %s", gs.render_w, gs.render_h, gs.render_scale * 100, gs.aa_samples, gs.shadow_rays == 1 ? "hard" : "soft"))

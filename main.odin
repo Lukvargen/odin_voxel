@@ -58,6 +58,7 @@ Game_State :: struct {
     light_pool:      Brick_Pool,         // free-list allocator over light pool ids
     light_dirty:     [dynamic]int,       // slots whose light needs GPU upload
     light_starved:   [dynamic]int,       // slots that wanted a light brick when none were free (retried)
+    brick_starved:   [dynamic]int,       // ... and a voxel brick
     stitch_queue:    [dynamic][2]int,    // integrated columns awaiting light stitching
     player_chunk:    [3]int,
     prof_frames:     int,
@@ -310,6 +311,7 @@ main :: proc() {
     gs.light_dirty = make([dynamic]int)
     defer delete(gs.light_dirty)
     defer delete(gs.light_starved)
+    defer delete(gs.brick_starved)
     defer delete(gs.stitch_queue)
     if bench {
         // Benches drive the simulation directly, in the world they look at.

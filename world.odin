@@ -21,7 +21,7 @@ VOXELS_PER_BRICK :: CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS // 512
 // uniform chunk with no storage: -1 = all air, -2 - b = all block b (see
 // chunk_index_uniform). Most of the world is uniform (open air, deep rock),
 // so only the surface, caves and trees use bricks: ~190k at LOAD_RADIUS_XZ.
-MAX_RESIDENT_BRICKS :: 3 << 17 // 393k bricks: 192 MiB voxels + 24 MiB masks
+MAX_RESIDENT_BRICKS :: 3 << 17 // 393k bricks: 192 MiB voxels + 24 MiB masks (at the Far view distance)
 
 chunk_index_uniform :: #force_inline proc(b: u8) -> i32 { return b == 0 ? -1 : -2 - i32(b) }
 
@@ -58,7 +58,18 @@ set_slot_index :: proc(gs: ^Game_State, slot: int, idx: i32) {
 // mostly the terrain surface, tree canopies, cave mouths and around torches.
 // gpu_light_index[slot] is a light pool id, or light_index_uniform(v) for a
 // chunk whose every voxel has light v.
-MAX_LIGHT_BRICKS :: 5 << 16 // 320k (320 MB): sky light 31 deep varies in many chunks; mountains at far view peaked ~234k (bench relight)
+MAX_LIGHT_BRICKS :: 5 << 16 // 320k (320 MB) at the Far view distance: sky light 31 deep varies in many chunks; mountains peaked ~234k (bench relight)
+
+// The brick pools hold what's loaded, so they're sized for the view
+// distance: the MAX_ sizes at Far, scaled by the loaded area (columns kept
+// out to the radius + 2, and some headroom) below it. Short needs about a
+// fifth of Far's GPU memory.
+pool_scale :: proc(radius: int) -> f32 {
+    s := f32(radius + 6) / f32(LOAD_RADIUS_XZ + 6)
+    return min(s * s, 1)
+}
+brick_cap_for :: proc(radius: int) -> int { return (int(f32(MAX_RESIDENT_BRICKS) * pool_scale(radius)) + 1023) &~ 1023 }
+light_cap_for :: proc(radius: int) -> int { return (int(f32(MAX_LIGHT_BRICKS) * pool_scale(radius)) + 1023) &~ 1023 }
 LIGHT_BRICK_BYTES :: VOXELS_PER_BRICK * size_of(u16)
 
 light_index_uniform :: #force_inline proc(v: u16) -> i32 { return -1 - i32(v) }
@@ -79,7 +90,7 @@ pool_init :: proc(p: ^Brick_Pool, n: int) {
     p.free_top = n
 }
 
-// Returns a pool id in [0, MAX_RESIDENT_BRICKS) or -1 if exhausted.
+// Returns a pool id in [0, the pool's size) or -1 if exhausted.
 pool_alloc :: proc(p: ^Brick_Pool) -> i32 {
     if p.free_top == 0 { return -1 }
     p.free_top -= 1
@@ -100,7 +111,7 @@ g_pool_warned: bool
 pool_exhaustion_warn :: proc() {
     if !g_pool_warned {
         g_pool_warned = true
-        fmt.eprintln("WARNING: brick pool exhausted; bricks rendering as air. Raise MAX_RESIDENT_BRICKS.")
+        fmt.eprintln("WARNING: brick pool exhausted; bricks wait as air until some free. Raise MAX_RESIDENT_BRICKS.")
     }
 }
 
@@ -298,6 +309,7 @@ set_view_radius :: proc(gs: ^Game_State, r: int) {
     if r == view_radius { return }
     sync.atomic_store(&view_radius, r)
     enqueue_chunks(gs)
+    gpu_resize_pools(gs) // after what's now too far was dropped
 }
 
 // Cave band. Below CAVE_FLOOR_Y everything is solid stone via the no-noise
@@ -350,8 +362,8 @@ generate_world :: proc(gs: ^Game_State) {
     gs.region_count    = make([]u32,    REGION_COUNT)
 
     far_init(gs)
-    pool_init(&gs.brick_pool, MAX_RESIDENT_BRICKS)
-    pool_init(&gs.light_pool, MAX_LIGHT_BRICKS)
+    pool_init(&gs.brick_pool, brick_cap_for(view_radius))
+    pool_init(&gs.light_pool, light_cap_for(view_radius))
 
     for i in 0 ..< total {
         gs.gpu_index[i]       = -1
@@ -437,7 +449,10 @@ gpu_sync_slot :: proc(gs: ^Game_State, slot: int) {
         idx = old
         if idx < 0 {
             idx = pool_alloc(&gs.brick_pool)
-            if idx < 0 { pool_exhaustion_warn() } // renders as air, no leak
+            if idx < 0 { // renders as air until a brick frees up (flush_voxel_uploads retries)
+                pool_exhaustion_warn()
+                append(&gs.brick_starved, slot)
+            }
         }
         if idx >= 0 { append(&gs.dirty_slots, slot) }
     }
