@@ -1,6 +1,7 @@
 package main
 
 import "core:fmt"
+import "core:math"
 
 // `bench hear`: what we hear of another player, with the sounds counted
 // (audio is off in benches: bench_heard). On a stone floor up in the air,
@@ -141,6 +142,73 @@ bench_hear_run :: proc(gs: ^Game_State) {
     far := [3]i32{i32(sx) + 100, i32(fy), i32(sz)}
     n = edit(gs, &heard, {{pos = far, block = u8(Block_Type.Stone)}})
     check(&ok_all, "an edit far off isn't heard", n == 0)
+
+    // Beside frozen water (ice over it) the water's sound (swells, lapping)
+    // should be quiet: there are no waves under ice.
+    bench_heard = nil
+    // Frozen water: under the sea's level where it's cold enough to ice over.
+    frozen_water :: proc() -> (x, z: int, ok: bool) {
+        for r := 0; r < 12000; r += 48 {
+            steps := max(1, r / 24)
+            for i in 0 ..< steps {
+                a := f64(i) / f64(steps) * math.TAU
+                px, pz := int(math.cos(a) * f64(r)), int(math.sin(a) * f64(r))
+                t := terrain_at(px, pz)
+                if t.height < SEA_LEVEL - 3 && surface_layers(t, 0).frozen { return px, pz, true }
+            }
+        }
+        return
+    }
+    if bx, bz, found := frozen_water(); found {
+        bench_teleport(gs, {f32(bx) + 0.5, f32(SEA_LEVEL) + 20, f32(bz) + 0.5})
+        // A spot with ice all around, as far as the sounds listen (16).
+        all_ice :: proc(gs: ^Game_State, x, z: int) -> bool {
+            for dx in -17 ..= 17 { for dz in -17 ..= 17 {
+                if dx * dx + dz * dz > 17 * 17 { continue }
+                if Block_Type(get_voxel(gs, x + dx, SEA_LEVEL - 1, z + dz)) != .Ice { return false }
+            }}
+            return true
+        }
+        ice: [3]int
+        found_ice := false
+        search: for dx := -100; dx <= 100; dx += 4 {
+            for dz := -100; dz <= 100; dz += 4 {
+                if all_ice(gs, bx + dx, bz + dz) {
+                    ice, found_ice = {bx + dx, SEA_LEVEL - 1, bz + dz}, true
+                    break search
+                }
+            }
+        }
+        if found_ice {
+            cam.pos = {f32(ice.x) + 0.5, f32(ice.y) + 1 + PLAYER_EYE_HEIGHT, f32(ice.z) + 0.5}
+            audio.water, audio.water_hits, audio.samples = 0, 0, 0
+            for _ in 0 ..< 300 { surroundings_update(gs, DT) }
+            check(&ok_all, fmt.tprintf("on a frozen sea: no water sound (%.2f)", audio.water), audio.water < 0.05)
+        } else {
+            fmt.println("hear: no frozen sea found; skipped")
+        }
+    }
+
+    // ...and open sea still sounds like the sea.
+    open_sea :: proc() -> (x, z: int, ok: bool) {
+        for r := 0; r < 12000; r += 48 {
+            steps := max(1, r / 24)
+            for i in 0 ..< steps {
+                a := f64(i) / f64(steps) * math.TAU
+                px, pz := int(math.cos(a) * f64(r)), int(math.sin(a) * f64(r))
+                t := terrain_at(px, pz)
+                if t.height < SEA_LEVEL - 8 && !surface_layers(t, 0).frozen { return px, pz, true }
+            }
+        }
+        return
+    }
+    if ox, oz, found := open_sea(); found {
+        bench_teleport(gs, {f32(ox) + 0.5, f32(SEA_LEVEL) + 20, f32(oz) + 0.5})
+        cam.pos = {f32(ox) + 0.5, f32(SEA_LEVEL) + 1.5, f32(oz) + 0.5}
+        audio.water, audio.water_hits, audio.samples = 0, 0, 0
+        for _ in 0 ..< 300 { surroundings_update(gs, DT) }
+        check(&ok_all, fmt.tprintf("on open sea: the water sound (%.2f)", audio.water), audio.water > 0.5)
+    }
 
     fmt.println(ok_all ? "hear: all ok" : "hear: SOME FAILED")
 }

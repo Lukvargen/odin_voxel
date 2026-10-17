@@ -255,8 +255,19 @@ ease :: proc(x: ^f32, target, rate, dt: f32) {
     x^ += (target - x^) * min(rate * dt, 1)
 }
 
-// What's around the player, turned into the loops' drivers.
+// Whether the water at p is frozen over: ice on top of its column. No
+// waves there, so it makes no water sound (frozen seas and lakes).
 @(private="file")
+under_ice :: proc(gs: ^Game_State, p: [3]f32) -> bool {
+    x, y, z := int(math.floor(p.x)), int(math.floor(p.y)), int(math.floor(p.z))
+    for k in 1 ..= 32 {
+        b := Block_Type(get_voxel(gs, x, y + k, z))
+        if !block_is_watery(u8(b)) { return b == .Ice }
+    }
+    return false
+}
+
+// What's around the player, turned into the loops' drivers.
 surroundings_update :: proc(gs: ^Game_State, dt: f32) {
     cam := &gs.camera
     p := cam.pos
@@ -275,9 +286,10 @@ surroundings_update :: proc(gs: ^Game_State, dt: f32) {
     for _ in 0 ..< SAMPLES {
         d := [3]f32{rand.float32_range(-1, 1), rand.float32_range(-1, 1), rand.float32_range(-1, 1)}
         if la.dot(d, d) > 1 { continue }
-        #partial switch voxel_at(gs, p + d * RADIUS) {
+        q := p + d * RADIUS
+        #partial switch voxel_at(gs, q) {
         case .Leaves, .Spruce_Leaves, .Birch_Leaves, .Autumn_Leaves, .Acacia_Leaves, .Willow_Leaves: audio.leaf_hits += 1
-        case .Water, .Kelp, .Seagrass, .Sea_Pickle: audio.water_hits += 1
+        case .Water, .Kelp, .Seagrass, .Sea_Pickle: if !under_ice(gs, q) { audio.water_hits += 1 }
         }
         audio.samples += 1
     }
