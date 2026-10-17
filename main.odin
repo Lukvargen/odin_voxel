@@ -123,6 +123,7 @@ Game_State :: struct {
     entities_enabled: bool, // options panel toggle
     clouds_enabled:   bool, // volumetric cumulus over thermals (options panel)
     gi:               GI,   // bounce-light probes (gi.odin)
+    no_textures:      bool, // debug (F10, notex): blocks plain grey, to see the lighting alone
 
     // Input state
     mouse_locked:        bool,
@@ -231,6 +232,16 @@ main :: proc() {
             // Never for timings: frame times depend on it.
             case a == "fast": view_radius = VIEW_RADII[0]
             case a == "ab=gi": bench_ab_gi = true
+            case a == "notex": gs.no_textures = true // blocks plain grey: the lighting alone
+            case strings.has_prefix(a, "world="): // a copy of a world, read only: never point it at one being played
+                bench_world = true
+                save_dir = strings.concatenate({"saves/", a[6:]})
+            case a == "view": bench_view = true
+            case strings.has_prefix(a, "pos="):
+                xyz := strings.split(a[4:], ",", context.temp_allocator)
+                for v, i in xyz[:min(len(xyz), 3)] { bench_view_pos[i], _ = strconv.parse_f32(v) }
+            case strings.has_prefix(a, "yaw="):   bench_view_yaw, _ = strconv.parse_f32(a[4:])
+            case strings.has_prefix(a, "pitch="): bench_view_pitch, _ = strconv.parse_f32(a[6:])
             case a == "gi=show": gs.gi.show = 1 // every shot: the bounce light alone
             case strings.has_prefix(a, "at="):
                 xz := strings.split(a[3:], ",", context.temp_allocator)
@@ -264,6 +275,7 @@ main :: proc() {
                 }
             case strings.has_prefix(a, "yaw="):
                 start_yaw, _ = strconv.parse_f32(a[4:])
+            case a == "notex": gs.no_textures = true // blocks plain grey (F10)
             case a == "f3": gs.ui.debug_open = true // the debug panel open from the start (checking things without input)
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
@@ -326,8 +338,13 @@ main :: proc() {
     defer delete(gs.brick_starved)
     defer delete(gs.stitch_queue)
     if bench {
-        // Benches drive the simulation directly, in the world they look at.
+        // Benches drive the simulation directly, in the world they look at:
+        // the generated one, or with world= a saved one's edits (never saved).
         gs.sim.world = &gs.voxels
+        if bench_world {
+            _ = world_open(&gs.voxels)
+            gs.voxels.save_enabled = false
+        }
     } else {
         // Our own server opens the world and tells us which columns differ
         // from the generated one: we fetch those from it while loading.
@@ -689,6 +706,10 @@ on_key_down :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods, repeat, playi
         ui_toast(gs, fmt.tprintf("Relit %d columns around you", n))
     case SDL.K_F8:
         enemy_debug_spawn(gs)
+    case SDL.K_F10:
+        // Debug: every block plain grey, so only light and shading show.
+        gs.no_textures = !gs.no_textures
+        ui_toast(gs, gs.no_textures ? "Textures off (F10)" : "Textures on")
     case SDL.K_1 ..= SDL.K_9:
         if gs.combat.sword { combat_toggle_sword(gs) } // back to building
         hotbar_select(gs, int(key - SDL.K_1))

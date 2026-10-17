@@ -40,7 +40,7 @@ Camera_Uniform :: struct #packed {
     cave_factor:    f32,   // 0 surface .. 1 deep underground (CPU-smoothed)
     sun_intensity:  f32,   // sun direct-light multiplier
     far_enabled:    i32,
-    ent_debug:      i32,   // 1/2 = bench: skip entity view rays / shadows; 4 = no cumulus (bench or options); 8/16 = bench: sky-only water reflections / no cloud shadows
+    ent_debug:      i32,   // 1/2 = bench: skip entity view rays / shadows; 4 = no cumulus (bench or options); 8/16 = bench: sky-only water reflections / no cloud shadows; 32 = blocks plain grey (F10)
     _pad5:          f32,
     near_circle:    [4]f32, // near (voxel) region: XZ center, radius in voxels, unused
     sun_true:       [4]f32, // xyz = real sun direction (light_dir is the moon at night), w = night 0..1
@@ -712,7 +712,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         cave_factor    = gs.cave_factor,
         sun_intensity  = gs.sun_intensity,
         far_enabled    = gs.far_enabled ? 1 : 0,
-        ent_debug      = i32(gs.ent_debug) | (gs.clouds_enabled ? 0 : 4),
+        ent_debug      = i32(gs.ent_debug) | (gs.clouds_enabled ? 0 : 4) | (gs.no_textures ? 32 : 0),
         // Columns whose centers lie within near_r of the player's column are
         // loaded; shrink by a column's half-diagonal so the circle only
         // covers loaded voxels.

@@ -414,7 +414,7 @@ enqueue_radius :: proc(gs: ^Game_State, radius: int) {
                 client_request_column(gs, key) // the server's, not generated
                 continue
             }
-            worker_pool_enqueue(&gs.pool, key, false)
+            worker_pool_enqueue(&gs.pool, key, key in gs.saved_columns) // saved: a bench given world= (the game's server loads its own)
         }
     }
 }

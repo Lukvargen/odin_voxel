@@ -41,6 +41,13 @@ Bench_Config :: struct {
 bench_shot_dir: string
 // Only measure the first (default) config.
 bench_quick: bool
+// `world=<name>`: the bench plays saves/<name>'s edits (read only; use a copy).
+bench_world: bool
+// `bench view world=<copy> pos=x,y,z yaw=a pitch=b [notex] [dir]`: one shot
+// from there (entities off), e.g. of a spot a player reported.
+bench_view: bool
+bench_view_pos: [3]f32
+bench_view_yaw, bench_view_pitch: f32
 // `ab=gi`: every shot (bench_screenshot) twice, into <dir>/on/ and with the
 // bounce-light probes off into <dir>/off/, for before/after in one run.
 bench_ab_gi: bool
@@ -182,6 +189,17 @@ bench_run :: proc(gs: ^Game_State) {
     }
     if bench_gi {
         bench_gi_run(gs)
+        return
+    }
+    if bench_view {
+        gs.entities_enabled = false
+        entities_update(gs, 0)
+        gs.camera.fly_mode = true
+        bench_teleport(gs, bench_view_pos)
+        gs.camera.yaw, gs.camera.pitch = bench_view_yaw, bench_view_pitch
+        bench_measure(gs)
+        fmt.printf("view: %v yaw %.1f pitch %.1f\n", bench_view_pos, bench_view_yaw, bench_view_pitch)
+        if bench_shot_dir != "" { bench_screenshot(gs, fmt.tprintf("%s/view.bmp", bench_shot_dir)) }
         return
     }
 
@@ -400,7 +418,7 @@ bench_hud_shot :: proc(gs: ^Game_State, path: string) {
 bench_teleports_first :: proc() -> bool {
     return bench_look || bench_caves || bench_gi || bench_landmarks || bench_trees || bench_sea ||
            bench_slimes || bench_enemies || bench_fight || bench_nav || bench_crowd || bench_players ||
-           bench_build || bench_combat || bench_relight
+           bench_build || bench_combat || bench_relight || bench_view
 }
 
 // Save the last frame as a BMP; with ab=gi also the same view with the

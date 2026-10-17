@@ -204,9 +204,15 @@ float compute_ao(float3 p, float3 nrm, float3 hit_pos) {
     // Sub-voxel position within the face, in tangent/bitangent axes, [0,1).
     // frac(hit_pos) is the precision-safe sub-voxel coord (same convention
     // the grass-band shading uses). Project onto the (axis-aligned) frame.
+    // Measured along the axes as they point: on faces whose tangent runs
+    // toward -x/-z (faces looking +x, -z, down), the world-axis fraction
+    // runs the other way, and the corners' shading came out mirrored (dark
+    // away from the corner, a hard step at the block's edge).
     float3 fr = frac(hit_pos);
     float fu = saturate(dot(fr, abs(tangent)));
     float fv = saturate(dot(fr, abs(bitang)));
+    if (dot(tangent, float3(1, 1, 1)) < 0.0) fu = 1.0 - fu;
+    if (dot(bitang,  float3(1, 1, 1)) < 0.0) fv = 1.0 - fv;
 
     // Neighbour occupancy around the hit voxel, on the face plane.
     // pT/nT = ±tangent edge, pB/nB = ±bitangent edge, c** = diagonals.
@@ -1267,6 +1273,14 @@ float primary_max_len(float3 o, float3 d, out int exit_axis) {
 float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_sun) {
     float4 hit_color = float4(
         voxel_surface_color(hit.block_id, hit.vkey, hit.hit_pos, hit.normal, hit.t + t_acc), 1.0);
+    if ((u_ent_debug & 32) != 0) {
+        // Debug (F10): the lighting alone, on plain grey with each block's
+        // face outlined, so a shading step can be told from a step in the
+        // blocks.
+        float3 fr = frac(hit.hit_pos);
+        float3 e  = min(fr, 1.0 - fr) + abs(hit.normal) * 9.0; // ignore the axis along the normal
+        hit_color.rgb = min(e.x, min(e.y, e.z)) < 0.02 ? float3(0.25, 0.25, 0.25) : float3(0.6, 0.6, 0.6);
+    }
     float3 albedo = hit_color.rgb;
 
     float3 hit_point   = hit.hit_pos;
