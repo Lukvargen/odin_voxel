@@ -134,7 +134,8 @@ float3 block_emission(uint id) {
 }
 
 #define LEAF_TRANSMIT 0.35
-#define PLANT_TRANSMIT 0.7 // water plants are mostly gaps
+#define PLANT_TRANSMIT 0.7  // a plant voxel crossed, as a whole (the sun's shadow rays)
+#define BLADE_TRANSMIT 0.35 // light through a plant's blade where an exact shadow ray meets one
 
 
 // Integer-coordinate hashes (exact at any distance from spawn).
@@ -220,6 +221,212 @@ float3 safe_dir(float3 d) {
     return s * max(abs(d), 1e-6);
 }
 
+// ---- Water plants -------------------------------------------------------------
+// Kelp, seagrass and sea pickles are two crossed vertical planes through the
+// voxel's centre (x = z and x + z = 1), each a cutout of PLANT_TEXELS^2
+// texels: the ray only stops on an opaque texel, so you see between the
+// blades. u runs along the plane (= local x), v up the voxel.
+#define PLANT_TEXELS 8 // as the tracer's TEXELS
+
+// Opaque texel of plant `id` at plane texel (cu, cv) of plane `pl`.
+bool plant_texel(uint id, int3 vkey, int cu, int cv, int pl) {
+    float h = hash31i(vkey * 2 + int3(pl, 0, 0));
+    if (id == BLOCK_TALL_GRASS) {
+        // Blades of random height, most of them reaching well up.
+        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 7 + 3));
+        if (hb > 0.62) return false;
+        return float(cv) < 2.0 + hb * 11.0;
+    }
+    if (id == BLOCK_ROOTS) {
+        // Thin strands hanging from the top, of random lengths.
+        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 5 + 1));
+        if (hb > 0.45) return false;
+        return float(7 - cv) < 2.0 + hb * 14.0;
+    }
+    if (id == BLOCK_DRY_BUSH) {
+        // Bare twigs fanning up from the ground.
+        int spread = cv / 2;
+        return cv < 7 && (cu == 3 + spread || cu == 4 - spread || (cv > 3 && hash31i(int3(vkey.x * 8 + cu, cv, vkey.z + pl)) < 0.25));
+    }
+    if (id == BLOCK_KELP) {
+        // A stalk up the middle, and a leaf blade every few texels that
+        // grows out to one side, widest at its base.
+        if (cu == 3 || cu == 4) return pl == 0;
+        int   k    = (cv + int(h * 8.0)) & 3;           // position within a blade
+        bool  left = ((cv + int(h * 8.0)) >> 2 & 1) == pl; // blades alternate sides and planes
+        int   reach = 3 - k;                            // 3 texels out at the base .. 0 at the tip
+        return left ? (cu < 3 && cu >= 3 - reach) : (cu > 4 && cu <= 4 + reach);
+    }
+    if (id == BLOCK_SEAGRASS) {
+        // Separate blades of random height, leaning a texel now and then.
+        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 7));
+        if (hb > 0.5) return false;
+        return float(cv) < 3.0 + hb * 10.0;
+    }
+    // Sea pickle: a few short capsules on the floor.
+    int c0 = 1 + int(h * 2.0), c1 = 5 + int(h * 1.9);
+    bool col = (cu == c0 || cu == c0 + 1 || cu == c1 || cu == c1 + 1);
+    return col && cv < ((cu <= c0 + 1) ? 4 : 3);
+}
+
+// Ray against the plant planes of the voxel it spans for s in [0, span]; q0
+// is the ray position at s = 0 relative to the voxel's min corner. Returns
+// the hit distance along the ray (or -1) and the plane normal facing the ray.
+float plant_hit(uint id, int3 vkey, float3 q0, float3 dir, float span, out float3 n) {
+    float best = -1.0;
+    n = float3(0, 1, 0);
+    [unroll]
+    for (int pl = 0; pl < 2; pl++) {
+        // Plane 0: x - z = 0. Plane 1: x + z - 1 = 0.
+        float  dd  = pl == 0 ? dir.x - dir.z : dir.x + dir.z;
+        float  d0  = pl == 0 ? q0.x - q0.z : q0.x + q0.z - 1.0;
+        if (abs(dd) < 1e-6) continue;
+        float  s = -d0 / dd;
+        if (s < 0.0 || s > span || (best >= 0.0 && s >= best)) continue;
+        float3 q = q0 + dir * s;
+        int cu = clamp(int(q.x * PLANT_TEXELS), 0, PLANT_TEXELS - 1);
+        int cv = clamp(int(q.y * PLANT_TEXELS), 0, PLANT_TEXELS - 1);
+        if (!plant_texel(id, vkey, cu, cv, pl)) continue;
+        best = s;
+        float3 pn = pl == 0 ? float3(0.7071, 0, -0.7071) : float3(0.7071, 0, 0.7071);
+        n = dot(pn, dir) > 0.0 ? -pn : pn;
+    }
+    return best;
+}
+
+// ---- Small-voxel plants ---------------------------------------------------------
+
+// Mushrooms, glow mushrooms, flowers and ferns are models of MICRO^3 cells
+// in their voxel, a cell the size of a texel (TEXELS), so they keep the
+// world's pixel scale. The shapes are small functions of the model cell;
+// each voxel turns and mirrors its model by a hash for variety. A ray
+// first meets the model's bounding box (micro_box), then walks the cells
+// inside it.
+#define MICRO 8
+
+// The model cell for voxel cell c: the voxel's own turn and mirror.
+int3 micro_model_cell(int3 vkey, int3 c) {
+    uint v = uint(hash31i(vkey + int3(5, 9, 2)) * 8.0);
+    if ((v & 1u) != 0u) c.x = MICRO - 1 - c.x;
+    if ((v & 2u) != 0u) c.z = MICRO - 1 - c.z;
+    if ((v & 4u) != 0u) c.xz = c.zx;
+    return c;
+}
+
+// The model cell a hit on its face is in (inset so the face floors into it).
+int3 micro_hit_cell(int3 vkey, float3 hit_pos, float3 nrm) {
+    return micro_model_cell(vkey, clamp(int3(floor((hit_pos - nrm * 0.01 - float3(vkey)) * MICRO)), 0, MICRO - 1));
+}
+
+// A glow mushroom's three little ones: x, cap height, z.
+static const int3 GLOW_CAPS[3] = { int3(2, 3, 2), int3(5, 2, 3), int3(4, 1, 6) };
+
+// The stem of one of them (pale, not glowing), at model cell c.
+bool glow_mushroom_stem(int3 c) {
+    [unroll] for (int k = 0; k < 3; k++) {
+        if (all(c.xz == GLOW_CAPS[k].xz) && c.y < GLOW_CAPS[k].y) return true;
+    }
+    return false;
+}
+
+// The cells the model fills lie in [lo, hi) of its own cells, and in its
+// voxel (turned and mirrored as micro_model_cell has it) in the box this
+// returns. Rays outside it skip the cell walk; most rays through a flower's
+// voxel never come near the bloom.
+void micro_box(uint id, int3 vkey, out int3 lo, out int3 hi) {
+    if (id == BLOCK_FLOWER)        { lo = int3(2, 0, 2); hi = int3(6, 7, 5); }
+    else if (id == BLOCK_MUSHROOM) { lo = int3(1, 0, 1); hi = int3(7, 6, 7); }
+    else if (id == BLOCK_GLOW_MUSHROOM) { lo = int3(1, 0, 1); hi = int3(7, 5, 8); }
+    else                           { lo = int3(0, 0, 0); hi = int3(8, 4, 8); } // fern
+    // Model to voxel: micro_model_cell's steps undone, last first.
+    uint v = uint(hash31i(vkey + int3(5, 9, 2)) * 8.0);
+    if ((v & 4u) != 0u) { lo.xz = lo.zx; hi.xz = hi.zx; }
+    if ((v & 2u) != 0u) { int l = lo.z; lo.z = MICRO - hi.z; hi.z = MICRO - l; }
+    if ((v & 1u) != 0u) { int l = lo.x; lo.x = MICRO - hi.x; hi.x = MICRO - l; }
+}
+
+// Whether model cell c of plant `id` is filled.
+bool micro_cell(uint id, int3 c) {
+    float2 d  = float2(c.xz) - 3.5;
+    float  r2 = dot(d, d);
+    if (id == BLOCK_MUSHROOM) {
+        // A thick stem under a domed cap.
+        if (c.y <= 2) return abs(d.x) < 1.0 && abs(d.y) < 1.0;
+        if (c.y == 3) return r2 <= 8.5;
+        if (c.y == 4) return r2 <= 6.5;
+        return c.y == 5 && r2 <= 2.5;
+    }
+    if (id == BLOCK_GLOW_MUSHROOM) {
+        // Three little ones of different heights: a thin stem, a cap of a
+        // cross with a knob on top.
+        [unroll] for (int k = 0; k < 3; k++) {
+            int2 o = c.xz - GLOW_CAPS[k].xz;
+            int  h = GLOW_CAPS[k].y;
+            if (all(o == 0) && c.y <= h + 1) return true;
+            if (c.y == h && abs(o.x) + abs(o.y) == 1) return true;
+        }
+        return false;
+    }
+    if (id == BLOCK_FLOWER) {
+        // A stem with a leaf, and the bloom: a cross of petals, the eye on top.
+        int2 o = c.xz - int2(3, 3);
+        if (c.y <= 4) return all(o == 0) || (c.y == 2 && o.x == 1 && o.y == 0) || (c.y == 3 && o.x == 2 && o.y == 0);
+        if (c.y == 5) return abs(o.x) + abs(o.y) <= 1;
+        return c.y == 6 && all(o == 0);
+    }
+    // Fern: a tuft, and four fronds arching out (a pinwheel), each with a
+    // leaflet beside it halfway.
+    if (c.y <= 1) return abs(d.x) < 1.0 && abs(d.y) < 1.0;
+    static const int2 dirs[4] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1) };
+    static const int2 lanes[4] = { int2(0, 4), int2(0, 3), int2(3, 0), int2(4, 0) }; // the cell row each runs along
+    [unroll] for (int k = 0; k < 4; k++) {
+        int2 dir = dirs[k];
+        int  along = dir.x != 0 ? c.x : c.z;
+        int  across = dir.x != 0 ? c.z : c.x;
+        int  lane = dir.x != 0 ? lanes[k].y : lanes[k].x;
+        int  s = dir.x + dir.y > 0 ? along - 4 : 3 - along; // 1.. out from the tuft
+        if (s < 1 || s > 3) continue;
+        int  h = s == 2 ? 3 : 2; // up, then drooping
+        if (c.y == h && across == lane) return true;
+        if (s == 2 && c.y == 2 && abs(across - lane) == 1) return true;
+    }
+    return false;
+}
+
+// Ray against the model in the voxel it spans for s in [0, span]; q0 is
+// the ray position at s = 0 relative to the voxel's min corner. Returns the
+// hit distance (or -1) and the face normal of the cell it met.
+float micro_hit(uint id, int3 vkey, float3 q0, float3 dir, float span, out float3 n) {
+    n = float3(0, 1, 0);
+    int3 clo, chi;
+    micro_box(id, vkey, clo, chi);
+    float3 lo  = float3(clo) / float(MICRO), hi = float3(chi) / float(MICRO);
+    float3 inv = 1.0 / dir;
+    float3 a = (lo - q0) * inv, b = (hi - q0) * inv;
+    float3 tn = min(a, b), tf = max(a, b);
+    float  t0 = max(max(tn.x, tn.y), max(tn.z, 0.0));
+    float  t1 = min(min(tf.x, tf.y), min(tf.z, span));
+    if (t0 > t1) return -1.0;
+    if (tn.x >= tn.y && tn.x >= tn.z) n = float3(-sign(dir.x), 0, 0);
+    else if (tn.y >= tn.z)            n = float3(0, -sign(dir.y), 0);
+    else                              n = float3(0, 0, -sign(dir.z));
+
+    // Cell walk, in cell units, from where the ray enters the box.
+    float3 p    = (q0 + dir * t0) * float(MICRO);
+    int3   cell = clamp(int3(floor(p)), clo, chi - 1);
+    int3   stp  = int3(sign(dir));
+    float3 dt   = abs(inv) / float(MICRO);
+    float3 tm   = t0 + ((float3(cell) + float3(stp > 0)) - p) * inv / float(MICRO);
+    [loop] for (int i = 0; i < 3 * MICRO; i++) {
+        if (micro_cell(id, micro_model_cell(vkey, cell))) return t0;
+        if (tm.x < tm.y && tm.x < tm.z) { t0 = tm.x; tm.x += dt.x; cell.x += stp.x; n = float3(-stp.x, 0, 0); }
+        else if (tm.y < tm.z)           { t0 = tm.y; tm.y += dt.y; cell.y += stp.y; n = float3(0, -stp.y, 0); }
+        else                            { t0 = tm.z; tm.z += dt.z; cell.z += stp.z; n = float3(0, 0, -stp.z); }
+        if (t0 > t1 || any(cell < clo) || any(cell >= chi)) break;
+    }
+    return -1.0;
+}
+
 // ---- Doors ----------------------------------------------------------------------
 // As door.odin: id = BLOCK_DOOR + ((facing * 2 + hinge_right) * 2 + open) *
 // DOOR_PARTS + part. facing (0 -z, 1 +x, 2 +z, 3 -x) is the way the placer
@@ -281,16 +488,29 @@ float door_hit(uint id, float3 q0, float3 dir, float span, out float3 n) {
     return t0;
 }
 
+// A shaped block's surface along the ray (plants, doors), as plant_hit.
+float shaped_hit(uint id, int3 vkey, float3 q0, float3 dir, float span, out float3 n) {
+    if (block_is_door(id)) return door_hit(id, q0, dir, span, n);
+    if (block_is_micro(id)) return micro_hit(id, vkey, q0, dir, span, n);
+    return plant_hit(id, vkey, q0, dir, span, n);
+}
+
 // Per-voxel shadow walk through one occupied chunk. local_entry is the ray
-// entry pos in voxel units within the chunk, [0,8) per axis. Returns the
+// entry pos in voxel units within the chunk, [0,8) per axis; chunk_ic its
+// exact integer chunk coords (plants' shapes vary by voxel). Returns the
 // transmittance factor for this chunk (0 = fully blocked, leaves attenuate
-// by LEAF_TRANSMIT per voxel crossed). max_len (voxel units from entry)
+// by LEAF_TRANSMIT per voxel crossed). A door shades only where the ray
+// meets its panel. Plants dim by PLANT_TRANSMIT per voxel crossed, unless
+// `exact_plants`: then only where the ray meets their actual shape. The
+// sun's rays are cheap that way, and from far off its whole-voxel shading
+// evens out; a light close by (the held torch) would cast block-shaped
+// shadows from them. max_len (voxel units from entry)
 // stops the walk at a point-light's position — without it the walk overruns
 // the chunk-level max_t check and reports occlusion from the light's own
 // voxel or geometry behind it (chunk-alignment-dependent "lights only one
 // direction" bug). Emissive voxels never occlude: they ARE the light, and
 // stacked torches must not shadow each other.
-float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float max_len = 1e30) {
+float shadow_chunk_transmit(int chunk_i, int3 chunk_ic, float3 local_entry, float3 dir, float max_len, bool exact_plants) {
     float t_delta_x = abs(1.0 / dir.x);
     float t_delta_y = abs(1.0 / dir.y);
     float t_delta_z = abs(1.0 / dir.z);
@@ -340,14 +560,23 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float m
             } else if (block_is_leaves(bid)) {
                 factor *= LEAF_TRANSMIT;
                 if (factor < 0.01) return 0.0;
-            } else if (block_is_door(bid)) {
-                // Only the panel shades (not its windows, nor an open
-                // door's way through).
-                float3 dn;
-                float  span = min(t_max_x, min(t_max_y, t_max_z)) - t_enter;
-                if (door_hit(bid, local_entry + dir * t_enter - float3(x_i, y_i, z_i), dir, span, dn) >= 0.0) return 0.0;
-            } else if (block_is_cutout(bid)) {
+            } else if (block_is_cutout(bid) && !exact_plants) {
                 factor *= PLANT_TRANSMIT;
+            } else if (block_is_shaped(bid)) {
+                // Only its shape shades: a door's panel (not its windows),
+                // a mushroom's cells, blades (a little light through them).
+                float3 sn;
+                float  span = min(t_max_x, min(t_max_y, t_max_z)) - t_enter;
+                float3 q = local_entry + dir * t_enter - float3(x_i, y_i, z_i);
+                // (Doors alone when not exact: the compiler then leaves the
+                // plants' shape code out of the sun's shadow rays.)
+                float  s = exact_plants ? shaped_hit(bid, chunk_ic * BRICK_CHUNK_SIZE + int3(x_i, y_i, z_i), q, dir, span, sn)
+                                        : door_hit(bid, q, dir, span, sn);
+                if (s >= 0.0) {
+                    if (!block_is_cutout(bid) || block_is_micro(bid)) return 0.0;
+                    factor *= BLADE_TRANSMIT;
+                    if (factor < 0.01) return 0.0;
+                }
             } else {
                 return 0.0;
             }
@@ -367,7 +596,7 @@ float shadow_chunk_transmit(int chunk_i, float3 local_entry, float3 dir, float m
 // volumetric call sites unchanged. The per-voxel walk inside the final chunk
 // can overrun max_t slightly; callers stop ~0.9 short of the light so this
 // is not visible.
-float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MAX_LENGTH) {
+float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MAX_LENGTH, bool exact_plants = false) {
     dir = safe_dir(dir);
 
     float t_delta_x = abs(1.0 / dir.x);
@@ -431,8 +660,8 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
                                      * float(BRICK_CHUNK_SIZE);
                 // Remaining ray budget in voxel units from this chunk's entry
                 // (max_t is world==voxel units; t is in chunk units).
-                transmittance *= shadow_chunk_transmit(ci, local_entry, dir,
-                                                       max_t - t * float(BRICK_CHUNK_SIZE));
+                transmittance *= shadow_chunk_transmit(ci, chunk_ic, local_entry, dir,
+                                                       max_t - t * float(BRICK_CHUNK_SIZE), exact_plants);
                 if (transmittance < 0.01) return 0.0;
             }
         }
@@ -620,208 +849,6 @@ struct HitInfo {
     float3 hit_pos;
     int3   vkey;     // exact integer voxel coord (precision-safe, for hashing)
 };
-
-// ---- Water plants -------------------------------------------------------------
-// Kelp, seagrass and sea pickles are two crossed vertical planes through the
-// voxel's centre (x = z and x + z = 1), each a cutout of PLANT_TEXELS^2
-// texels: the ray only stops on an opaque texel, so you see between the
-// blades. u runs along the plane (= local x), v up the voxel.
-#define PLANT_TEXELS 8 // as the tracer's TEXELS
-
-// Opaque texel of plant `id` at plane texel (cu, cv) of plane `pl`.
-bool plant_texel(uint id, int3 vkey, int cu, int cv, int pl) {
-    float h = hash31i(vkey * 2 + int3(pl, 0, 0));
-    if (id == BLOCK_TALL_GRASS) {
-        // Blades of random height, most of them reaching well up.
-        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 7 + 3));
-        if (hb > 0.62) return false;
-        return float(cv) < 2.0 + hb * 11.0;
-    }
-    if (id == BLOCK_ROOTS) {
-        // Thin strands hanging from the top, of random lengths.
-        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 5 + 1));
-        if (hb > 0.45) return false;
-        return float(7 - cv) < 2.0 + hb * 14.0;
-    }
-    if (id == BLOCK_DRY_BUSH) {
-        // Bare twigs fanning up from the ground.
-        int spread = cv / 2;
-        return cv < 7 && (cu == 3 + spread || cu == 4 - spread || (cv > 3 && hash31i(int3(vkey.x * 8 + cu, cv, vkey.z + pl)) < 0.25));
-    }
-    if (id == BLOCK_KELP) {
-        // A stalk up the middle, and a leaf blade every few texels that
-        // grows out to one side, widest at its base.
-        if (cu == 3 || cu == 4) return pl == 0;
-        int   k    = (cv + int(h * 8.0)) & 3;           // position within a blade
-        bool  left = ((cv + int(h * 8.0)) >> 2 & 1) == pl; // blades alternate sides and planes
-        int   reach = 3 - k;                            // 3 texels out at the base .. 0 at the tip
-        return left ? (cu < 3 && cu >= 3 - reach) : (cu > 4 && cu <= 4 + reach);
-    }
-    if (id == BLOCK_SEAGRASS) {
-        // Separate blades of random height, leaning a texel now and then.
-        float hb = hash31i(int3(vkey.x * 8 + cu, vkey.z * 2 + pl, vkey.y * 7));
-        if (hb > 0.5) return false;
-        return float(cv) < 3.0 + hb * 10.0;
-    }
-    // Sea pickle: a few short capsules on the floor.
-    int c0 = 1 + int(h * 2.0), c1 = 5 + int(h * 1.9);
-    bool col = (cu == c0 || cu == c0 + 1 || cu == c1 || cu == c1 + 1);
-    return col && cv < ((cu <= c0 + 1) ? 4 : 3);
-}
-
-// Ray against the plant planes of the voxel it spans for s in [0, span]; q0
-// is the ray position at s = 0 relative to the voxel's min corner. Returns
-// the hit distance along the ray (or -1) and the plane normal facing the ray.
-float plant_hit(uint id, int3 vkey, float3 q0, float3 dir, float span, out float3 n) {
-    float best = -1.0;
-    n = float3(0, 1, 0);
-    [unroll]
-    for (int pl = 0; pl < 2; pl++) {
-        // Plane 0: x - z = 0. Plane 1: x + z - 1 = 0.
-        float  dd  = pl == 0 ? dir.x - dir.z : dir.x + dir.z;
-        float  d0  = pl == 0 ? q0.x - q0.z : q0.x + q0.z - 1.0;
-        if (abs(dd) < 1e-6) continue;
-        float  s = -d0 / dd;
-        if (s < 0.0 || s > span || (best >= 0.0 && s >= best)) continue;
-        float3 q = q0 + dir * s;
-        int cu = clamp(int(q.x * PLANT_TEXELS), 0, PLANT_TEXELS - 1);
-        int cv = clamp(int(q.y * PLANT_TEXELS), 0, PLANT_TEXELS - 1);
-        if (!plant_texel(id, vkey, cu, cv, pl)) continue;
-        best = s;
-        float3 pn = pl == 0 ? float3(0.7071, 0, -0.7071) : float3(0.7071, 0, 0.7071);
-        n = dot(pn, dir) > 0.0 ? -pn : pn;
-    }
-    return best;
-}
-
-// ---- Small-voxel plants ---------------------------------------------------------
-// Mushrooms, glow mushrooms, flowers and ferns are models of MICRO^3 cells
-// in their voxel, a cell the size of a texel (TEXELS), so they keep the
-// world's pixel scale. The shapes are small functions of the model cell;
-// each voxel turns and mirrors its model by a hash for variety. A ray
-// first meets the model's bounding box (micro_top: how high it reaches),
-// then walks the cells inside it.
-#define MICRO 8
-
-// The model cell for voxel cell c: the voxel's own turn and mirror.
-int3 micro_model_cell(int3 vkey, int3 c) {
-    uint v = uint(hash31i(vkey + int3(5, 9, 2)) * 8.0);
-    if ((v & 1u) != 0u) c.x = MICRO - 1 - c.x;
-    if ((v & 2u) != 0u) c.z = MICRO - 1 - c.z;
-    if ((v & 4u) != 0u) c.xz = c.zx;
-    return c;
-}
-
-// The model cell a hit on its face is in (inset so the face floors into it).
-int3 micro_hit_cell(int3 vkey, float3 hit_pos, float3 nrm) {
-    return micro_model_cell(vkey, clamp(int3(floor((hit_pos - nrm * 0.01 - float3(vkey)) * MICRO)), 0, MICRO - 1));
-}
-
-// A glow mushroom's three little ones: x, cap height, z.
-static const int3 GLOW_CAPS[3] = { int3(2, 3, 2), int3(5, 2, 3), int3(4, 1, 6) };
-
-// The stem of one of them (pale, not glowing), at model cell c.
-bool glow_mushroom_stem(int3 c) {
-    [unroll] for (int k = 0; k < 3; k++) {
-        if (all(c.xz == GLOW_CAPS[k].xz) && c.y < GLOW_CAPS[k].y) return true;
-    }
-    return false;
-}
-
-// Cells the model reaches up to (its box's top).
-int micro_top(uint id) {
-    if (id == BLOCK_FLOWER) return 7;
-    if (id == BLOCK_MUSHROOM) return 6;
-    if (id == BLOCK_GLOW_MUSHROOM) return 5;
-    return 4; // fern
-}
-
-// Whether model cell c of plant `id` is filled.
-bool micro_cell(uint id, int3 c) {
-    float2 d  = float2(c.xz) - 3.5;
-    float  r2 = dot(d, d);
-    if (id == BLOCK_MUSHROOM) {
-        // A thick stem under a domed cap.
-        if (c.y <= 2) return abs(d.x) < 1.0 && abs(d.y) < 1.0;
-        if (c.y == 3) return r2 <= 8.5;
-        if (c.y == 4) return r2 <= 6.5;
-        return c.y == 5 && r2 <= 2.5;
-    }
-    if (id == BLOCK_GLOW_MUSHROOM) {
-        // Three little ones of different heights: a thin stem, a cap of a
-        // cross with a knob on top.
-        [unroll] for (int k = 0; k < 3; k++) {
-            int2 o = c.xz - GLOW_CAPS[k].xz;
-            int  h = GLOW_CAPS[k].y;
-            if (all(o == 0) && c.y <= h + 1) return true;
-            if (c.y == h && abs(o.x) + abs(o.y) == 1) return true;
-        }
-        return false;
-    }
-    if (id == BLOCK_FLOWER) {
-        // A stem with a leaf, and the bloom: a cross of petals, the eye on top.
-        int2 o = c.xz - int2(3, 3);
-        if (c.y <= 4) return all(o == 0) || (c.y == 2 && o.x == 1 && o.y == 0) || (c.y == 3 && o.x == 2 && o.y == 0);
-        if (c.y == 5) return abs(o.x) + abs(o.y) <= 1;
-        return c.y == 6 && all(o == 0);
-    }
-    // Fern: a tuft, and four fronds arching out (a pinwheel), each with a
-    // leaflet beside it halfway.
-    if (c.y <= 1) return abs(d.x) < 1.0 && abs(d.y) < 1.0;
-    static const int2 dirs[4] = { int2(1, 0), int2(-1, 0), int2(0, 1), int2(0, -1) };
-    static const int2 lanes[4] = { int2(0, 4), int2(0, 3), int2(3, 0), int2(4, 0) }; // the cell row each runs along
-    [unroll] for (int k = 0; k < 4; k++) {
-        int2 dir = dirs[k];
-        int  along = dir.x != 0 ? c.x : c.z;
-        int  across = dir.x != 0 ? c.z : c.x;
-        int  lane = dir.x != 0 ? lanes[k].y : lanes[k].x;
-        int  s = dir.x + dir.y > 0 ? along - 4 : 3 - along; // 1.. out from the tuft
-        if (s < 1 || s > 3) continue;
-        int  h = s == 2 ? 3 : 2; // up, then drooping
-        if (c.y == h && across == lane) return true;
-        if (s == 2 && c.y == 2 && abs(across - lane) == 1) return true;
-    }
-    return false;
-}
-
-// Ray against the model in the voxel it spans for s in [0, span]; q0 is
-// the ray position at s = 0 relative to the voxel's min corner. Returns the
-// hit distance (or -1) and the face normal of the cell it met.
-float micro_hit(uint id, int3 vkey, float3 q0, float3 dir, float span, out float3 n) {
-    n = float3(0, 1, 0);
-    float3 hi  = float3(1.0, float(micro_top(id)) / float(MICRO), 1.0);
-    float3 inv = 1.0 / dir;
-    float3 a = (0.0 - q0) * inv, b = (hi - q0) * inv;
-    float3 tn = min(a, b), tf = max(a, b);
-    float  t0 = max(max(tn.x, tn.y), max(tn.z, 0.0));
-    float  t1 = min(min(tf.x, tf.y), min(tf.z, span));
-    if (t0 > t1) return -1.0;
-    if (tn.x >= tn.y && tn.x >= tn.z) n = float3(-sign(dir.x), 0, 0);
-    else if (tn.y >= tn.z)            n = float3(0, -sign(dir.y), 0);
-    else                              n = float3(0, 0, -sign(dir.z));
-
-    // Cell walk, in cell units, from where the ray enters the box.
-    float3 p    = (q0 + dir * t0) * float(MICRO);
-    int3   cell = clamp(int3(floor(p)), 0, MICRO - 1);
-    int3   stp  = int3(sign(dir));
-    float3 dt   = abs(inv) / float(MICRO);
-    float3 tm   = t0 + ((float3(cell) + float3(stp > 0)) - p) * inv / float(MICRO);
-    [loop] for (int i = 0; i < 3 * MICRO; i++) {
-        if (micro_cell(id, micro_model_cell(vkey, cell))) return t0;
-        if (tm.x < tm.y && tm.x < tm.z) { t0 = tm.x; tm.x += dt.x; cell.x += stp.x; n = float3(-stp.x, 0, 0); }
-        else if (tm.y < tm.z)           { t0 = tm.y; tm.y += dt.y; cell.y += stp.y; n = float3(0, -stp.y, 0); }
-        else                            { t0 = tm.z; tm.z += dt.z; cell.z += stp.z; n = float3(0, 0, -stp.z); }
-        if (t0 > t1 || any(cell < 0) || any(cell >= MICRO)) break;
-    }
-    return -1.0;
-}
-
-// A shaped block's surface along the ray (plants, doors), as plant_hit.
-float shaped_hit(uint id, int3 vkey, float3 q0, float3 dir, float span, out float3 n) {
-    if (block_is_door(id)) return door_hit(id, q0, dir, span, n);
-    if (block_is_micro(id)) return micro_hit(id, vkey, q0, dir, span, n);
-    return plant_hit(id, vkey, q0, dir, span, n);
-}
 
 // world_origin: ray pos in WORLD units, used only for the final hit_pos
 //   output (depth/shading) — its far-from-spawn drift is cosmetically

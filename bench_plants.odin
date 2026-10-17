@@ -14,6 +14,7 @@ bench_plants_run :: proc(gs: ^Game_State) {
     day_set_hour(gs, 15, settle = true)
     cam := &gs.camera
     cam.fly_mode = true
+    held := gs.selected_block
     ox, sz := int(cam.pos.x), int(cam.pos.z)
     fy := surface_height_at(ox, sz) + 40 // where plants stand
 
@@ -57,11 +58,37 @@ bench_plants_run :: proc(gs: ^Game_State) {
     shot(gs, "close")
     day_set_hour(gs, 23, settle = true)
     shot(gs, "close_night")
+    // A torch in hand among them: shadows the plants' shapes, not blocks.
+    gs.selected_block = .Torch
+    cam.pos = {f32(ox) + 0.5, f32(fy) + 1.3, f32(sz) + 1.6}
+    shot(gs, "torch")
+    gs.selected_block = held
     day_set_hour(gs, 15, settle = true)
+    // Right up to a mushroom (the first row's), for its edges.
+    cam.pos = {f32(ox) - 4.5, f32(fy) + 0.9, f32(sz) + 1.2}
+    cam.yaw, cam.pitch = 0, -25
+    shot(gs, "mushroom")
     // Closer still, on the mushrooms and the flowers.
     cam.pos = {f32(ox) - 1.5, f32(fy) + 1.0, f32(sz) + 1.0}
     cam.yaw, cam.pitch = 0, -30
     shot(gs, "closer")
+
+    // A torch in hand over a thick patch of grass and ferns: the torch's
+    // rays to the ground cross several plant voxels (which used to shade
+    // as whole blocks, darkening the ground in block-shaped wedges).
+    lay(gs, ox, sz, fy, 10, 14, proc(x, z: int) -> Block_Type {
+        h := u32(x * 73856093) ~ u32(z * 19349663)
+        h = (h ~ (h >> 13)) * 0x5bd1e995
+        if z < 1 || (h >> 9) % 10 < 4 { return .Air }
+        return (h >> 5) % 3 == 0 ? .Fern : .Tall_Grass
+    })
+    day_set_hour(gs, 23, settle = true)
+    gs.selected_block = .Torch
+    cam.pos = {f32(ox) + 0.5, f32(fy) + PLAYER_EYE_HEIGHT, f32(sz) - 0.5}
+    cam.yaw, cam.pitch = 0, -35
+    shot(gs, "torch_field")
+    gs.selected_block = held
+    day_set_hour(gs, 15, settle = true)
 
     // The meadow: every voxel a plant, a mix of the four kinds.
     W, D :: 40, 80

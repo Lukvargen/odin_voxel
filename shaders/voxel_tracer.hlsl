@@ -146,7 +146,9 @@ float3 hand_light(float3 p, float3 n, bool two_sided) {
     float ndl = dot(n, l);
     if (two_sided) ndl = abs(ndl) * 0.7 + 0.3;
     if (ndl <= 0.0) return 0.0;
-    float sh = trace_shadow_transmittance(p + n * 0.01, l, max(d - 0.3, 0.0));
+    // Plants shade by their shapes: so close, whole-voxel shading shows as
+    // dark block-shaped wedges across the ground.
+    float sh = trace_shadow_transmittance(p + n * 0.01, l, max(d - 0.3, 0.0), true);
     return TORCH_LIGHT_COLOR * (block_light_curve(level) * ndl * sh);
 }
 
