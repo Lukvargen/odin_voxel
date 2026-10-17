@@ -263,6 +263,7 @@ main :: proc() {
                 }
             case strings.has_prefix(a, "yaw="):
                 start_yaw, _ = strconv.parse_f32(a[4:])
+            case a == "f3": gs.ui.debug_open = true // the debug panel open from the start (checking things without input)
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
                 day_set_hour(&gs, clamp(h, 0, 23.99), settle = true)

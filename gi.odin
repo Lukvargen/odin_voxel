@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:math"
 import "core:slice"
+import "core:time"
 import SDL "vendor:sdl3"
 
 // Bounce light: irradiance probes every GI_SPACING voxels in a box around
@@ -45,6 +46,12 @@ GI :: struct {
     origin:   [3]i32,                 // the grid's min corner last frame
     placed:   bool,                   // ... once there was a last frame
     no_list:  bool,                   // bench: the round alone, nothing listed
+    // F3 panel (gi_time): the probe pass timed alone now and then.
+    uniform:  Camera_Uniform,         // this frame's, to run the pass again
+    stats:    ^SDL.GPUBuffer,         // [0] probes renewed, [1] of them buried in rock
+    stats_up, stats_down: ^SDL.GPUTransferBuffer,
+    ms:       f32,                    // GPU time of the probe pass, smoothed
+    buried:   f32,                    // share of probes solid all through (skipped), smoothed over timed passes
 }
 
 gi_init :: proc(gs: ^Game_State) {
@@ -56,6 +63,7 @@ gi_init :: proc(gs: ^Game_State) {
         format                         = {.SPIRV},
         num_readonly_storage_buffers   = 7, // voxel_chunk, chunk_index, chunk_owner, voxel_mask, light_index, light_pool, gi_list
         num_readwrite_storage_textures = 2, // gi_irr (u0), gi_vis (u1)
+        num_readwrite_storage_buffers  = 1, // gi_stats (u2)
         num_uniform_buffers            = 1,
         threadcount_x = 64, threadcount_y = 1, threadcount_z = 1,
     })
@@ -81,6 +89,13 @@ gi_init :: proc(gs: ^Game_State) {
     gs.gi.list_up = SDL.CreateGPUTransferBuffer(gs.gpu_device, {usage = .UPLOAD, size = GI_LIST_MAX * 4})
     assert(gs.gi.list_buf != nil && gs.gi.list_up != nil, "Failed to create the GI list buffers")
     gs.gi.pending = make([]u8, GI_PROBES)
+    gs.gi.stats = SDL.CreateGPUBuffer(gs.gpu_device, {usage = {.COMPUTE_STORAGE_READ, .COMPUTE_STORAGE_WRITE}, size = 8})
+    gs.gi.stats_up = SDL.CreateGPUTransferBuffer(gs.gpu_device, {usage = .UPLOAD, size = 8})
+    gs.gi.stats_down = SDL.CreateGPUTransferBuffer(gs.gpu_device, {usage = .DOWNLOAD, size = 8})
+    assert(gs.gi.stats != nil && gs.gi.stats_up != nil && gs.gi.stats_down != nil, "Failed to create the GI stats buffers")
+    z := ([^]u32)(SDL.MapGPUTransferBuffer(gs.gpu_device, gs.gi.stats_up, false))
+    z[0], z[1] = 0, 0
+    SDL.UnmapGPUTransferBuffer(gs.gpu_device, gs.gi.stats_up)
 }
 
 @(private="file")
@@ -104,6 +119,9 @@ gi_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.gi.pipeline)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.gi.list_buf)
     SDL.ReleaseGPUTransferBuffer(gs.gpu_device, gs.gi.list_up)
+    SDL.ReleaseGPUBuffer(gs.gpu_device, gs.gi.stats)
+    SDL.ReleaseGPUTransferBuffer(gs.gpu_device, gs.gi.stats_up)
+    SDL.ReleaseGPUTransferBuffer(gs.gpu_device, gs.gi.stats_down)
     delete(gs.gi.pending)
     delete(gs.gi.queue)
 }
@@ -236,11 +254,57 @@ gi_dispatch :: proc(gs: ^Game_State, cmd: ^SDL.GPUCommandBuffer) {
         {texture = gs.gi.irr, cycle = false},
         {texture = gs.gi.vis, cycle = false},
     }
-    p := SDL.BeginGPUComputePass(cmd, raw_data(rw[:]), 2, nil, 0)
+    rw_buf := SDL.GPUStorageBufferReadWriteBinding{buffer = gs.gi.stats, cycle = false}
+    p := SDL.BeginGPUComputePass(cmd, raw_data(rw[:]), 2, &rw_buf, 1)
     SDL.BindGPUComputePipeline(p, gs.gi.pipeline)
     bufs := [7]^SDL.GPUBuffer{gs.voxel_buf, gs.index_buf, gs.owner_buf, gs.mask_buf, gs.light_index_buf, gs.light_pool_buf, gs.gi.list_buf}
     SDL.BindGPUComputeStorageBuffers(p, 0, raw_data(bufs[:]), 7)
     SDL.DispatchGPUCompute(p, u32(GI_PER_FRAME + gs.gi.listed), 1, 1)
     SDL.EndGPUComputePass(p)
     gs.gi.frame += 1
+}
+
+// For the F3 panel (gpu_render_timed, on an idle GPU after a timed frame):
+// the probe pass once more on its own, timed, with how many probes it
+// renewed and how many of those were buried in rock (solid all through,
+// skipped after the open-voxel scan). An extra round of updates, harmless.
+gi_time :: proc(gs: ^Game_State) {
+    gi := &gs.gi
+    if !gi.enabled { gi.ms, gi.buried = 0, 0; return }
+    // Two submissions timed alike: zeroing the counters alone, then the
+    // pass and reading them back. The first is the cost of a submit and its
+    // fence, taken off the second.
+    run :: proc(gs: ^Game_State, with_pass: bool) -> (ms: f32, ok: bool) {
+        gi := &gs.gi
+        cmd := SDL.AcquireGPUCommandBuffer(gs.gpu_device)
+        if cmd == nil { return }
+        t := time.tick_now()
+        cp := SDL.BeginGPUCopyPass(cmd)
+        if with_pass {
+            SDL.EndGPUCopyPass(cp)
+            SDL.PushGPUComputeUniformData(cmd, 0, &gi.uniform, size_of(gi.uniform))
+            gi_dispatch(gs, cmd)
+            cp = SDL.BeginGPUCopyPass(cmd)
+            SDL.DownloadFromGPUBuffer(cp, {buffer = gi.stats, size = 8}, {transfer_buffer = gi.stats_down})
+        } else {
+            SDL.UploadToGPUBuffer(cp, {transfer_buffer = gi.stats_up}, {buffer = gi.stats, size = 8}, false)
+        }
+        SDL.EndGPUCopyPass(cp)
+        fence := SDL.SubmitGPUCommandBufferAndAcquireFence(cmd)
+        if fence == nil { return }
+        _ = SDL.WaitForGPUFences(gs.gpu_device, true, &fence, 1)
+        SDL.ReleaseGPUFence(gs.gpu_device, fence)
+        return f32(time.duration_milliseconds(time.tick_since(t))), true
+    }
+    base, ok0 := run(gs, false)
+    full, ok1 := run(gs, true)
+    if !ok0 || !ok1 { return }
+    ms := max(full - base, 0)
+    gi.ms = gi.ms == 0 ? ms : gi.ms + (ms - gi.ms) * 0.3
+    c := ([^]u32)(SDL.MapGPUTransferBuffer(gs.gpu_device, gi.stats_down, false))
+    // Each pass renews a different stretch of the grid: smoothed, the share
+    // covers it all.
+    share := f32(c[1]) / f32(max(c[0], 1))
+    gi.buried = gi.buried == 0 ? share : gi.buried + (share - gi.buried) * 0.15
+    SDL.UnmapGPUTransferBuffer(gs.gpu_device, gi.stats_down)
 }

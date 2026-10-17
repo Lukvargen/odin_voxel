@@ -1390,6 +1390,15 @@ debug_layout :: proc(gs: ^Game_State) {
         pool_line("light mem", gs.light_pool, len(gs.light_starved), LIGHT_BRICK_BYTES)
         line("columns", fmt.tprintf("%d loaded, %d pending", len(gs.columns), worker_pool_pending_count(&gs.pool)))
         line("entities", fmt.tprintf("%d drawn", gs.entity_count))
+        if !gs.gi.enabled {
+            line("bounce", "off")
+        } else {
+            gi := &gs.gi
+            waiting := 0
+            for s in gi.queue { waiting += int(gi.pending[s]) }
+            line("bounce", fmt.tprintf("probes %.2f ms, %d + %d a frame, %d waiting, %.0f%% buried",
+                gi.ms, GI_PER_FRAME, gi.listed, waiting, 100 * gi.buried))
+        }
         line("render", fmt.tprintf("%dx%d (%.0f%%)  aa%d  %s", gs.render_w, gs.render_h, gs.render_scale * 100, gs.aa_samples, gs.shadow_rays == 1 ? "hard" : "soft"))
         line("cave", fmt.tprintf("%.2f", gs.cave_factor))
         alive := 0

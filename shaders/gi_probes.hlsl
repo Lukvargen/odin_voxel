@@ -22,6 +22,7 @@ StructuredBuffer<uint>  gi_list     : register(t6, space0); // slots renewed fir
 
 [[vk::image_format("rgba16f")]] RWTexture2D<float4> gi_irr : register(u0, space1);
 [[vk::image_format("r32ui")]]   RWTexture2D<uint>   gi_vis : register(u1, space1);
+RWStructuredBuffer<uint> gi_stats : register(u2, space1); // probes renewed, of them buried (F3 panel)
 
 #include "camera_uniforms.hlsl"
 
@@ -180,8 +181,10 @@ void main(uint3 gid : SV_GroupID, uint tid : SV_GroupIndex) {
     GroupMemoryBarrierWithGroupSync();
 
     uint owner = gi_owner(pw);
+    if (tid == 0) InterlockedAdd(gi_stats[0], 1u);
     if (g_start == 0xFFFFFFFFu) {
         // Solid all through: nothing to light, nothing it reaches.
+        if (tid == 0) InterlockedAdd(gi_stats[1], 1u);
         if (tid < 6) gi_irr[gi_irr_texel(s, int(tid))] = float4(0, 0, 0, 0);
         if (tid < 16) gi_vis[gi_vis_texel(s, int(tid))] = 0u;
         if (tid == 16) gi_vis[gi_vis_texel(s, GI_OWNER_WORD)] = owner;

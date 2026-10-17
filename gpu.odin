@@ -668,6 +668,7 @@ gpu_render_timed :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUFence(gs.gpu_device, fence)
     ms := f32(time.duration_milliseconds(time.tick_since(t)))
     gs.gpu_ms = gs.gpu_ms == 0 ? ms : gs.gpu_ms + (ms - gs.gpu_ms) * 0.3
+    gi_time(gs)
 }
 
 // want_fence: return a fence for the submission (bench mode times the GPU
@@ -741,6 +742,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     uniform.thermal_count.x = i32(clouds)
     uniform.hand_light = hand_light(gs, render_pos, fwd, right, up)
     uniform.gi_origin, uniform.gi_frame = gi_uniforms(gs, render_pos)
+    gs.gi.uniform = uniform // gi_time runs the probe pass again with it
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 
     // --- Pass 0: renew a share of the bounce-light probes (gi.odin) ---
