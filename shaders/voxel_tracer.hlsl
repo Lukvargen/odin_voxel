@@ -611,6 +611,34 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         return saturate(wood * (1.0 + vj * 0.06));
     }
 
+    if (block_is_micro(block_id)) {
+        int3  mc = micro_hit_cell(vkey, hit_pos, nrm);
+        float th = hash31i(vkey * MICRO + mc);
+        if (block_id == BLOCK_FERN) {
+            float3 c = lerp(float3(0.06, 0.20, 0.06), float3(0.16, 0.40, 0.11), float(mc.y) / 3.0);
+            return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.2));
+        }
+        if (block_id == BLOCK_FLOWER) {
+            if (mc.y < 5) return float3(0.14, 0.34, 0.09) * (0.9 + 0.2 * th);
+            if (mc.y == 6) return float3(0.40, 0.28, 0.05); // the eye
+            // One colour per flower.
+            uint k = uint(hash31i(vkey + int3(3, 7, 1)) * 6.0);
+            float3 petal = k == 0u ? float3(0.85, 0.12, 0.10) : k == 1u ? float3(0.95, 0.80, 0.15)
+                         : k == 2u ? float3(0.92, 0.92, 0.88) : k == 3u ? float3(0.55, 0.30, 0.85)
+                         : k == 4u ? float3(0.30, 0.45, 0.95) : float3(0.95, 0.50, 0.70);
+            return saturate(petal * (0.9 + 0.2 * th));
+        }
+        if (block_id == BLOCK_GLOW_MUSHROOM) {
+            // Pale stems, caps that glow (block_emission does the glow).
+            return glow_mushroom_stem(mc) ? float3(0.70, 0.75, 0.72) * (0.85 + 0.2 * th) : float3(0.55, 0.95, 1.0);
+        }
+        // Mushroom: a pale stem; a red cap with white spots, or a brown one.
+        if (mc.y < 3) return float3(0.78, 0.75, 0.66) * (0.9 + 0.1 * th);
+        bool red = hash31i(vkey + int3(9, 1, 4)) < 0.55;
+        if (red) return th < 0.2 ? float3(0.92, 0.90, 0.84) : float3(0.62, 0.08, 0.05);
+        return float3(0.42, 0.28, 0.16) * (0.85 + 0.3 * th);
+    }
+
     if (block_is_cutout(block_id)) {
         // Plane texel (plant_texel): u along the plane = local x, v up.
         float3 lp = hit_pos - float3(vkey);
@@ -624,38 +652,11 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
             float3 c = g * lerp(0.75, 1.25, float(cv) / 7.0);
             return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.2));
         }
-        if (block_id == BLOCK_FERN) {
-            float3 c = lerp(float3(0.06, 0.20, 0.06), float3(0.14, 0.36, 0.10), float(cv) / 7.0);
-            return saturate(c * (0.85 + 0.3 * lerp(0.5, th, detail)) * (1.0 + vj * 0.2));
-        }
-        if (block_id == BLOCK_FLOWER) {
-            if (cv >= 5) {
-                // One colour per flower; a darker eye in the middle.
-                uint k = uint(hash31i(vkey + int3(3, 7, 1)) * 6.0);
-                float3 petal = k == 0u ? float3(0.85, 0.12, 0.10) : k == 1u ? float3(0.95, 0.80, 0.15)
-                             : k == 2u ? float3(0.92, 0.92, 0.88) : k == 3u ? float3(0.55, 0.30, 0.85)
-                             : k == 4u ? float3(0.30, 0.45, 0.95) : float3(0.95, 0.50, 0.70);
-                if (cv == 6 && (cu == 3 || cu == 4)) petal = float3(0.35, 0.25, 0.05);
-                return saturate(petal * (0.9 + 0.2 * th));
-            }
-            return float3(0.14, 0.34, 0.09) * (0.9 + 0.2 * th);
-        }
         if (block_id == BLOCK_DRY_BUSH) {
             return float3(0.36, 0.26, 0.15) * (0.8 + 0.4 * th);
         }
         if (block_id == BLOCK_ROOTS) {
             return float3(0.40, 0.30, 0.19) * (0.75 + 0.4 * th) * lerp(0.8, 1.1, float(cv) / 7.0);
-        }
-        if (block_id == BLOCK_GLOW_MUSHROOM) {
-            // Pale stems, caps that glow (block_emission does the glow).
-            bool cap = cv == 2 || cv == 4;
-            return cap ? float3(0.55, 0.95, 1.0) : float3(0.70, 0.75, 0.72) * (0.85 + 0.2 * th);
-        }
-        if (block_id == BLOCK_MUSHROOM) {
-            if (cv < 3) return float3(0.78, 0.75, 0.66) * (0.9 + 0.1 * th);
-            bool red = hash31i(vkey + int3(9, 1, 4)) < 0.55;
-            if (red) return th < 0.25 ? float3(0.92, 0.90, 0.84) : float3(0.62, 0.08, 0.05);
-            return float3(0.42, 0.28, 0.16) * (0.85 + 0.3 * th);
         }
         if (block_id == BLOCK_KELP) {
             bool stalk = cu == 3 || cu == 4;
@@ -1280,7 +1281,8 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     // shadow ray is skipped there.
     float3 l = light_dir_normalized;
     float n_dot_l = dot(surf_normal, l);
-    if (plant) n_dot_l = abs(n_dot_l) * 0.7 + 0.3; // thin blades: lit from either side
+    bool   blades = plant && !block_is_micro(hit.block_id); // small-voxel models have real faces
+    if (blades) n_dot_l = abs(n_dot_l) * 0.7 + 0.3; // thin blades: lit from either side
     if (n_dot_l > 0.0 && sky_level > 0.0) {
         float3 shadow_origin = hit_point + surf_normal * epsilon;
         float shadow_factor = full_sun ? trace_shadow_transmittance(shadow_origin, l)
@@ -1317,7 +1319,7 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     // or down, so shadowed walls and overhangs keep some warmth and
     // shape instead of flat sky blue.
     lighting += bounce_light(surf_normal) * light_curve(sky_level) * uw;
-    lighting += hand_light(hit_point + surf_normal * epsilon, surf_normal, plant);
+    lighting += hand_light(hit_point + surf_normal * epsilon, surf_normal, blades);
 
     // Leaf backlit glow: sun behind the leaves tints them warm
     // yellow-green, scaled by how open to the sky they are.
@@ -1333,6 +1335,11 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     // The texture shapes the glow: ember texels burn bright, the
     // charred wood between them only smoulders.
     float3 emis = block_emission(hit.block_id);
+    if (hit.block_id == BLOCK_GLOW_MUSHROOM) {
+        // Only the caps glow, and solid caps show far more surface than the
+        // old crossed planes did: dimmer, or the bloom swallows them.
+        emis *= glow_mushroom_stem(micro_hit_cell(hit.vkey, hit.hit_pos, hit.normal)) ? 0.0 : 0.3;
+    }
     if (emis.x > 0.0) {
         float fl = 0.92 + 0.08 * sin(u_time * 9.0 + hash31i(hit.vkey) * 6.2831853);
         hit_color.rgb += emis * albedo * albedo * fl;

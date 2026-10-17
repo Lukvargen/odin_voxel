@@ -160,6 +160,10 @@ bench_run :: proc(gs: ^Game_State) {
         bench_doors_run(gs)
         return
     }
+    if bench_plants {
+        bench_plants_run(gs)
+        return
+    }
 
     gs.camera.fly_mode = true
     spawn := gs.camera.pos
