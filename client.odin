@@ -741,9 +741,9 @@ others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
                 // As the player's own sword arm (creatures.odin), from its view.
                 fwd, right, up := camera_basis(Camera{yaw = p.yaw, pitch = p.pitch})
                 eye := feet + [3]f32{0, 1.5, 0} + fwd * 0.15
-                shoulder := feet + basis_yaw(o.anim.body_yaw) * (hips + [3]f32{-0.27, 0.52, 0})
+                shoulder := feet + basis_yaw(o.anim.body_yaw) * [3]f32{-HUM_SHOULDER.x, HUM_SHOULDER.y, HUM_SHOULDER.z}
                 grip, blade, edge, flat := sword_place(o.pose, eye, fwd, right, up, shoulder)
-                sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, tint = tint)
+                sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, tint = tint, arm = false)
             }
         }
         ent_end(f)

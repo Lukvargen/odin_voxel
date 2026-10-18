@@ -118,87 +118,96 @@ shape_bird_wing :: proc(p: [3]f32, voxel: f32) -> Pal {
     return p.z < trail + 0.06 ? .Feather_Dark : .Feather
 }
 
-// Humanoid, Cube World proportions (big head), dressed for magic: a hooded
-// robe in the part's tint (Shirt; Shirt_Trim and Robe_Dark its shades), a
-// belt with a glowing stone, sleeves to gold cuffs and the leather gloves
-// of the first-person hands (magic.odin), trousers and turned-down boots,
-// and a short cape. All pivots at joints.
+// The player, Cube World style: a big round head in a deep hood, a compact
+// body in a robe flaring to the ground, and the hands and feet apart from
+// it (no arms or legs): leather gloves with gold cuffs, as the first-person
+// hands (magic.odin), and soft boots. The robe is the part's tint (Shirt;
+// Shirt_Trim and Robe_Dark its shades), trimmed in gold; a belt with a
+// glowing stone; a short cape. Pivots: the head at the neck, the body at
+// the hips, a hand at its wrist, a foot at its ankle.
 @(private="file")
 shape_hum_torso :: proc(p: [3]f32, voxel: f32) -> Pal {
-    // The robe's skirt flares a little below the belt, over the hips.
-    flare := clamp((0.07 - p.y) / 0.22, 0, 1)
-    body := vm_round_box(p, {0, 0.29, 0}, {0.2, 0.29, 0.12}, 0.05)
-    skirt := vm_round_box(p, {0, -0.04, 0}, {0.2 + 0.03 * flare, 0.13, 0.12 + 0.03 * flare}, 0.03)
-    if min(body, skirt) > 0 {
-        // A pouch on the right hip.
-        if vm_round_box(p, {-0.22, 0.02, 0.02}, {0.04, 0.07, 0.06}, 0.02) < 0 { return .Leather }
+    t := clamp(-p.y / 0.34, 0, 1) // down the skirt
+    chest := vm_round_box(p, {0, 0.17, 0}, {0.23, 0.23, 0.17}, 0.11)
+    skirt := vm_round_box(p, {0, -0.16, 0}, {0.21 + 0.07 * t, 0.18, 0.16 + 0.05 * t}, 0.06) // to above the boots
+    mantle := vm_round_box(p, {0, 0.36, -0.005}, {0.26, 0.07, 0.18}, 0.06)
+    if mantle < 0 && p.y > 0.29 {
+        return p.y < 0.31 ? .Guard : .Shirt_Trim // a shoulder mantle, gold at its edge
+    }
+    if min(chest, skirt) > 0 {
+        if vm_round_box(p, {-0.24, -0.06, 0.03}, {0.045, 0.07, 0.06}, 0.025) < 0 { return .Leather } // a pouch
         return .Empty
     }
-    if p.y > 0.07 && p.y < 0.13 {
-        if p.z > 0.08 && abs(p.x) < 0.035 { return .Pommel_Gem } // the belt's stone
+    if p.y > -0.04 && p.y < 0.03 {
+        if p.z > 0.1 && abs(p.x) < 0.03 { return .Pommel_Gem } // the belt's stone
         return .Leather_Dark
     }
-    if p.z > 0.06 && abs(p.x) < 0.035 && p.y < 0.5 { return .Robe_Dark } // the robe's opening
-    if p.y > 0.5 { return .Shirt_Trim } // the hood, laid back over the shoulders
-    if p.y < -0.12 { return .Shirt_Trim } // the hem
+    if p.y < -0.3 { return .Guard } // the hem's gold
+    if p.z > 0.08 && abs(p.x) < 0.03 { return .Robe_Dark } // the robe's opening
+    if p.y < -0.25 { return .Shirt_Trim }
     return .Shirt
 }
 
 @(private="file")
 shape_hum_head :: proc(p: [3]f32, voxel: f32) -> Pal {
     q := [3]f32{abs(p.x), p.y, p.z}
-    face := vm_round_box(p, {0, 0.24, 0}, {0.21, 0.21, 0.2}, 0.06)
-    hood := vm_round_box(p, {0, 0.26, -0.02}, {0.245, 0.25, 0.235}, 0.08)
-    open := p.z > 0.1 && q.x < 0.165 && p.y > 0.05 && p.y < 0.37 // where the face looks out
-    if hood < 0 && !open && face > -0.04 {
-        // Its rim round the face shows the lining.
-        if p.z > 0.13 && q.x < 0.205 && p.y > 0.02 && p.y < 0.41 { return .Robe_Dark }
+    head := vm_round_box(p, {0, 0.29, 0.02}, {0.25, 0.26, 0.24}, 0.12)
+    hood := vm_round_box(p, {0, 0.31, -0.02}, {0.3, 0.31, 0.29}, 0.15)
+    tail := vm_capsule(p, {0, 0.5, -0.2}, {0, 0.36, -0.46}, 0.06) // its point, drooping behind
+    open := p.z > 0.06 && q.x < 0.2 && p.y > 0.06 && p.y < 0.44 // where the face looks out
+    if (hood < 0 && head > -0.03 && !open) || tail < 0 {
+        if p.z > 0.1 && q.x < 0.24 && p.y > 0.03 && p.y < 0.48 { return .Robe_Dark } // the lining round the face
         return .Shirt_Trim
     }
-    if face > 0 { return .Empty }
-    if p.z > 0.15 && abs(q.x - 0.085) < 0.035 && abs(p.y - 0.22) < 0.05 {
-        return q.x > 0.095 && p.y > 0.22 ? .Eye_White : .Eye
+    if head > 0 {
+        if vm_round_box(p, {0, 0.24, 0.27}, {0.025, 0.035, 0.03}, 0.015) < 0 { return .Skin } // the nose
+        return .Empty
     }
-    if p.y > 0.31 { return .Hair } // a fringe under the hood
+    if p.z > 0.18 {
+        // Eyes: dark, a glint in the upper inside corner; brows above.
+        if abs(q.x - 0.1) < 0.035 && abs(p.y - 0.28) < 0.05 {
+            return q.x < 0.09 && p.y > 0.3 ? .Eye_White : .Eye
+        }
+        if abs(q.x - 0.11) < 0.05 && p.y > 0.35 && p.y < 0.38 { return .Hair }
+    }
+    if p.y > 0.4 { return .Hair } // under the hood
     return .Skin
 }
 
+// A gloved fist below the wrist, the gold cuff above it; knuckles forward.
 @(private="file")
-shape_hum_arm :: proc(p: [3]f32, voxel: f32) -> Pal {
-    if vm_round_box(p, {0, -0.25, 0}, {0.07, 0.26, 0.07}, 0.03) > 0 {
-        // The sleeve's end and the cuff stand out a little.
-        if p.y < -0.3 && p.y > -0.42 && vm_round_box(p, {0, -0.36, 0}, {0.085, 0.06, 0.085}, 0.02) < 0 {
-            return p.y < -0.37 ? .Guard : .Shirt
-        }
+shape_hum_hand :: proc(p: [3]f32, voxel: f32) -> Pal {
+    if p.y > -0.035 {
+        return vm_round_box(p, {0, -0.01, 0}, {0.08, 0.025, 0.08}, 0.02) < 0 ? .Guard : .Empty
+    }
+    if vm_round_box(p, {0, -0.1, 0.005}, {0.072, 0.07, 0.07}, 0.035) > 0 {
+        if vm_capsule(p, {0.07, -0.08, 0.04}, {0.08, -0.12, 0.06}, 0.025) < 0 { return .Glove } // the thumb
         return .Empty
     }
-    switch {
-    case p.y > -0.36: return .Shirt
-    case p.y > -0.42: return .Guard  // the gold cuff
-    case p.y < -0.49: return .Glove_Dark // knuckles
-    }
+    if p.z > 0.04 && p.y < -0.06 { return .Glove_Dark } // knuckles
     return .Glove
 }
 
+// A soft boot, toe forward, the ankle at the top, its top turned down.
 @(private="file")
-shape_hum_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
-    if vm_round_box(p, {0, -0.68, 0.04}, {0.085, 0.065, 0.13}, 0.03) < 0 { return .Boot }
-    // The boots' turned-down tops.
-    if p.y < -0.48 && p.y > -0.56 && vm_round_box(p, {0, -0.52, 0}, {0.1, 0.04, 0.1}, 0.02) < 0 { return .Leather }
-    if vm_round_box(p, {0, -0.34, 0}, {0.085, 0.35, 0.09}, 0.03) > 0 { return .Empty }
-    return p.y < -0.5 ? .Boot : .Trousers
+shape_hum_foot :: proc(p: [3]f32, voxel: f32) -> Pal {
+    if vm_round_box(p, {0, -0.07, 0.03}, {0.075, 0.07, 0.12}, 0.045) > 0 { return .Empty }
+    if p.y > -0.035 { return .Leather }
+    if p.y < -0.12 { return .Leather_Dark } // the sole
+    return .Boot
 }
 
 // A short cape from the shoulders (its pivot, behind the neck), hanging
-// along -y, the outside toward -z; ragged at the hem.
+// along -y, the outside toward -z; gold at the ragged hem.
 @(private="file")
 shape_hum_cape :: proc(p: [3]f32, voxel: f32) -> Pal {
-    if p.y > 0 || p.z > 0 || p.z < -0.12 { return .Empty } // two voxels thick
-    half := 0.17 + 0.07 * clamp(-p.y / 0.55, 0, 1) // wider toward the hem
+    if p.y > 0 || p.z > 0 || p.z < -0.08 { return .Empty }
+    half := 0.19 + 0.08 * clamp(-p.y / 0.6, 0, 1) // wider toward the hem
     if abs(p.x) > half { return .Empty }
-    hem := -0.56 - 0.04 * math.sin(p.x * 31)
+    hem := -0.6 - 0.03 * math.sin(p.x * 31)
     if p.y < hem { return .Empty }
-    if p.y < hem + 0.06 { return .Shirt_Trim }
+    if p.y < hem + 0.04 { return .Guard }
+    if p.y < hem + 0.09 { return .Shirt_Trim }
     return .Robe_Dark
 }
 
@@ -209,11 +218,12 @@ creature_models_bake :: proc() {
     ent_models[.Fox_Tail]  = model_bake({-0.14, -0.2, -0.5}, {0.14, 0.14, 0.04}, 1.0 / 16, shape_fox_tail)
     ent_models[.Bird_Body] = model_bake({-0.14, -0.13, -0.5}, {0.14, 0.15, 0.46}, 1.0 / 16, shape_bird_body)
     ent_models[.Bird_Wing] = model_bake({-0.02, -0.05, -0.24}, {1.02, 0.08, 0.12}, 1.0 / 16, shape_bird_wing)
-    ent_models[.Hum_Torso] = model_bake({-0.27, -0.2, -0.16}, {0.27, 0.6, 0.16}, 1.0 / 16, shape_hum_torso)
-    ent_models[.Hum_Head]  = model_bake({-0.27, -0.02, -0.28}, {0.27, 0.54, 0.26}, 1.0 / 16, shape_hum_head)
-    ent_models[.Hum_Arm]   = model_bake({-0.1, -0.53, -0.1}, {0.1, 0.03, 0.1}, 1.0 / 16, shape_hum_arm)
-    ent_models[.Hum_Cape]  = model_bake({-0.25, -0.62, -0.13}, {0.25, 0.01, 0.01}, 1.0 / 16, shape_hum_cape)
-    ent_models[.Hum_Leg]   = model_bake({-0.1, -0.75, -0.1}, {0.1, 0.02, 0.19}, 1.0 / 16, shape_hum_leg)
+    // Finer than the creatures: round enough to read as Cube World's.
+    ent_models[.Hum_Torso] = model_bake({-0.3, -0.44, -0.22}, {0.3, 0.45, 0.22}, 1.0 / 28, shape_hum_torso)
+    ent_models[.Hum_Head]  = model_bake({-0.32, -0.02, -0.54}, {0.32, 0.64, 0.32}, 1.0 / 28, shape_hum_head)
+    ent_models[.Hum_Hand]  = model_bake({-0.1, -0.18, -0.1}, {0.11, 0.02, 0.1}, 1.0 / 40, shape_hum_hand)
+    ent_models[.Hum_Foot]  = model_bake({-0.09, -0.15, -0.1}, {0.09, 0.01, 0.16}, 1.0 / 40, shape_hum_foot)
+    ent_models[.Hum_Cape]  = model_bake({-0.29, -0.65, -0.09}, {0.29, 0.01, 0.01}, 1.0 / 28, shape_hum_cape)
 }
 
 // ─── Posing helpers ─────────────────────────────────────────────────────────
@@ -402,9 +412,9 @@ player_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         // a viewpoint at the eyes.
         fwd, right, up := camera_basis(gs.camera)
         eye := feet + [3]f32{0, 1.5, 0} + fwd * 0.15
-        shoulder := feet + basis_yaw(a.body_yaw) * (hips + [3]f32{-0.27, 0.52, 0})
+        shoulder := feet + basis_yaw(a.body_yaw) * [3]f32{-HUM_SHOULDER.x, HUM_SHOULDER.y, HUM_SHOULDER.z}
         grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
-        sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4)
+        sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, arm = false)
     }
     ent_end(f)
 }
@@ -421,9 +431,18 @@ Body_Act :: struct {
     palms:    [2][3]f32, // out (world): where a casting body's palms are, right then left
 }
 
+// Where the body's parts sit (body space, design metres, feet at the
+// origin): the hips (the body's pivot), the neck, and the hands at rest
+// and the shoulders they hang from.
+HUM_HIPS     :: [3]f32{0, 0.55, 0}
+HUM_NECK     :: [3]f32{0, 0.99, 0}
+HUM_SHOULDER :: [3]f32{0.25, 0.92, 0} // the left one; x mirrored for the right
+HUM_HAND     :: [3]f32{0.33, 0.6, 0.03}
+
 // A player's body at its feet, posed by its animation (and act, if given),
 // the head turned toward where it looks (degrees, camera convention); the
-// right arm too unless the caller poses it. Returns the hips, in body space.
+// right hand too unless the caller poses it (the sword's). Returns the
+// hips, in body space.
 humanoid_add_parts :: proc(f: ^Ent_Frame, feet: [3]f32, a: ^Player_Anim, look_yaw, look_pitch: f32, tint: [3]f32, right_arm: bool, act: ^Body_Act = nil) -> (hips: [3]f32) {
     climb := act != nil && act.climbing
     raised := act != nil && !climb && act.raise > 0.01 ? act.raise : 0
@@ -437,95 +456,94 @@ humanoid_add_parts :: proc(f: ^Ent_Frame, feet: [3]f32, a: ^Player_Anim, look_ya
     }
     rot := basis_yaw(body_yaw)
     inv := la.transpose(rot)
-    sw := 0.7 * a.amp * math.sin(a.walk_phase)
-    bob := 0.04 * a.amp * math.abs(math.cos(a.walk_phase))
-    // In the air: legs tuck, arms lift.
-    leg_l := sw * (1 - a.air) - 0.5 * a.air
-    leg_r := -sw * (1 - a.air) + 0.25 * a.air
-    arm_out := 0.08 + 0.5 * a.air
-    lean := -0.06 * a.amp
-    if climb {
-        // Up the face: a knee comes up to it, the other foot pushes off,
-        // leaning in over the lip as it goes over.
-        u := act.k
-        leg_l = -1.1 * math.sin(clamp(u * 1.6, 0, 1) * math.PI)
-        leg_r = -0.4 * math.sin(clamp(u * 1.6 - 0.4, 0, 1) * math.PI)
-        lean = 0.35 * math.sin(clamp(u, 0, 1) * math.PI)
+    ph := a.walk_phase
+    amp := min(a.amp, 1.2)
+    ground := 1 - a.air
+    bob := 0.035 * amp * math.abs(math.cos(ph)) * ground
+    lean := 0.07 * amp * ground - 0.05 * a.air
+    if climb { lean = 0.3 * math.sin(clamp(act.k, 0, 1) * math.PI) } // over the lip
+
+    // Feet: little steps, each lifted as it swings through; tucked in the air.
+    for side in ([2]f32{1, -1}) {
+        sp := ph + (side > 0 ? 0 : math.PI)
+        z := 0.17 * amp * math.sin(sp) * ground
+        lift := 0.08 * amp * max(math.cos(sp), 0) * ground + 0.1 * a.air
+        tilt := -0.35 * amp * math.cos(sp) * ground + 0.3 * a.air
+        if climb {
+            // Up the face: one knee in to it, the other pushing off.
+            u := clamp(act.k, 0, 1)
+            k := side > 0 ? math.sin(clamp(u * 1.6, 0, 1) * math.PI) : math.sin(clamp(u * 1.6 - 0.4, 0, 1) * math.PI)
+            z, lift, tilt = 0.12 * k, 0.3 * k, -0.4 * k
+        }
+        attach(f, .Hum_Foot, feet, rot, 1, {0.11 * side, 0.15 + lift, z - 0.02}, basis_rot_x(tilt), tint)
     }
-    hips = {0, 0.74 + bob, 0}
-    attach(f, .Hum_Leg, feet, rot, 1, hips + {0.1, 0, 0}, basis_rot_x(leg_l), tint)
-    attach(f, .Hum_Leg, feet, rot, 1, hips + {-0.1, 0, 0}, basis_rot_x(leg_r), tint)
+    hips = HUM_HIPS + {0, bob, 0}
     attach(f, .Hum_Torso, feet, rot, 1, hips, basis_rot_x(lean), tint)
     // The cape swings back with the pace and in the air, and stirs.
-    flap := 0.06 + 0.3 * a.amp + 0.45 * a.air + 0.04 * a.amp * math.sin(a.walk_phase * 2 + 0.7)
-    attach(f, .Hum_Cape, feet, rot, 1, hips + {0, 0.56, -0.13}, basis_rot_x(max(flap, lean + 0.08)), tint)
+    flap := 0.05 + 0.25 * amp + 0.45 * a.air + 0.04 * amp * math.sin(ph * 2 + 0.7)
+    attach(f, .Hum_Cape, feet, rot, 1, hips + {0, 0.38, -0.17}, basis_rot_x(max(flap, lean + 0.06)), tint)
 
-    // Arms: hanging and swinging, or reaching for what the act is about.
+    // Hands: swinging against the feet, or on what the act is about.
     target: [3]f32 // body space
     if act != nil { target = inv * (design(feet, act.at) - feet) }
     for side in ([2]f32{1, -1}) { // left (+x), right
         if side < 0 && !right_arm { continue }
-        shoulder := hips + {0.27 * side, 0.52, 0}
-        hang := basis_rot_z(arm_out * side) * basis_rot_x(-0.8 * sw * side)
+        sp := ph + (side > 0 ? math.PI : 0)
+        rest := [3]f32{HUM_HAND.x * side + 0.06 * a.air * side, HUM_HAND.y + bob + 0.18 * a.air, HUM_HAND.z}
+        rest.z += 0.15 * amp * math.sin(sp) * ground
+        rest.y += 0.03 * amp * math.abs(math.sin(sp)) * ground
+        swing := basis_rot_x(-0.5 * amp * math.sin(sp) * ground)
+        shoulder := [3]f32{HUM_SHOULDER.x * side, HUM_SHOULDER.y, HUM_SHOULDER.z}
         switch {
         case climb:
-            // Both hands on the lip, a shoulder's width apart; the arms
-            // stretch and bend as the body rises past them.
-            hand := target + {0.2 * side, 0, 0}
-            reach := min(act.k / 0.16, 1) // MANTLE_GRAB: catching it
-            hand = la.lerp(shoulder + {0, 0.45, 0.25}, hand, reach)
-            d := hand - shoulder
-            l := la.length(d)
-            ent_part(f, .Hum_Arm, feet + rot * shoulder, rot * basis_hang_along(d, {0, 0, 1}), {1, clamp(l / 0.5, 0.45, 1.5), 1}, tint)
+            // Gripping the lip a shoulder's width apart, reached for as the
+            // pull-up starts (MANTLE_GRAB).
+            reach := min(act.k / 0.16, 1)
+            grip := target + {0.2 * side, 0.08, 0}
+            if d := grip - shoulder; la.length(d) > 0.6 { grip = shoulder + la.normalize(d) * 0.6 } // no farther than an arm would go
+            attach(f, .Hum_Hand, feet, rot, 1, la.lerp(shoulder + {0, 0.3, 0.2}, grip, reach), basis_rot_x(-1.2), tint)
         case raised > 0:
-            // Up and out toward the block, the hands a little apart, a
-            // tremble as the spell takes hold.
+            // Out toward the block, a little apart, trembling as the spell
+            // takes hold; the gloves open, palms to it.
             aim := la.normalize0(target - shoulder)
             if aim == 0 { aim = {0, 0, 1} }
-            hand := shoulder + la.normalize(aim + {-0.18 * side, 0.12, 0}) * 0.5
+            out := shoulder + la.normalize(aim + {-0.2 * side, 0.1, 0}) * 0.45
             if act.k > 0 {
                 w := act.t * 31 + side
-                hand += [3]f32{math.sin(w), math.cos(w * 1.3), 0} * 0.006 * (1 + act.k)
+                out += [3]f32{math.sin(w), math.cos(w * 1.3), 0} * 0.006 * (1 + act.k)
             }
-            down := hang * [3]f32{0, -0.5, 0}
-            d := la.lerp(down, hand - shoulder, raised)
-            arm := basis_hang_along(d, {0, 0, 1})
-            ent_part(f, .Hum_Arm, feet + rot * shoulder, rot * arm, {1, 1, 1}, tint)
-            if raised > 0.3 {
-                // The open glove: fingers on along the arm, palm to the block.
-                dir := la.normalize(d)
-                wrist := shoulder + dir * 0.4
-                pn := la.normalize0(target - wrist)
-                pn = la.normalize0(pn - dir * la.dot(pn, dir))
-                if pn == 0 { pn = {0, 0, 1} }
-                y := -pn
-                glove := basis_from_axes(la.cross(y, dir), y, dir)
-                rune := MAGIC_TINT * ((0.5 + 0.9 * act.k) * (0.9 + 0.1 * math.sin(act.t * 9)))
-                ent_part(f, side > 0 ? .Glove_L : .Glove_R, feet + rot * wrist, rot * glove, {1, 1, 1}, rune)
-                palm := wrist + dir * 0.06 + pn * 0.03
-                act.palms[side > 0 ? 1 : 0] = feet + rot * palm * world_scale
+            hand := la.lerp(rest, out, raised)
+            if raised < 0.3 {
+                attach(f, .Hum_Hand, feet, rot, 1, hand, swing, tint)
+                continue
             }
+            dir := la.normalize0(hand - shoulder)
+            if dir == 0 { dir = {0, 0, 1} }
+            pn := la.normalize0(target - hand)
+            pn = la.normalize0(pn - dir * la.dot(pn, dir))
+            if pn == 0 { pn = {0, 0, 1} }
+            fingers := la.normalize(dir + {0, 0.5, 0}) // up a little, as if pushing on the air
+            fingers = la.normalize0(fingers - pn * la.dot(fingers, pn))
+            if fingers == 0 { fingers = dir }
+            y := -pn
+            glove := basis_from_axes(la.cross(y, fingers), y, fingers)
+            rune := MAGIC_TINT * ((0.5 + 0.9 * act.k) * (0.9 + 0.1 * math.sin(act.t * 9)))
+            wrist := hand - fingers * 0.08
+            ent_part(f, side > 0 ? .Glove_L : .Glove_R, feet + rot * wrist, rot * glove, {1.4, 1.4, 1.4}, rune) // as big as the fists
+            palm := wrist + fingers * 0.09 + pn * 0.04
+            act.palms[side > 0 ? 1 : 0] = feet + rot * palm * world_scale
         case:
-            attach(f, .Hum_Arm, feet, rot, 1, shoulder, hang, tint)
+            attach(f, .Hum_Hand, feet, rot, 1, rest, swing, tint)
         }
     }
     // Head follows the look a little.
     yaw := -math.to_radians(look_yaw)
     look := clamp(math.mod(yaw - body_yaw + 3 * math.PI, 2 * math.PI) - math.PI, -0.9, 0.9)
-    pitch := clamp(-math.to_radians(look_pitch) * 0.6, -0.5, 0.5)
+    pitch := clamp(-math.to_radians(look_pitch) * 0.5, -0.4, 0.4)
     if climb { look, pitch = 0, 0.3 } // down at the hands
-    attach(f, .Hum_Head, feet, rot, 1, hips + {0, 0.58, 0}, basis_yaw(look) * basis_rot_x(pitch), tint)
+    neck := HUM_NECK + {0, bob, 0.35 * lean} // riding the body's lean
+    attach(f, .Hum_Head, feet, rot, 1, neck, basis_yaw(look) * basis_rot_x(pitch), tint)
     return
-}
-
-// A basis whose -y axis points along d (limbs hang along -y).
-@(private="file")
-basis_hang_along :: proc(d, ref: [3]f32) -> Basis {
-    y := -la.normalize(d)
-    x := la.cross(y, ref)
-    if la.length2(x) < 1e-6 { x = la.cross(y, [3]f32{0, 0, 1}) }
-    x = la.normalize(x)
-    return basis_from_axes(x, y, la.cross(x, y))
 }
 
 // The pilot lying prone under the glider (body frame rot at the eye `p`),
@@ -533,18 +551,15 @@ basis_hang_along :: proc(d, ref: [3]f32) -> Basis {
 // arms, only as a shadow).
 pilot_add_parts :: proc(f: ^Ent_Frame, p: [3]f32, rot: Basis, tint := PLAYER_TINT, grip := [3]f32{0.48, -0.42, 0.72}, arms := true) {
     prone := rot * basis_rot_x(math.PI / 2) // humanoid up -> glider forward, face -> down
-    feet := p + rot * [3]f32{0, 0.22, -1.56}
-    hips := [3]f32{0, 0.74, 0}
-    attach(f, .Hum_Leg, feet, prone, 1, hips + {0.1, 0, 0}, basis_rot_x(0.05), tint)
-    attach(f, .Hum_Leg, feet, prone, 1, hips + {-0.1, 0, 0}, basis_rot_x(-0.05), tint)
-    attach(f, .Hum_Torso, feet, prone, 1, hips, IDENTITY, tint)
-    attach(f, .Hum_Head, feet, prone, 1, hips + {0, 0.58, 0}, basis_rot_x(-0.9), tint)
+    feet := p + rot * [3]f32{0, 0.22, -1.5}
+    attach(f, .Hum_Foot, feet, prone, 1, {0.11, 0.12, -0.02}, basis_rot_x(0.6), tint)
+    attach(f, .Hum_Foot, feet, prone, 1, {-0.11, 0.12, -0.02}, basis_rot_x(0.5), tint)
+    attach(f, .Hum_Torso, feet, prone, 1, HUM_HIPS, IDENTITY, tint)
+    attach(f, .Hum_Cape, feet, prone, 1, HUM_HIPS + {0, 0.38, -0.17}, basis_rot_x(0.05), tint)
+    attach(f, .Hum_Head, feet, prone, 1, HUM_NECK, basis_rot_x(-0.9), tint)
     if !arms { return } // drawn by the caller
-    up := rot * [3]f32{0, 1, 0}
     for side in ([2]f32{1, -1}) {
-        shoulder := feet + prone * (hips + [3]f32{0.27 * side, 0.52, 0})
         hand := p + rot * [3]f32{grip.x * side, grip.y, grip.z}
-        d := hand - shoulder
-        ent_part(f, .Hum_Arm, shoulder, basis_hang_along(d, up), {1, la.length(d) / 0.53, 1}, tint)
+        ent_part(f, .Hum_Hand, hand + rot * [3]f32{0, 0.08, 0}, rot, {1, 1, 1}, tint) // round the bar
     }
 }
