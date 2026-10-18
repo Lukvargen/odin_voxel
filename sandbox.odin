@@ -797,7 +797,7 @@ sandbox_tags :: proc(gs: ^Game_State, w, h: f32) {
         if clay.UI(clay.ID("ExhibitTag", u32(k)))({
             layout = {padding = {7, 7, 3, 4}, childGap = 6},
             floating = {attachTo = .Root, offset = {px, py}, zIndex = 6, attachment = {.CenterBottom, .LeftTop}, pointerCaptureMode = .Passthrough},
-            backgroundColor = {17, 17, 27, picked ? 210 : 140},
+            backgroundColor = {COLOR_SHADE.r, COLOR_SHADE.g, COLOR_SHADE.b, picked ? 210 : 140},
             cornerRadius = clay.CornerRadiusAll(4),
         }) {
             text(EXHIBIT_NAMES[k], picked ? COLOR_ACCENT : COLOR_TEXT_DIM, 13, FONT_ID_TITLE)

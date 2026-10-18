@@ -1036,6 +1036,12 @@ float4 shade_entity(EntityHit ehit, float3 dir, float t_off) {
     float3 N = ehit.normal;
     uint flags;
     float3 albedo = entity_albedo(ehit, flags);
+    if ((flags & PAL_BLOCK) != 0u) {
+        // A block (a felled tree, a mote): textured as the world has it.
+        float3 bp, bn;
+        uint block = entity_block(ehit, bp, bn);
+        albedo = voxel_surface_color(block, int3(floor(bp - bn * 0.01)), bp, bn, ehit.t + t_off);
+    }
 
     float3 l  = light_dir_normalized;
     // Entity voxels are ~6 cm: a small offset keeps shadow rays off the
@@ -1074,7 +1080,7 @@ float4 shade_entity(EntityHit ehit, float3 dir, float t_off) {
     // Emissive voxels (crystals) glow on their own and trip bloom.
     if ((flags & PAL_EMIT) != 0u) {
         float pulse = 0.85 + 0.15 * sin(u_time * 3.0 + float(ehit.index));
-        col += albedo * 4.0 * pulse;
+        col += albedo * ((flags & PAL_BLOCK) != 0u ? 0.9 : 4.0) * pulse; // a block (mote): a glow, its texture still showing
     }
     return apply_fog(float4(col, 1.0), ehit.t + t_off, dir);
 }

@@ -226,6 +226,8 @@ game_main :: proc() -> (relaunch: []string) {
             case a == "entcost": bench_entcost = true
             case a == "stream": bench_stream = true
             case a == "look": bench_look = true
+            case a == "backdrops": bench_backdrops = true
+            case a == "survey": bench_backdrop_survey = true
             case a == "ui": bench_ui = true
             case a == "landmarks": bench_landmarks = true
             case a == "trees": bench_trees = true
@@ -265,6 +267,7 @@ game_main :: proc() -> (relaunch: []string) {
                 bench_world = true
                 save_dir = strings.concatenate({"saves/", a[6:]})
             case a == "view": bench_view = true
+            case a == "nofocus": // the window's (it's hidden anyway), not a shot folder
             case strings.has_prefix(a, "pos="):
                 xyz := strings.split(a[4:], ",", context.temp_allocator)
                 for v, i in xyz[:min(len(xyz), 3)] { bench_view_pos[i], _ = strconv.parse_f32(v) }
@@ -441,6 +444,7 @@ game_main :: proc() -> (relaunch: []string) {
     gpu_init(gs)
     defer gpu_destroy(gs)
     if !bench { ui_rewrap_out_texture(gs) } // the UI was made before there was a frame to show
+    main_menu_free_backdrops()
     if start != .Sandbox { entities_init(gs) } // foxes and crystals about
     defer delete(gs.entities)
 
@@ -511,6 +515,7 @@ game_main :: proc() -> (relaunch: []string) {
 
             case .MOUSE_WHEEL:
                 wheel_dy += event.wheel.y
+                if !gs.mouse_locked { gs.ui.wheel += event.wheel.y } // scrolls the menus
 
             case .MOUSE_BUTTON_DOWN:
                 if gs.mouse_locked {

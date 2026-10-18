@@ -38,6 +38,7 @@ Model_Id :: enum u32 {
     // magic.odin, felling.odin
     Spark,      // a small glowing cube, coloured by the part's tint
     Glove_R, Glove_L, // open hands in magic gloves: wrist at the origin, fingers +z, palm -y
+    Mote,       // a little block, its centre at the origin, 8 voxels a side (one per texel): ent_texture it
     // A felled tree's wood and leaves, one pair per falling tree: reserved
     // room in the buffer, filled when a tree comes down (ent_model_upload).
     Fell_Wood_0, Fell_Leaves_0, Fell_Wood_1, Fell_Leaves_1,
@@ -55,6 +56,11 @@ Voxel_Model :: struct {
 PAL_TINT :: 1 // colour is multiplied by the part's tint
 PAL_EMIT :: 2 // glows on its own
 PAL_THIN :: 4 // thin fabric: the sun shines through from behind
+PAL_BLOCK :: 8 // textured as the part's block (ent_texture)
+
+// A voxel byte of PAL_BLOCK_BYTE | block id is that block, textured as the
+// world draws it (a felled tree): not a palette entry.
+PAL_BLOCK_BYTE :: 0x80
 
 Pal :: enum u8 {
     Empty,
@@ -72,7 +78,7 @@ Pal :: enum u8 {
     Tusk, Iron, Rust, Wood, Wood_Dark, Cloth, Eye_Yellow, Eye_Red,
     Fish_Scale, Fish_Belly, Fish_Fin, Fish_Stripe,
     Magic,               // glows in the part's tint (sparks, motes)
-    Fell, Fell_Dark,     // a felled tree's voxels, in the part's tint
+    Block, Block_Glow,   // the part's block, textured (ent_texture); glowing a little (motes)
 }
 #assert(len(Pal) <= 64) // ENT_PAL_BASE reserves 64 entries
 
@@ -138,8 +144,8 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Fish_Fin:      return {180, 180, 180}, PAL_TINT | PAL_THIN
     case .Fish_Stripe:   return {246, 244, 238}, 0
     case .Magic:         return {255, 255, 255}, PAL_TINT | PAL_EMIT
-    case .Fell:          return {255, 255, 255}, PAL_TINT
-    case .Fell_Dark:     return {196, 196, 196}, PAL_TINT
+    case .Block:         return {255, 255, 255}, PAL_BLOCK
+    case .Block_Glow:    return {255, 255, 255}, PAL_BLOCK | PAL_EMIT
     }
     return {255, 0, 255}, 0
 }
@@ -274,6 +280,7 @@ ent_models_bake :: proc() {
     ent_models[.Glider_Wing]  = model_bake({-3.85, 0.95, -2.05}, {3.85, 2.05, 2.0}, 1.0 / 12, shape_glider_wing)
     ent_models[.Rod]          = model_bake({-0.05, -0.05, 0}, {0.05, 0.05, 1}, 1.0 / 24, shape_rod)
     ent_models[.Arm]          = model_bake({-0.08, -0.08, 0}, {0.08, 0.08, 1}, 1.0 / 24, shape_arm)
+    ent_models[.Mote]         = model_bake({-0.1, -0.1, -0.1}, {0.1, 0.1, 0.1}, 0.2 / 8, proc(p: [3]f32, voxel: f32) -> Pal { return .Block_Glow })
     ent_models[.Spark]        = model_bake({-0.0625, -0.0625, -0.0625}, {0.0625, 0.0625, 0.0625}, 1.0 / 16, proc(p: [3]f32, voxel: f32) -> Pal { return .Magic })
     // Room for the biggest tree there is (TREE_VOXEL_REACH, TREE_MAX_HEIGHT).
     for id in FELL_MODELS {
@@ -384,7 +391,8 @@ Part_Gpu :: struct #packed {
     rows:     [3][4]f32,
     aabb_min: [3]f32, model: u32,
     aabb_max: [3]f32, flags: u32,
-    tint:     [3]f32, _pad:  f32,
+    tint:     [3]f32, block: u32, // block: what PAL_BLOCK voxels are
+    tex:      [3]f32, tex_scale: f32, // block texture space = grid * tex_scale + tex
 }
 
 // Which entities a ray can possibly hit is answered by two bitmasks (bit i
@@ -616,9 +624,20 @@ ent_part :: proc(f: ^Ent_Frame, model: Model_Id, pos: [3]f32, rot: Basis, scale:
     p.aabb_min, p.aabb_max = mn, mx
     p.model = u32(model)
     p.tint = tint
+    p.tex_scale = 1
     f.parts[f.n_parts] = p
     f.n_parts += 1
     e := &f.ents[f.n_ents]
     e.aabb_min = la.min(e.aabb_min, mn)
     e.aabb_max = la.max(e.aabb_max, mx)
+}
+
+// The last part's block voxels (PAL_BLOCK entries: `block`; PAL_BLOCK_BYTE
+// voxels: their own) textured as the world draws them, the part's grid
+// point g at block-texture point g * scale + origin (world voxel units: the
+// world's voxel a felled tree's voxel was, so it looks as it did).
+ent_texture :: proc(f: ^Ent_Frame, block: Block_Type, origin: [3]f32, scale: f32 = 1) {
+    if f.n_parts == 0 { return }
+    p := &f.parts[f.n_parts - 1]
+    p.block, p.tex, p.tex_scale = u32(block), origin, scale
 }

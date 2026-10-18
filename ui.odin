@@ -67,7 +67,9 @@ UI_State :: struct {
     mouse_pos:          [2]f32,
     mouse_left_down:    bool,
     mouse_left_pressed: bool, // single-frame edge
-    dragging:           u32,  // id of the slider being dragged, 0 if none
+    dragging:           u32,  // id of the slider (or scrollbar) being dragged, 0 if none
+    drag_grab:          f32,  // where on the scrollbar's thumb it was taken
+    wheel:              f32,  // this frame's mouse wheel, while the pointer is free (scrolls)
 
     toast_buf:    [96]u8,
     toast_len:    int,
@@ -92,26 +94,32 @@ UI_State :: struct {
 
 // ─── Theme ─────────────────────────────────────────────────────────────────
 
-// Colors are 0..255 floats: the Clay SDL3 renderer divides by 255. The
-// gamejam project's palette.
-COLOR_TEXT       :: clay.Color{205, 214, 244, 255}
-COLOR_TEXT_DIM   :: clay.Color{147, 153, 178, 255}
-COLOR_TEXT_FAINT :: clay.Color{147, 153, 178, 150}
-COLOR_ACCENT     :: clay.Color{243, 139, 168, 255}
-COLOR_ACCENT_2   :: clay.Color{250, 179, 135, 255}
-COLOR_ON_ACCENT  :: clay.Color{24, 24, 37, 255}
-COLOR_GOOD       :: clay.Color{166, 227, 161, 255}
-COLOR_BAD        :: clay.Color{243, 110, 110, 255}
-COLOR_SKY        :: clay.Color{137, 180, 250, 255}
-COLOR_BAR_BG     :: clay.Color{40, 40, 58, 255}
-COLOR_RULE       :: clay.Color{69, 71, 90, 255}
+// Colors are 0..255 floats: the Clay SDL3 renderer divides by 255.
+// The world's own: dark warm stone and wood for panels, parchment text,
+// late-afternoon sunlight for the accent, leaf green and ember red.
+// Shapes are blocky to match (UI_RADIUS), buttons bevelled like a block's
+// lit top edge (bevel).
+COLOR_TEXT       :: clay.Color{238, 230, 212, 255}
+COLOR_TEXT_DIM   :: clay.Color{178, 168, 150, 255}
+COLOR_TEXT_FAINT :: clay.Color{178, 168, 150, 150}
+COLOR_ACCENT     :: clay.Color{244, 196, 98, 255}
+COLOR_ACCENT_2   :: clay.Color{236, 140, 76, 255}
+COLOR_ON_ACCENT  :: clay.Color{34, 26, 16, 255}
+COLOR_GOOD       :: clay.Color{150, 204, 110, 255}
+COLOR_BAD        :: clay.Color{232, 100, 82, 255}
+COLOR_SKY        :: clay.Color{124, 182, 236, 255}
+COLOR_BAR_BG     :: clay.Color{44, 39, 34, 255}
+COLOR_RULE       :: clay.Color{92, 82, 68, 255}
 
-COLOR_PANEL        :: clay.Color{24, 24, 37, 220}
-COLOR_PANEL_SOFT   :: clay.Color{24, 24, 37, 170}
-COLOR_PANEL_BORDER :: clay.Color{69, 71, 90, 255}
-COLOR_BUTTON       :: clay.Color{49, 50, 68, 255}
-COLOR_BUTTON_HOVER :: clay.Color{88, 91, 112, 255}
-COLOR_SLOT         :: clay.Color{17, 17, 27, 150}
+COLOR_PANEL        :: clay.Color{27, 24, 21, 228}
+COLOR_PANEL_SOFT   :: clay.Color{27, 24, 21, 176}
+COLOR_PANEL_BORDER :: clay.Color{78, 69, 58, 255}
+COLOR_BUTTON       :: clay.Color{56, 50, 44, 255}
+COLOR_BUTTON_HOVER :: clay.Color{82, 73, 62, 255}
+COLOR_SLOT         :: clay.Color{14, 12, 10, 160}
+COLOR_SHADE        :: clay.Color{14, 12, 10, 255} // dark backing for HUD labels and bars (fade its alpha)
+
+UI_RADIUS :: f32(3) // corners: no rounder than this, whatever's asked
 
 ui_error_handler :: proc "c" (errorData: clay.ErrorData) {
     context = runtime.default_context()
@@ -331,7 +339,8 @@ ui_draw :: proc(gs: ^Game_State, dt: f32) {
     ui.screen_w, ui.screen_h = fw, fh
     clay.SetLayoutDimensions({fw, fh})
     clay.SetPointerState(transmute(clay.Vector2)ui.mouse_pos, ui.mouse_left_down)
-    clay.UpdateScrollContainers(false, {}, dt)
+    clay.UpdateScrollContainers(false, {0, ui.wheel * 40}, dt)
+    ui.wheel = 0
 
     clay.BeginLayout()
     if !ui.hud_hidden || ui.screen != .None {
@@ -371,7 +380,7 @@ Ui_Deco :: enum u8 {
     Slot, Slot_Hover, Slot_On,
     Tooltip,
     Shape_Icon, Shape_Icon_On, // a building shape's outline (build HUD)
-    Backdrop,                  // the main menu's sky and hills (main_menu.odin)
+    Backdrop,                  // the main menu's views of the world (main_menu.odin)
     Menu_Item, Menu_Item_Hover, Menu_Item_On, // the main menu's buttons and rows
 }
 
@@ -444,12 +453,31 @@ inset :: proc(rect: SDL.FRect, d: f32) -> SDL.FRect {
 // Flat fill inside a border `width` thick (0: no border).
 @(private="file")
 flat :: proc(r: ^SDL.Renderer, rect: SDL.FRect, radius: f32, fill, border: clay.Color, width: f32, a: f32 = 1) {
+    radius := min(radius, UI_RADIUS)
     if width > 0 {
         b := fcol(border, a)
         round_rect(r, rect, radius, b, b)
     }
     f := fcol(fill, a)
     round_rect(r, inset(rect, width), radius - width, f, f)
+}
+
+// A block face's edges inside rect: lit along the top, shaded along the
+// bottom (raised), or the other way round (sunk, as a slot).
+@(private="file")
+bevel :: proc(r: ^SDL.Renderer, rect: SDL.FRect, inset_by: f32, sunk := false, a: f32 = 1) {
+    in_ := inset(rect, inset_by)
+    if in_.w <= 4 || in_.h <= 4 { return }
+    lit := SDL.FColor{1, 0.94, 0.80, 0.10 * a}
+    dark := SDL.FColor{0, 0, 0, 0.30 * a}
+    hi, lo := lit, dark
+    if sunk { hi, lo = dark, lit }
+    top := SDL.FRect{in_.x + 1, in_.y, in_.w - 2, sunk ? 2 : 1}
+    bot := SDL.FRect{in_.x + 1, in_.y + in_.h - (sunk ? 1 : 2), in_.w - 2, sunk ? 1 : 2}
+    SDL.SetRenderDrawColorFloat(r, hi.r, hi.g, hi.b, hi.a)
+    SDL.RenderFillRect(r, &top)
+    SDL.SetRenderDrawColorFloat(r, lo.r, lo.g, lo.b, lo.a)
+    SDL.RenderFillRect(r, &bot)
 }
 
 // Draws a custom element (called by the Clay renderer).
@@ -464,21 +492,28 @@ ui_draw_custom :: proc(rd: ^Clay_SDL3RendererData, rect: SDL.FRect, data: rawptr
         draw_block_icon(r, rect, d.block)
     case .Glass, .Tooltip:
         flat(r, rect, d.radius, COLOR_PANEL, COLOR_PANEL_BORDER, 1, a)
+        bevel(r, rect, 1, a = a * 0.6)
     case .Glass_Soft:
         flat(r, rect, d.radius, COLOR_PANEL_SOFT, COLOR_PANEL_BORDER, 1, a * 0.85)
     case .Button:
         flat(r, rect, d.radius, COLOR_BUTTON, {}, 0)
+        bevel(r, rect, 0)
     case .Button_Hover:
         flat(r, rect, d.radius, COLOR_BUTTON_HOVER, {}, 0)
+        bevel(r, rect, 0)
     case .Button_On, .Button_On_Hover:
-        // Selected: the button with an accent border, as in the gamejam menus.
+        // Selected: the button framed in the accent.
         flat(r, rect, d.radius, d.deco == .Button_On_Hover ? COLOR_BUTTON_HOVER : COLOR_BUTTON, COLOR_ACCENT, 2)
+        bevel(r, rect, 2)
     case .Slot:
         flat(r, rect, d.radius, COLOR_SLOT, {}, 0)
+        bevel(r, rect, 0, sunk = true)
     case .Slot_Hover:
         flat(r, rect, d.radius, COLOR_BUTTON_HOVER, {}, 0)
+        bevel(r, rect, 0)
     case .Slot_On:
         flat(r, rect, d.radius, COLOR_SLOT, COLOR_ACCENT, 2)
+        bevel(r, rect, 2, sunk = true)
     case .Shape_Icon:
         draw_shape_icon(r, rect, d.shape, COLOR_TEXT_DIM)
     case .Shape_Icon_On:
@@ -487,13 +522,16 @@ ui_draw_custom :: proc(rd: ^Clay_SDL3RendererData, rect: SDL.FRect, data: rawptr
     case .Backdrop:
         menu_backdrop(r, rect)
     case .Menu_Item:
-        flat(r, rect, d.radius, {24, 24, 37, 200}, COLOR_PANEL_BORDER, 1)
+        flat(r, rect, d.radius, {COLOR_PANEL.r, COLOR_PANEL.g, COLOR_PANEL.b, 205}, COLOR_PANEL_BORDER, 1)
+        bevel(r, rect, 1)
     case .Menu_Item_Hover, .Menu_Item_On:
-        // Lit: brighter, an accent bar down the left edge (and a border when picked).
-        flat(r, rect, d.radius, {49, 50, 68, 235}, d.deco == .Menu_Item_On ? COLOR_ACCENT : COLOR_PANEL_BORDER, d.deco == .Menu_Item_On ? 2 : 1)
-        bar := SDL.FRect{rect.x + 7, rect.y + rect.h * 0.28, 3, rect.h * 0.44}
+        // Lit: brighter, an accent block at the left edge (and a frame when picked).
+        on := d.deco == .Menu_Item_On
+        flat(r, rect, d.radius, {COLOR_BUTTON.r, COLOR_BUTTON.g, COLOR_BUTTON.b, 238}, on ? COLOR_ACCENT : COLOR_PANEL_BORDER, on ? 2 : 1)
+        bevel(r, rect, on ? 2 : 1)
+        bar := SDL.FRect{rect.x + 7, rect.y + rect.h * 0.3, 4, rect.h * 0.4}
         c := fcol(COLOR_ACCENT)
-        round_rect(r, bar, 1.5, c, c)
+        round_rect(r, bar, 0, c, c)
     }
 }
 
@@ -561,6 +599,51 @@ fade :: proc(col: clay.Color, a: f32) -> clay.Color {
 
 spacer :: proc() {
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}}}) {}
+}
+
+// A scrollbar beside the scroll container `id` (a sibling after it in a
+// row): a thumb to drag, shown only while its content doesn't fit. Laid out
+// from last frame's sizes.
+scrollbar :: proc(gs: ^Game_State, id: clay.ElementId) {
+    ui := &gs.ui
+    sc := clay.GetScrollContainerData(id)
+    view, full := sc.scrollContainerDimensions.height, sc.contentDimensions.height
+    if !sc.found || full <= view + 1 || view <= 0 { return }
+    track := clay.ID("ScrollTrack", id.id)
+    thumb := clay.ID("ScrollThumb", id.id)
+    thumb_h := max(view * view / full, 28)
+    room := max(view - thumb_h, 1)
+    hovered := clay.PointerOver(thumb)
+    if ui.mouse_left_pressed && hovered {
+        ui.dragging = thumb.id
+        ui.drag_grab = ui.mouse_pos.y - clay.GetElementData(thumb).boundingBox.y
+    } else if ui.mouse_left_pressed && clay.PointerOver(track) {
+        // A click on the track: the thumb's middle jumps there.
+        ui.dragging = thumb.id
+        ui.drag_grab = thumb_h / 2
+    }
+    active := ui.dragging == thumb.id
+    if active {
+        if !ui.mouse_left_down {
+            ui.dragging = 0
+        } else if bb := clay.GetElementData(track).boundingBox; bb.height > 0 {
+            k := clamp((ui.mouse_pos.y - ui.drag_grab - bb.y) / room, 0, 1)
+            sc.scrollPosition.y = -k * (full - view)
+        }
+    }
+    top := clamp(-sc.scrollPosition.y / (full - view), 0, 1) * room
+    if clay.UI(track)({
+        layout = {sizing = {clay.SizingFixed(6), clay.SizingGrow()}},
+        backgroundColor = COLOR_BAR_BG, cornerRadius = clay.CornerRadiusAll(3),
+    }) {
+        // Floating: sized from last frame, it mustn't hold the track (and
+        // so the view) open.
+        if clay.UI(thumb)({
+            layout = {sizing = {clay.SizingFixed(6), clay.SizingFixed(thumb_h)}},
+            floating = {attachTo = .Parent, clipTo = .AttachedParent, offset = {0, top}, zIndex = 21, attachment = {.LeftTop, .LeftTop}},
+            backgroundColor = active || hovered ? COLOR_ACCENT : COLOR_TEXT_FAINT, cornerRadius = clay.CornerRadiusAll(3),
+        }) {}
+    }
 }
 
 // A thin rule that fades out to both ends.
@@ -749,7 +832,7 @@ name_tags_layout :: proc(gs: ^Game_State, w, h: f32) {
         if clay.UI(clay.ID("NameTag", u32(slot)))({
             layout = {padding = {7, 7, 3, 4}},
             floating = {attachTo = .Root, offset = {x, y}, zIndex = 6, attachment = {.CenterBottom, .LeftTop}, pointerCaptureMode = .Passthrough},
-            backgroundColor = fade({17, 17, 27, 170}, a),
+            backgroundColor = fade({COLOR_SHADE.r, COLOR_SHADE.g, COLOR_SHADE.b, 170}, a),
             cornerRadius = clay.CornerRadiusAll(4),
         }) {
             text(client_player_name(gs, slot), fade({min(tint.r * 255 + 90, 255), min(tint.g * 255 + 90, 255), min(tint.b * 255 + 90, 255), 255}, a), 13, FONT_ID_TITLE)
@@ -783,7 +866,7 @@ chat_layout :: proc(gs: ^Game_State, h: f32) {
             col := e.slot == SERVER_SLOT ? COLOR_ACCENT : COLOR_TEXT
             if clay.UI(clay.ID("ChatLine", u32(i)))({
                 layout = {padding = {8, 8, 3, 4}},
-                backgroundColor = fade({17, 17, 27, 150}, a),
+                backgroundColor = fade({COLOR_SHADE.r, COLOR_SHADE.g, COLOR_SHADE.b, 150}, a),
                 cornerRadius = clay.CornerRadiusAll(4),
             }) {
                 text(string(e.text[:e.len]), fade(col, a), 14)
@@ -888,7 +971,7 @@ combat_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
         if clay.UI(clay.ID("EnBar", u32(i)))({
             layout = {sizing = {clay.SizingFixed(BW), clay.SizingFixed(6)}, padding = {1, 1, 1, 1}},
             floating = {attachTo = .Root, offset = {x - BW / 2, y}, zIndex = 6, attachment = {.LeftTop, .LeftTop}, pointerCaptureMode = .Passthrough},
-            backgroundColor = fade({17, 17, 27, 200}, a),
+            backgroundColor = fade({COLOR_SHADE.r, COLOR_SHADE.g, COLOR_SHADE.b, 200}, a),
         }) {
             if clay.UI()({
                 layout = {sizing = {clay.SizingFixed((BW - 2) * frac), clay.SizingGrow({})}},
@@ -912,7 +995,7 @@ combat_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
             if clay.UI(clay.ID(layer == 0 ? "DmgShadow" : "Dmg", u32(i)))({
                 floating = {attachTo = .Root, offset = {x + off, y + off}, zIndex = i16(7 + layer), attachment = {.CenterCenter, .LeftTop}, pointerCaptureMode = .Passthrough},
             }) {
-                text(label, layer == 0 ? fade({17, 17, 27, 220}, a) : fade(col, a), size, FONT_ID_TITLE)
+                text(label, layer == 0 ? fade({COLOR_SHADE.r, COLOR_SHADE.g, COLOR_SHADE.b, 220}, a) : fade(col, a), size, FONT_ID_TITLE)
             }
         }
     }
@@ -1599,7 +1682,7 @@ slider :: proc(gs: ^Game_State, id: clay.ElementId, t: ^f32, label: string) -> (
                     k: f32 = hot ? 18 : 15
                     if clay.UI(knob_id)({
                         layout = {sizing = {clay.SizingFixed(k), clay.SizingFixed(k)}},
-                        floating = {attachTo = .Parent, zIndex = 25, attachment = {element = .CenterCenter, parent = .RightCenter}},
+                        floating = {attachTo = .Parent, clipTo = .AttachedParent, zIndex = 25, attachment = {element = .CenterCenter, parent = .RightCenter}}, // hidden with its row when the menu scrolls it away
                         custom = deco(hot ? .Button_On_Hover : .Button_On, radius = k / 2),
                     }) {}
                 }
@@ -1629,7 +1712,7 @@ menu_layout :: proc(gs: ^Game_State) {
     ui.field_hovered = false
     shade("MenuShade")
     if clay.UI(clay.ID("Menu"))({
-        layout = {layoutDirection = .TopToBottom, padding = clay.PaddingAll(22), childGap = 12, sizing = {clay.SizingFixed(menu_width(gs)), clay.SizingFit()}},
+        layout = {layoutDirection = .TopToBottom, padding = clay.PaddingAll(22), childGap = 12, sizing = {clay.SizingFixed(menu_width(gs)), clay.SizingFit({max = max(ui.screen_h - 32, 200)})}},
         floating = {attachTo = .Root, zIndex = 20, attachment = {.CenterCenter, .CenterCenter}, pointerCaptureMode = .Capture},
         custom = deco(.Glass, radius = 12),
     }) {
@@ -1644,11 +1727,21 @@ menu_layout :: proc(gs: ^Game_State) {
         }
         divider()
 
-        switch ui.menu_tab {
-        case .Graphics: menu_graphics(gs)
-        case .Sound:    menu_sound(gs)
-        case .Controls: menu_controls(gs)
-        case .Multiplayer: menu_multiplayer(gs)
+        // The tab's settings scroll when the window is too short for them.
+        if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 8}}) {
+            body := clay.ID("MenuBody")
+            if clay.UI(body)({
+                layout = {layoutDirection = .TopToBottom, childGap = 12, sizing = {clay.SizingGrow(), clay.SizingGrow()}},
+                clip = {vertical = true, childOffset = clay.GetScrollOffset()},
+            }) {
+                switch ui.menu_tab {
+                case .Graphics: menu_graphics(gs)
+                case .Sound:    menu_sound(gs)
+                case .Controls: menu_controls(gs)
+                case .Multiplayer: menu_multiplayer(gs)
+                }
+            }
+            scrollbar(gs, body)
         }
 
         divider()

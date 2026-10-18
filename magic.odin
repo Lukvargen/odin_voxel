@@ -53,6 +53,7 @@ Mote :: struct {
     tint:     [3]f32,
     size:     f32, // 0: a free slot
     home:     u8,  // who it flies to: 0 you, else that player's slot + 1 (their tree: no count)
+    tex:      [3]f32, // the world voxel it came from: its texture (mote_add)
 }
 
 // A spark of the spell: flies, slows, goes out.
@@ -338,6 +339,7 @@ mote_add :: proc(gs: ^Game_State, mo: Mote) {
     old := &m.motes[m.next_mote]
     if old.size > 0 { magic_collect(gs, old.block, old.count) } // all slots busy: that one's here already
     old^ = mo
+    old.tex = {math.floor(mo.pos.x), math.floor(mo.pos.y), math.floor(mo.pos.z)}
     m.next_mote = (m.next_mote + 1) % MAX_MOTES
 }
 
@@ -566,8 +568,11 @@ magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         if mo.size == 0 || mo.age < 0 { continue }
         // Smaller as they reach you, so none fills the view going by.
         near := clamp(la.length(chest - mo.pos) / 4, 0.35, 1)
-        k := mo.size * near * (0.85 + 0.15 * math.sin(m.t * 14 + mo.pos.x))
-        ent_part(f, .Spark, mo.pos, IDENTITY, {k, k, k}, mo.tint)
+        // A little block of what it brings, tumbling as it goes.
+        k := mo.size * near * (0.9 + 0.1 * math.sin(m.t * 14 + mo.pos.x))
+        spin := m.t * 5 + mo.tex.x * 1.3 + mo.tex.z * 0.7
+        ent_part(f, .Mote, mo.pos, basis_yaw(spin) * basis_rot_x(spin * 0.6), {k, k, k})
+        ent_texture(f, mo.block, mo.tex, 1.0 / 8)
     }
     ent_end(f)
 }

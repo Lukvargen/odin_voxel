@@ -111,6 +111,10 @@ bench_run :: proc(gs: ^Game_State) {
         bench_look_run(gs)
         return
     }
+    if bench_backdrops {
+        bench_backdrops_run(gs)
+        return
+    }
     if bench_combat {
         bench_combat_run(gs)
         return
@@ -428,7 +432,7 @@ bench_hud_shot :: proc(gs: ^Game_State, path: string) {
 // Benches whose first move is a bench_teleport: streaming around spawn
 // first would only be thrown away.
 bench_teleports_first :: proc() -> bool {
-    return bench_look || bench_caves || bench_gi || bench_landmarks || bench_trees || bench_sea ||
+    return bench_look || bench_backdrops || bench_caves || bench_gi || bench_landmarks || bench_trees || bench_sea ||
            bench_slimes || bench_enemies || bench_fight || bench_nav || bench_crowd || bench_players ||
            bench_build || bench_combat || bench_relight || bench_view || bench_torch || bench_shade || bench_fell
 }

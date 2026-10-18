@@ -19,14 +19,15 @@
 //                         masks: 2 words per 4^3 brick, bit = x + 4y + 16z
 //  dynamic base:          header (Ent_Header): (tiles x, tiles y, -, -), (sun u axis, u0), (sun v axis, v0), -
 //  + ENT_ENTS_OFS:        MAX_ENTITIES x 2: (box min, first part), (box max, part count)
-//  + ENT_PARTS_OFS:       parts, 6 each: 3 rows world->grid, (box min, model), (box max, flags), (tint, -)
+//  + ENT_PARTS_OFS:       parts, 7 each: 3 rows world->grid, (box min, model), (box max, flags), (tint, block),
+//                         (block texture origin, scale)
 //  + ENT_SUN_OFS:         128-bit shadow-caster mask per sun-grid cell (one uint4)
 //  + ENT_TILES_OFS:       128-bit entity mask per 16x16 screen tile (one uint4)
 // See ent_build_masks in voxel_models.odin for how the masks are built.
 #define ENT_PAL_BASE    1
 #define ENT_MODEL_BASE  65
 #define ENT_MAX         128
-#define ENT_PART_STRIDE 6
+#define ENT_PART_STRIDE 7
 #define ENT_MAX_PARTS   1024
 #define ENT_TILE        16
 #define ENT_SUN_GRID    64
@@ -42,6 +43,8 @@ static uint4 g_ent_tile_mask;
 #define PAL_TINT 1u
 #define PAL_EMIT 2u
 #define PAL_THIN 4u
+#define PAL_BLOCK 8u      // textured as the part's block
+#define PAL_BLOCK_BYTE 0x80u // voxel byte 0x80 | block id: that block, textured
 
 struct EntityHit {
     int    index;    // part index, -1 = miss
@@ -50,6 +53,8 @@ struct EntityHit {
     float3 normal;   // world space
     uint   pal;      // palette index of the hit voxel
     uint   vhash;    // per-voxel hash for a little colour variation
+    float3 grid_pos; // hit point and normal in the part's grid (block texturing)
+    float3 grid_n;
 };
 
 uint ent_dyn_base() { return ent_data[0].x; }
@@ -96,8 +101,8 @@ int ent_min_axis(float3 v) {
 // without renormalising. Returns true on a hit (t, grid normal axis/sign,
 // voxel, palette).
 bool ent_trace_part(uint p, float3 ro_w, float3 rd_w, float t_max,
-                    out float t_hit, out float3 n_grid, out int3 vox, out uint pal) {
-    t_hit = 1e30; n_grid = float3(0, 1, 0); vox = int3(0, 0, 0); pal = 0u;
+                    out float t_hit, out float3 n_grid, out int3 vox, out uint pal, out float3 grid_pos) {
+    t_hit = 1e30; n_grid = float3(0, 1, 0); vox = int3(0, 0, 0); pal = 0u; grid_pos = float3(0, 0, 0);
     uint base = ent_dyn_base() + ENT_PARTS_OFS + p * ENT_PART_STRIDE;
     float4 r0 = asfloat(ent_data[base + 0]);
     float4 r1 = asfloat(ent_data[base + 1]);
@@ -151,6 +156,7 @@ bool ent_trace_part(uint p, float3 ro_w, float3 rd_w, float t_max,
                     pal = ent_byte(m0.w, uint(v.x + dims.x * (v.y + dims.y * v.z)));
                     n_grid = float3(0, 0, 0);
                     n_grid[fax] = -stp_f[fax];
+                    grid_pos = clamp(ro + rd * tf, float3(v), float3(v + 1));
                     return true;
                 }
                 fax = ent_min_axis(tmf);
@@ -208,8 +214,8 @@ bool ent_trace_mask(uint4 mask, float3 ro, float3 rd, float t_max, bool any_hit,
         for (uint p = e0.w; p < e0.w + e1.w; p++) {
             uint pb = dyn + ENT_PARTS_OFS + p * ENT_PART_STRIDE;
             if (!ent_box(ro, inv, asfloat(ent_data[pb + 3].xyz), asfloat(ent_data[pb + 4].xyz), t0, t1) || t0 > best) continue;
-            float t; float3 ng; int3 v; uint pal;
-            if (!ent_trace_part(p, ro, rd, best, t, ng, v, pal)) continue;
+            float t; float3 ng; int3 v; uint pal; float3 gp;
+            if (!ent_trace_part(p, ro, rd, best, t, ng, v, pal, gp)) continue;
             found = true;
             if (any_hit) return true;
             best = t;
@@ -220,6 +226,8 @@ bool ent_trace_mask(uint4 mask, float3 ro, float3 rd, float t_max, bool any_hit,
             hit.t      = t;
             hit.normal = normalize(ng.x * r0.xyz + ng.y * r1.xyz + ng.z * r2.xyz);
             hit.pal    = pal;
+            hit.grid_pos = gp;
+            hit.grid_n   = ng;
             uint h = uint(v.x) * 73856093u ^ uint(v.y) * 19349663u ^ uint(v.z) * 83492791u ^ p * 2654435761u;
             hit.vhash  = (h ^ (h >> 13)) * 1274126177u;
         }
@@ -232,7 +240,7 @@ bool ent_trace_mask(uint4 mask, float3 ro, float3 rd, float t_max, bool any_hit,
 EntityHit trace_entities(float3 ro, float3 rd, float t_max) {
     EntityHit hit;
     hit.index = -1; hit.t = 1e30; hit.hit_pos = float3(0, 0, 0);
-    hit.normal = float3(0, 1, 0); hit.pal = 0u; hit.vhash = 0u;
+    hit.normal = float3(0, 1, 0); hit.pal = 0u; hit.vhash = 0u; hit.grid_pos = float3(0, 0, 0); hit.grid_n = float3(0, 1, 0);
     if (u_entity_count > 0 && t_max > 0.0 && any(g_ent_tile_mask != 0u) &&
         ent_trace_mask(g_ent_tile_mask, ro, rd, t_max, false, hit)) hit.hit_pos = ro + rd * hit.t;
     return hit;
@@ -251,21 +259,35 @@ float entity_shadow_transmittance(float3 ro, float3 rd, float max_t) {
     if (all(mask == 0u)) return 1.0;
     EntityHit h;
     h.index = -1; h.t = 1e30; h.hit_pos = float3(0, 0, 0);
-    h.normal = float3(0, 1, 0); h.pal = 0u; h.vhash = 0u;
+    h.normal = float3(0, 1, 0); h.pal = 0u; h.vhash = 0u; h.grid_pos = float3(0, 0, 0); h.grid_n = float3(0, 1, 0);
     return ent_trace_mask(mask, ro, rd, max_t, true, h) ? 0.0 : 1.0;
 }
 
 // Surface colour and flags of a hit: palette colour (tinted when the entry
 // asks), with a slight per-voxel brightness wobble.
+// Block voxels (PAL_BLOCK) come back white: the tracer textures them
+// (entity_block).
 float3 entity_albedo(EntityHit h, out uint flags) {
+    if (h.pal >= PAL_BLOCK_BYTE) { flags = PAL_BLOCK; return float3(1, 1, 1); }
     uint c = ent_palette(h.pal);
     flags = c >> 24;
+    if (flags & PAL_BLOCK) return float3(1, 1, 1);
     float3 col = float3(c & 0xffu, (c >> 8) & 0xffu, (c >> 16) & 0xffu) / 255.0;
     if (flags & PAL_TINT) {
         uint pb = ent_dyn_base() + ENT_PARTS_OFS + uint(h.index) * ENT_PART_STRIDE;
         col *= asfloat(ent_data[pb + 5].xyz);
     }
     return col * (0.93 + 0.14 * float(h.vhash >> 24) / 255.0);
+}
+
+// A block voxel's block, and its hit point and normal in block-texture
+// space (world voxel units: where it would be in the world).
+uint entity_block(EntityHit h, out float3 pos, out float3 n) {
+    uint pb = ent_dyn_base() + ENT_PARTS_OFS + uint(h.index) * ENT_PART_STRIDE;
+    float4 tex = asfloat(ent_data[pb + 6]);
+    pos = h.grid_pos * tex.w + tex.xyz;
+    n = h.grid_n;
+    return h.pal >= PAL_BLOCK_BYTE ? h.pal - PAL_BLOCK_BYTE : ent_data[pb + 5].w;
 }
 
 #endif // ENTITY_VOXEL_HLSL

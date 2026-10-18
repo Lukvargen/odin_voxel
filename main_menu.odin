@@ -3,11 +3,13 @@ package main
 import "core:fmt"
 import "core:math"
 import la "core:math/linalg"
+import "core:math/rand"
 import "core:os"
 import "core:slice"
 import "core:strings"
 import "core:time"
 import SDL "vendor:sdl3"
+import stbi "vendor:stb/image"
 import clay "thirdparty/clay-odin"
 
 // The main menu, the game's first screen unless the arguments already say
@@ -305,9 +307,119 @@ world_info :: proc(now: time.Time, w: World_Entry) -> string {
     return fmt.tprintf("%s  ·  %s", edits, ago)
 }
 
-// The menu's backdrop: a dusk sky with a blocky sun going down behind three
-// layers of blocky hills drifting by, far to near. Plain rectangles.
+// The menu's backdrop: views of the world itself (bench backdrops renders
+// them into resources/menu/), one at a time, slowly drifting closer, each
+// fading into the next; darkened on the left, under the menu.
+BACKDROP_HOLD :: f32(12)  // seconds each one shows
+BACKDROP_FADE :: f32(2.5) // ...of which fading into the next
+
+@(private="file")
+Backdrops :: struct {
+    tex:   [len(BACKDROP_VIEWS)]^SDL.Texture,
+    tried: [len(BACKDROP_VIEWS)]bool, // loaded, or found missing
+    first: int, // the one shown first: a different one each run
+    t0:    u64, // ms, when the menu first drew
+}
+
+@(private="file")
+backdrops: Backdrops
+
+// Backdrop i, loaded the first time it's wanted (nil if its file is missing).
+@(private="file")
+backdrop_texture :: proc(r: ^SDL.Renderer, i: int) -> ^SDL.Texture {
+    b := &backdrops
+    if b.tried[i] { return b.tex[i] }
+    b.tried[i] = true
+    views := BACKDROP_VIEWS
+    w, h, n: i32
+    px := stbi.load(fmt.ctprintf("resources/menu/%s.jpg", views[i].name), &w, &h, &n, 4)
+    if px == nil { return nil }
+    defer stbi.image_free(px)
+    t := SDL.CreateTexture(r, .RGBA32, .STATIC, w, h)
+    if t == nil { return nil }
+    _ = SDL.UpdateTexture(t, nil, px, w * 4)
+    _ = SDL.SetTextureScaleMode(t, .LINEAR)
+    _ = SDL.SetTextureBlendMode(t, {.BLEND})
+    b.tex[i] = t
+    return t
+}
+
+// Done with the menu (the world is up): its pictures go.
+main_menu_free_backdrops :: proc() {
+    for &t in backdrops.tex {
+        if t != nil { SDL.DestroyTexture(t) }
+        t = nil
+    }
+    backdrops.tried = {}
+}
+
 menu_backdrop :: proc(r: ^SDL.Renderer, rect: SDL.FRect) {
+    b := &backdrops
+    if b.t0 == 0 {
+        b.t0 = max(SDL.GetTicks(), 1)
+        b.first = rand.int_max(len(b.tex))
+    }
+    t := f32(SDL.GetTicks() - b.t0) / 1000
+    k := int(t / BACKDROP_HOLD)
+    n := len(b.tex)
+    cur, next := (b.first + k) % n, (b.first + k + 1) % n
+    tex := backdrop_texture(r, cur)
+    if tex == nil {
+        menu_backdrop_drawn(r, rect)
+        return
+    }
+    // Image j of the run shows from (j * HOLD - FADE) to (j + 1) * HOLD,
+    // zooming in a little and drifting, each its own way.
+    show :: proc(r: ^SDL.Renderer, tex: ^SDL.Texture, rect: SDL.FRect, j: int, t, alpha: f32) {
+        tw, th: f32
+        _ = SDL.GetTextureSize(tex, &tw, &th)
+        u := clamp((t - f32(j) * BACKDROP_HOLD + BACKDROP_FADE) / (BACKDROP_HOLD + BACKDROP_FADE), 0, 1)
+        zoom := 1.04 + 0.08 * u
+        // The largest part of the image with the screen's shape, made smaller by zoom.
+        sw, sh := tw, tw * rect.h / rect.w
+        if sh > th { sw, sh = th * rect.w / rect.h, th }
+        sw, sh = sw / zoom, sh / zoom
+        dir := j % 2 == 0 ? f32(1) : -1
+        cx := tw / 2 + dir * (u - 0.5) * (tw - sw) * 0.6
+        cy := th / 2 + (0.5 - u) * (th - sh) * 0.3
+        src := SDL.FRect{clamp(cx - sw / 2, 0, tw - sw), clamp(cy - sh / 2, 0, th - sh), sw, sh}
+        dst := rect
+        _ = SDL.SetTextureAlphaModFloat(tex, alpha)
+        _ = SDL.RenderTexture(r, tex, &src, &dst)
+    }
+    show(r, tex, rect, k, t, 1)
+    phase := t - f32(k) * BACKDROP_HOLD
+    if phase > 1 {
+        // Loaded ahead (a stall of a few ms, now rather than mid-fade).
+        if nt := backdrop_texture(r, next); nt != nil && phase > BACKDROP_HOLD - BACKDROP_FADE {
+            a := (phase - (BACKDROP_HOLD - BACKDROP_FADE)) / BACKDROP_FADE
+            show(r, nt, rect, k + 1, t, a * a * (3 - 2 * a))
+        }
+    }
+    // Shade: a little all over, deep down the left where the menu is.
+    // One mesh, columns of shade eased from the left edge to 0.7 of the way.
+    STEPS :: 16
+    verts: [2 * (STEPS + 2)]SDL.Vertex
+    idx: [6 * (STEPS + 1)]i32
+    for i in 0 ..= STEPS + 1 {
+        x := i <= STEPS ? f32(i) / STEPS * 0.7 : 1
+        a := 0.12 + 0.62 * math.pow(max(1 - x / 0.7, 0), 1.6)
+        c := SDL.FColor{0.03, 0.03, 0.06, a}
+        verts[2 * i] = {position = {rect.x + x * rect.w, rect.y}, color = c}
+        verts[2 * i + 1] = {position = {rect.x + x * rect.w, rect.y + rect.h}, color = c}
+        if i > 0 {
+            k, v := 6 * (i - 1), i32(2 * i)
+            idx[k], idx[k + 1], idx[k + 2], idx[k + 3], idx[k + 4], idx[k + 5] = v - 2, v - 1, v, v, v - 1, v + 1
+        }
+    }
+    _ = SDL.SetRenderDrawBlendMode(r, {.BLEND})
+    _ = SDL.RenderGeometry(r, nil, &verts[0], len(verts), &idx[0], len(idx))
+}
+
+// Without the pictures: a dusk sky with a blocky sun going down behind
+// three layers of blocky hills drifting by, far to near. Plain rectangles.
+@(private="file")
+menu_backdrop_drawn :: proc(r: ^SDL.Renderer, rect: SDL.FRect) {
     t := f32(SDL.GetTicks()) / 1000
     w, h := rect.w, rect.h
     horizon := rect.y + h * 0.66

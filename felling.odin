@@ -36,7 +36,8 @@ Felled_Tree :: struct {
     down:    f32,    // seconds since it hit the ground (< 0: still falling)
     wood, leaves: Voxel_Model, // model space = world offset from the pivot
     wood_buf, leaf_buf: []u8,  // their voxels' room, kept for the next tree
-    wood_tint, leaf_tint: [3]f32,
+    wood_tint, leaf_tint: [3]f32, // its dust
+    tex:     [3]f32, // the world voxel its models' grid starts at (their texture)
     leafy:   bool,
     owner:   u8, // who felled it: 0 us, else that player's slot + 1
     probes:  [dynamic][3]f32,    // high voxels (model space) checked against the ground
@@ -293,10 +294,11 @@ fell_begin :: proc(gs: ^Game_State, found: Tree_Found, p: [3]int, dir: [3]f32, o
     for q in found.logs { top = max(top, f32(q.y - p.y)) }
     for q in found.leaves { top = max(top, f32(q.y - p.y)) }
     seen := 0
-    place :: proc(m: ^Voxel_Model, q, lo: [3]int, pal: Pal) {
+    // Each voxel the block it was, textured as the world drew it.
+    place :: proc(m: ^Voxel_Model, q, lo: [3]int, b: Block_Type) {
         o := q - lo
         if o.x < 0 || o.y < 0 || o.z < 0 || o.x >= m.dims.x || o.y >= m.dims.y || o.z >= m.dims.z { return }
-        m.data[o.x + m.dims.x * (o.y + m.dims.y * o.z)] = u8(pal)
+        m.data[o.x + m.dims.x * (o.y + m.dims.y * o.z)] = PAL_BLOCK_BYTE | u8(b)
     }
     note :: proc(t: ^Felled_Tree, q: [3]int, b: Block_Type, pivot: [3]f32, top: f32, seen: ^int, p_y: int) {
         // Reservoir samples: the motes' spots, and the probes (the upper
@@ -329,7 +331,7 @@ fell_begin :: proc(gs: ^Game_State, found: Tree_Found, p: [3]int, dir: [3]f32, o
         kinds[b] += 1
         drop(t, u8(b), q)
         height_sum += f32(q.y - p.y) + 0.5
-        place(&t.wood, q, lo, rand.float32() < 0.3 ? .Fell_Dark : .Fell)
+        place(&t.wood, q, lo, b)
         note(t, q, b, pivot, top, &seen, p.y)
     }
     for q in found.leaves {
@@ -337,7 +339,7 @@ fell_begin :: proc(gs: ^Game_State, found: Tree_Found, p: [3]int, dir: [3]f32, o
         kinds[b] += 1
         drop(t, u8(b), q)
         height_sum += f32(q.y - p.y) + 0.5
-        place(&t.leaves, q, lo, rand.float32() < 0.45 ? .Fell_Dark : .Fell)
+        place(&t.leaves, q, lo, b)
         note(t, q, b, pivot, top, &seen, p.y)
     }
     // Tinted as the commonest wood and leaves in it.
@@ -346,7 +348,8 @@ fell_begin :: proc(gs: ^Game_State, found: Tree_Found, p: [3]int, dir: [3]f32, o
         if block_is_log(u8(b)) && n > kinds[best_log] { best_log = b }
         if block_is_leaves(u8(b)) && n > kinds[best_leaf] { best_leaf = b }
     }
-    t.wood_tint, t.leaf_tint = block_color(best_log) * 1.6, block_color(best_leaf) * 1.5 // flat colour reads darker than the textured blocks
+    t.wood_tint, t.leaf_tint = block_color(best_log) * 1.6, block_color(best_leaf) * 1.5
+    t.tex = la.array_cast(lo, f32)
     models := FELL_MODELS
     ent_model_upload(gs, models[2 * slot], t.wood)
     ent_model_upload(gs, models[2 * slot + 1], t.leaves)
@@ -444,8 +447,12 @@ felling_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     for &t, i in gs.felling.trees {
         if !t.active || !ent_begin(f) { continue }
         rot := fell_basis(&t)
-        ent_part(f, models[2 * i], t.pivot, rot, {1, 1, 1}, t.wood_tint)
-        if t.leafy { ent_part(f, models[2 * i + 1], t.pivot, rot, {1, 1, 1}, t.leaf_tint) }
+        ent_part(f, models[2 * i], t.pivot, rot)
+        ent_texture(f, .Log, t.tex)
+        if t.leafy {
+            ent_part(f, models[2 * i + 1], t.pivot, rot)
+            ent_texture(f, .Leaves, t.tex)
+        }
         ent_end(f)
     }
 }
