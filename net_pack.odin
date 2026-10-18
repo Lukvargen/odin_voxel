@@ -9,7 +9,7 @@ import la "core:math/linalg"
 // (Msg_Monsters.origin). About half the size of the structs they come from;
 // what's lost is far below what anyone could see.
 
-Net_Player_Flag :: enum u8 { Active, On_Ground, Fly_Mode, Sneaking, Sprinting, Sword, Gliding, Blocking, Torch }
+Net_Player_Flag :: enum u8 { Active, On_Ground, Fly_Mode, Sneaking, Sprinting, Sword, Gliding, Blocking, Torch, Climbing, Channeling, Conjuring }
 
 Net_Player :: struct #packed {
     flags:      bit_set[Net_Player_Flag; u16],
@@ -20,6 +20,8 @@ Net_Player :: struct #packed {
     swing_id:   u8,     // only ever compared for a change
     glide_heading, glide_pitch, glide_bank, glide_unfold: f16,
     invuln, block_time: f16,
+    reach:      [3]f16, // offset from pos (a lip or a block within reach)
+    reach_k, raise: f16,
 }
 
 // Monster offsets: 1/256 of a block, up to 128 blocks from the origin
@@ -64,6 +66,11 @@ player_pack :: proc(p: Player) -> (n: Net_Player) {
     if p.gliding   { n.flags += {.Gliding} }
     if p.blocking  { n.flags += {.Blocking} }
     if p.torch     { n.flags += {.Torch} }
+    if p.climbing  { n.flags += {.Climbing} }
+    if p.channeling { n.flags += {.Channeling} }
+    if p.conjuring { n.flags += {.Conjuring} }
+    n.reach = la.array_cast(p.reach - p.pos, f16)
+    n.reach_k, n.raise = f16(p.reach_k), f16(p.raise)
     n.pos = p.pos
     n.velocity = la.array_cast(p.velocity, f16)
     n.yaw, n.pitch = f16(wrap_angle(p.yaw, 360)), f16(p.pitch)
@@ -81,6 +88,9 @@ player_unpack :: proc(n: Net_Player) -> (p: Player) {
     p.active, p.on_ground, p.fly_mode = .Active in n.flags, .On_Ground in n.flags, .Fly_Mode in n.flags
     p.sneaking, p.sprinting, p.sword = .Sneaking in n.flags, .Sprinting in n.flags, .Sword in n.flags
     p.gliding, p.blocking, p.torch = .Gliding in n.flags, .Blocking in n.flags, .Torch in n.flags
+    p.climbing, p.channeling, p.conjuring = .Climbing in n.flags, .Channeling in n.flags, .Conjuring in n.flags
+    p.reach = n.pos + la.array_cast(n.reach, f32)
+    p.reach_k, p.raise = f32(n.reach_k), f32(n.raise)
     p.pos = n.pos
     p.velocity = la.array_cast(n.velocity, f32)
     p.yaw, p.pitch = f32(n.yaw), f32(n.pitch)

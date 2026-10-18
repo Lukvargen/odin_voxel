@@ -91,6 +91,10 @@ Other_Player :: struct {
     pose:   Sword_Pose, // drawn so, easing after latest.sword_pose
     ping:   int,        // ms, its connection's round trip, as the server measures it
     hurt:   f32,        // 1 when struck, fading: the body flashes red
+    hum:    f32,        // till its spell's next hum
+    palms:  [2][3]f32,  // its spell's palms (world), as last drawn...
+    beam:   bool,       // ...and whether it's casting at all
+    t:      f32,        // its own clock, for its spell's sparks
 }
 
 OTHER_TIMEOUT :: 3 // seconds without word before another player is no longer drawn
@@ -244,11 +248,14 @@ client_send_input :: proc(gs: ^Game_State) {
     cam := &gs.camera
     c := &gs.combat
     g := &gs.glider
+    act := local_body_act(gs)
     client_send(gs, .Player_State, player_pack(Player{
         active = true, pos = cam.pos, velocity = cam.velocity, yaw = cam.yaw, pitch = cam.pitch,
         on_ground = cam.on_ground, fly_mode = cam.fly_mode, sneaking = cam.sneaking, sprinting = cam.sprinting,
         sword = c.sword, sword_pose = c.pose, swing_id = c.attack_id, invuln = c.invuln, blocking = c.blocking, block_time = c.block_time,
         torch = holding_torch(gs),
+        climbing = act.climbing, channeling = gs.magic.channeling, conjuring = gs.magic.conjure > 0,
+        raise = act.raise, reach = act.at, reach_k = act.k,
         gliding = g.deployed, glide_heading = g.heading, glide_pitch = g.path_angle + g.aoa,
         glide_bank = g.bank, glide_unfold = g.deploy_t,
     }))
@@ -682,13 +689,25 @@ others_update :: proc(gs: ^Game_State, dt: f32) {
                 q.glide_bank = math.lerp(a.glide_bank, b.glide_bank, k)
             }
             q.glide_unfold = math.lerp(a.glide_unfold, b.glide_unfold, k)
+            q.raise = math.lerp(a.raise, b.raise, k)
+            if a.climbing == b.climbing && (a.channeling || a.conjuring) == (b.channeling || b.conjuring) {
+                q.reach = replica_lerp_pos(a.reach, b.reach, k)
+                q.reach_k = math.lerp(a.reach_k, b.reach_k, k)
+            }
             if q.swing_id != was.swing_id && q.sword {
                 play_at(.Sword_Swing, q.pos, 0.6, vary(0.06), 14) // another swing
             }
         }
         p := &o.latest
         o.pos = p.pos
+        o.t += dt
         anim_step(&o.anim, p.velocity, p.yaw, p.sword, p.on_ground || p.fly_mode, dt)
+        // Their spell hums where it works, as ours does.
+        o.hum -= dt
+        if p.channeling && o.hum <= 0 {
+            o.hum = 0.24
+            play_at(.Magic_Channel, p.reach, 0.18 + 0.15 * p.reach_k, 0.85 + 0.5 * p.reach_k, 10)
+        }
         // The sword swings smoothly between views (a swing is a few of them).
         k := min(dt * 30, 1)
         o.pose.grip += (p.sword_pose.grip - o.pose.grip) * k
@@ -714,7 +733,10 @@ others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         } else {
             feet := o.pos - {0, PLAYER_EYE_HEIGHT, 0}
             ent_scale_about(f, feet, world_scale)
-            hips := humanoid_add_parts(f, feet, &o.anim, p.yaw, p.pitch, tint, right_arm = !p.sword)
+            act := Body_Act{climbing = p.climbing, raise = p.sword ? 0 : p.raise, at = p.reach, k = p.reach_k, t = o.t}
+            hips := humanoid_add_parts(f, feet, &o.anim, p.yaw, p.pitch, tint, right_arm = !p.sword, act = &act)
+            beam := act.raise > 0.5 && (p.channeling || p.conjuring) && !p.climbing
+            if beam { o.palms, o.beam = act.palms, true } else { o.beam = false }
             if p.sword {
                 // As the player's own sword arm (creatures.odin), from its view.
                 fwd, right, up := camera_basis(Camera{yaw = p.yaw, pitch = p.pitch})
@@ -726,6 +748,14 @@ others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         }
         ent_end(f)
     }
+    // Their spells' beams: light, no shadow.
+    if !ent_begin(f, false) { return }
+    for &o in gs.net.others {
+        if !o.active || !o.beam { continue }
+        p := &o.latest
+        spell_beam_parts(f, o.palms, p.reach, p.channeling, p.reach_k, o.t, 0.85, 0, MAGIC_TINT)
+    }
+    ent_end(f)
 }
 
 // Each player slot its own colour of tunic; slot 0 (the host) the usual.

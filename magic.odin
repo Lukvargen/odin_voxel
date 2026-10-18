@@ -80,6 +80,7 @@ Magic :: struct {
     raise:      f32, // 0 down .. 1 up
     conjure:    f32, // > 0: a block was just conjured; the beam shows this long
     conjure_at: [3]f32,
+    aim:        [3]f32, // what the hands were last raised to (Body_Act: our body, as the others see it)
     t:          f32,
     motes:      [MAX_MOTES]Mote,
     next_mote:  int,
@@ -367,6 +368,7 @@ magic_update :: proc(gs: ^Game_State, dt: f32) {
     if !magic_active(gs) || !gs.mouse_locked || gs.combat.sword || gs.glider.deployed { m.channeling = false }
     up := m.channeling || m.conjure > 0
     m.raise = clamp(m.raise + (up ? dt * 6 : -dt * 2.5), 0, 1)
+    if m.channeling { m.aim = block_center(m.target) } else if m.conjure > 0 { m.aim = m.conjure_at }
 
     if m.channeling {
         c := block_center(m.target)
@@ -511,52 +513,10 @@ magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     }
 
     if !ent_begin(f, false) { return }
-    // The beam, from the palms to the block: two strands of sparks braided
-    // about the line, flowing in (toward you while unweaving, out while
-    // conjuring).
-    beam := first && m.raise > 0.5 && (m.channeling || m.conjure > 0)
-    if beam {
+    if first && m.raise > 0.5 && (m.channeling || m.conjure > 0) {
         c := m.channeling ? block_center(m.target) : m.conjure_at
-        tip := (hands[0].palm + hands[1].palm) * 0.5
-        d := c - tip
-        l := la.length(d)
-        dir := d / max(l, 0.001)
-        s1 := la.normalize0(la.cross(dir, [3]f32{0, 1, 0}))
-        if s1 == 0 { s1 = {1, 0, 0} }
-        s2 := la.cross(dir, s1)
-        n := clamp(int(l * 2.2), 6, 30)
-        flow := m.channeling ? -m.t * 1.4 : m.t * 3
-        for i in 0 ..< n {
-            u := (f32(i) + 0.5) / f32(n) + flow
-            u -= math.floor(u)
-            bulge := math.sin(u * math.PI)
-            // Each strand leaves its own palm and they meet at the block.
-            from := hands[i & 1].palm
-            ph := f32(i & 1) * math.PI
-            p := from + (c - from) * u + (s1 * math.sin(m.t * 9 + u * 13 + ph) + s2 * math.cos(m.t * 7 + u * 10 + ph)) * bulge * (0.2 + 0.2 * frac)
-            k := (0.3 + 0.35 * bulge) * clamp(la.length(p - from) / 3 + 0.25, 0.25, 1) // small by the hands, where they're near the eye
-            ent_part(f, .Spark, p, IDENTITY, {k, k, k}, MAGIC_TINT * (0.5 + 0.5 * bulge))
-        }
-        // A little swirl at each palm.
-        for h in hands {
-            for j in 0 ..< 2 {
-                a := m.t * 8 + f32(j) * math.PI
-                p := h.palm + (s1 * math.cos(a) + s2 * math.sin(a)) * 0.06
-                ent_part(f, .Spark, p, IDENTITY, {0.12, 0.12, 0.12}, MAGIC_TINT * 0.9)
-            }
-        }
-        // Round the block, a ring closing in and quickening as it comes undone.
-        if m.channeling {
-            ring := m.tree_logs > 0 ? f32(1.6) : 0.85 + f32(m.size)
-            k := 4 + int(frac * 10) + 4 * m.size
-            tint := la.lerp(MAGIC_TINT, mote_tint(m.block), frac)
-            for j in 0 ..< k {
-                a := m.t * (2 + 7 * frac) + f32(j) * math.TAU / f32(k)
-                r := ring * (1 - 0.35 * frac)
-                p := c + {math.cos(a) * r, math.sin(m.t * 3 + f32(j)) * 0.35, math.sin(a) * r}
-                ent_part(f, .Spark, p, IDENTITY, {0.6, 0.6, 0.6}, tint)
-            }
-        }
+        ring := m.tree_logs > 0 ? f32(1.6) : 0.85 + f32(m.size)
+        spell_beam_parts(f, {hands[0].palm, hands[1].palm}, c, m.channeling, frac, m.t, ring, m.size, mote_tint(m.block))
     }
     for s in m.sparks {
         if s.life <= 0 { continue }
@@ -575,6 +535,67 @@ magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         ent_texture(f, mo.block, mo.tex, 1.0 / 8)
     }
     ent_end(f)
+}
+
+// The beam, from the palms to the block c: two strands of sparks braided
+// about the line, flowing in (toward the caster while unweaving, out while
+// conjuring); a swirl at each palm, and while unweaving a ring round the
+// block closing in and quickening as it comes undone (frac 0..1). Ours, or
+// another player's (others_add_parts).
+spell_beam_parts :: proc(f: ^Ent_Frame, palms: [2][3]f32, c: [3]f32, channeling: bool, frac, t, ring: f32, size: int, block_tint: [3]f32) {
+    tip := (palms[0] + palms[1]) * 0.5
+    d := c - tip
+    l := la.length(d)
+    dir := d / max(l, 0.001)
+    s1 := la.normalize0(la.cross(dir, [3]f32{0, 1, 0}))
+    if s1 == 0 { s1 = {1, 0, 0} }
+    s2 := la.cross(dir, s1)
+    n := clamp(int(l * 2.2), 6, 30)
+    flow := channeling ? -t * 1.4 : t * 3
+    for i in 0 ..< n {
+        u := (f32(i) + 0.5) / f32(n) + flow
+        u -= math.floor(u)
+        bulge := math.sin(u * math.PI)
+        // Each strand leaves its own palm and they meet at the block.
+        from := palms[i & 1]
+        ph := f32(i & 1) * math.PI
+        p := from + (c - from) * u + (s1 * math.sin(t * 9 + u * 13 + ph) + s2 * math.cos(t * 7 + u * 10 + ph)) * bulge * (0.2 + 0.2 * frac)
+        k := (0.3 + 0.35 * bulge) * clamp(la.length(p - from) / 3 + 0.25, 0.25, 1) // small by the hands, where they're near the eye
+        ent_part(f, .Spark, p, IDENTITY, {k, k, k}, MAGIC_TINT * (0.5 + 0.5 * bulge))
+    }
+    for palm in palms {
+        for j in 0 ..< 2 {
+            a := t * 8 + f32(j) * math.PI
+            p := palm + (s1 * math.cos(a) + s2 * math.sin(a)) * 0.06
+            ent_part(f, .Spark, p, IDENTITY, {0.12, 0.12, 0.12}, MAGIC_TINT * 0.9)
+        }
+    }
+    if channeling {
+        k := 4 + int(frac * 10) + 4 * size
+        tint := la.lerp(MAGIC_TINT, block_tint, frac)
+        for j in 0 ..< k {
+            a := t * (2 + 7 * frac) + f32(j) * math.TAU / f32(k)
+            r := ring * (1 - 0.35 * frac)
+            p := c + {math.cos(a) * r, math.sin(t * 3 + f32(j)) * 0.35, math.sin(a) * r}
+            ent_part(f, .Spark, p, IDENTITY, {0.6, 0.6, 0.6}, tint)
+        }
+    }
+}
+
+// What our body's hands are doing, for drawing it (player_add_parts) and
+// telling the others (client_send_input).
+local_body_act :: proc(gs: ^Game_State) -> (act: Body_Act) {
+    cam := &gs.camera
+    m := &gs.magic
+    act.t = m.t
+    if cam.climbing {
+        act.climbing, act.at = true, cam.mantle.hands
+        act.k = cam.mantle.t / max(cam.mantle.dur, 0.01)
+        return
+    }
+    act.raise, act.at = m.raise, m.aim
+    if m.channeling { act.k = clamp(m.progress / max(m.need, 0.01), 0, 1) }
+    return
 }
 
 // ─── The gloves ─────────────────────────────────────────────────────────────

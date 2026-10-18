@@ -61,5 +61,24 @@ bench_players_run :: proc(gs: ^Game_State) {
     bench_screenshot(gs, path)
     fmt.printf("bench players: %.2f ms with a torch in another's hand; wrote %s\n", ms, path)
     day_set_hour(gs, hour, settle = true)
+
+    // Their hands (Body_Act), sent over the wire and back (player_pack):
+    // one unweaving a block beside it, beam and all; one pulling up onto a
+    // ledge, hands on the lip.
+    others^ = {}
+    wire :: proc(p: Player) -> Player { return player_unpack(player_pack(p)) }
+    caster := eye_at(gs, x - 2, z + 6)
+    put(&others[1], wire({active = true, pos = caster, yaw = 120, on_ground = true,
+        channeling = true, raise = 1, reach = caster + {-3.5, -1, 1.5}, reach_k = 0.6}))
+    climber := eye_at(gs, x + 3, z + 6) + {0, 0.6, 0}
+    put(&others[2], wire({active = true, pos = climber, yaw = 180, climbing = true,
+        reach = climber + {0, 0.4, -0.7}, reach_k = 0.35}))
+    ok := others[1].latest.channeling && others[2].latest.climbing && abs(others[1].latest.reach_k - 0.6) < 0.01
+    fmt.printf("bench players: casting and climbing come over the wire: %v\n", ok)
+    for _ in 0 ..< 10 { entities_update(gs, 1.0 / 60.0) } // the beam's palms are found as the body is drawn
+    bench_measure(gs)
+    path = fmt.tprintf("%s/players_hands.bmp", bench_shot_dir)
+    bench_screenshot(gs, path)
+    fmt.printf("bench players: wrote %s\n", path)
     others^ = {}
 }

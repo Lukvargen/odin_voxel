@@ -20,7 +20,7 @@ Model_Id :: enum u32 {
     // creatures.odin
     Fox_Body, Fox_Head, Fox_Leg, Fox_Tail,
     Bird_Body, Bird_Wing,
-    Hum_Head, Hum_Torso, Hum_Arm, Hum_Leg,
+    Hum_Head, Hum_Torso, Hum_Arm, Hum_Leg, Hum_Cape,
     // combat.odin, slime.odin
     Sword,      // grip at the origin, blade along +z
     Slime,      // 1 m cube-ish blob standing on its origin, face toward +z
@@ -79,6 +79,7 @@ Pal :: enum u8 {
     Fish_Scale, Fish_Belly, Fish_Fin, Fish_Stripe,
     Magic,               // glows in the part's tint (sparks, motes)
     Block, Block_Glow,   // the part's block, textured (ent_texture); glowing a little (motes)
+    Robe_Dark, Trousers, // the player's: the robe's shade (hood lining, cape), its legs
 }
 #assert(len(Pal) <= 64) // ENT_PAL_BASE reserves 64 entries
 
@@ -146,6 +147,8 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Magic:         return {255, 255, 255}, PAL_TINT | PAL_EMIT
     case .Block:         return {255, 255, 255}, PAL_BLOCK
     case .Block_Glow:    return {255, 255, 255}, PAL_BLOCK | PAL_EMIT
+    case .Robe_Dark:     return {130, 130, 130}, PAL_TINT
+    case .Trousers:      return {84, 66, 50}, 0
     }
     return {255, 0, 255}, 0
 }

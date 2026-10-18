@@ -37,6 +37,14 @@ Player :: struct {
     glide_pitch:   f32, // radians
     glide_bank:    f32, // radians
     glide_unfold:  f32, // 0..1
+    // The hands, for the others to draw (creatures.odin Body_Act): pulling
+    // up onto a ledge, or casting (magic.odin).
+    climbing:   bool,
+    channeling: bool,   // unweaving: the beam flows in
+    conjuring:  bool,   // a block just conjured: the beam flows out
+    raise:      f32,    // casting: the hands up, 0..1
+    reach:      [3]f32, // the ledge's lip, or the spell's block (world)
+    reach_k:    f32,    // climbing: 0..1 through the pull-up; casting: how far the spell is along
     // Defence, as its client last reported it (hurt_outcome).
     invuln:     f32,    // dodging or just hurt: blows miss
     blocking:   bool,

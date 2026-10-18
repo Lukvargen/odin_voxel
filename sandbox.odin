@@ -44,7 +44,7 @@ EXHIBIT_NAMES := [Exhibit_Kind]string{
 }
 
 // Each kind's animations; an exhibit's anim indexes its kind's.
-Walker_Anim  :: enum u8 { Idle, Walk, Run, Jump }
+Walker_Anim  :: enum u8 { Idle, Walk, Run, Jump, Climb, Cast }
 Enemy_Anim   :: enum u8 { Idle, Walk, Run, Chop, Slash, Stagger, Die, Rise }
 Slime_Anim   :: enum u8 { Idle, Hop, Leap, Hit }
 Fox_Anim     :: enum u8 { Idle, Walk, Run }
@@ -235,6 +235,8 @@ exhibit_cycle :: proc(k: Exhibit_Kind, anim: int) -> f32 {
         case .Walk: return math.TAU / (WALK_SPEED / world_scale * 2.4)
         case .Run:  return math.TAU / (WALK_SPEED * SPRINT_FACTOR / world_scale * 2.4)
         case .Jump: return 1.2
+        case .Climb: return 1.4 // a pull-up (about 0.9 s) and a moment
+        case .Cast:  return 2.5
         }
     case .Skeleton, .Goblin, .Orc:
         sp := ENEMY_SPECS[enemy_kind_of(k)]
@@ -315,7 +317,11 @@ exhibit_moments :: proc(k: Exhibit_Kind, anim: int) -> [4]f32 {
         case .Hit:  return {0.01, 0.06, 0.15, 0.35}
         }
     case .Player:
-        if Walker_Anim(anim) == .Jump { return {0.05, 0.2, 0.4, 0.65} }
+        #partial switch Walker_Anim(anim) {
+        case .Jump:  return {0.05, 0.2, 0.4, 0.65}
+        case .Climb: return {0.05, 0.3, 0.55, 0.8}
+        case .Cast:  return {0.1, 0.4, 1.2, 2.2}
+        }
     }
     return {0, c * 0.25, c * 0.5, c * 0.75}
 }
@@ -445,6 +451,8 @@ exhibit_add :: proc(f: ^Ent_Frame, x: ^Exhibit, k: Exhibit_Kind) {
         a := Player_Anim{body_yaw = EXHIBIT_YAW}
         sp: f32 // m/s
         feet := x.pos
+        fwd := [3]f32{-math.sin(EXHIBIT_YAW), 0, math.cos(EXHIBIT_YAW)}
+        act: Body_Act
         switch Walker_Anim(x.anim) {
         case .Idle:
         case .Walk: sp = WALK_SPEED / world_scale
@@ -453,11 +461,25 @@ exhibit_add :: proc(f: ^Ent_Frame, x: ^Exhibit, k: Exhibit_Kind) {
             v := min(math.mod(t, 1.2) / 0.8, 1)
             a.air = clamp(math.sin(v * math.PI) * 2.5, 0, 1)
             feet.y += 4 * v * (1 - v) * 1.1 * world_scale
+        case .Climb:
+            // Up onto a ledge a block and a half high in front (as mantle_pos:
+            // up, then over), hands on its lip.
+            u := min(math.mod(t, 1.4) / 0.9, 1)
+            lip := x.pos + fwd * 0.45 * world_scale + {0, 1.5 * world_scale, 0}
+            up := math.smoothstep(f32(0.1), f32(0.7), u)
+            over := math.smoothstep(f32(0.6), f32(1), u)
+            feet = x.pos + {0, up * 1.5 * world_scale, 0} + fwd * over * 0.8 * world_scale
+            act = {climbing = u < 1, at = lip, k = u, t = t}
+        case .Cast:
+            // Hands up at a block four ahead, the spell coming on.
+            u := math.mod(t, 2.5)
+            act = {raise = math.smoothstep(f32(0), f32(0.25), u) * (1 - math.smoothstep(f32(2.2), f32(2.5), u)),
+                at = x.pos + fwd * 4 * world_scale + {0, 1.2 * world_scale, 0}, k = clamp((u - 0.25) / 1.8, 0, 1), t = t}
         }
         a.walk_phase = t * sp * 2.4
         a.amp = clamp(sp / 5, 0, 1.3)
         ent_scale_about(f, feet, world_scale)
-        humanoid_add_parts(f, feet, &a, -math.to_degrees(EXHIBIT_YAW), 0, PLAYER_TINT, right_arm = true)
+        humanoid_add_parts(f, feet, &a, -math.to_degrees(EXHIBIT_YAW), 0, PLAYER_TINT, right_arm = true, act = &act)
     case .Skeleton, .Goblin, .Orc:
         e := enemy_puppet(x, enemy_kind_of(k))
         enemy_pose(f, &e)
