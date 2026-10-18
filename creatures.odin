@@ -149,36 +149,57 @@ shape_hum_torso :: proc(p: [3]f32, voxel: f32) -> Pal {
     return .Shirt
 }
 
-// The head from the neck up; eyes HUM_EYE above it, looking along +z. A
-// face, not a mask (finer voxels than the rest): eyes with whites either
-// side of a dark iris, thin dark brows, a nose, a mouth; a fringe of hair
-// under a deep hood that covers the nape, its point drooping behind.
+// The head from the neck up; eyes HUM_EYE above it, looking along +z
+// (finer voxels than the rest). A face: a jaw narrowing to the chin, a nose
+// with a bridge, eyes with whites either side of the iris under shaded
+// lids, thin brows, a mouth, the shade under the lip and chin; a fringe and
+// sideburns. Over it a roomy cowl: an arched opening rimmed in gold, a
+// brim shading the brow, dark lining within, soft folds down the sides,
+// draping onto the shoulders, its point hanging behind.
 @(private="file")
 shape_hum_head :: proc(p: [3]f32, voxel: f32) -> Pal {
     q := [3]f32{abs(p.x), p.y, p.z}
-    skull := la.length((p - {0, 0.25, 0}) / [3]f32{1, 1.08, 1.05}) - 0.15
-    jaw := vm_round_box(p, {0, 0.13, 0.04}, {0.095, 0.06, 0.09}, 0.045)
-    neck := vm_capsule(p, {0, -0.02, -0.01}, {0, 0.1, -0.01}, 0.055)
-    face := min(vm_smin(skull, jaw, 0.05), neck)
-    hood := la.length((p - {0, 0.265, -0.02}) / [3]f32{1, 1.1, 1.05}) - 0.185
-    nape := vm_round_box(p, {0, 0.07, -0.07}, {0.12, 0.09, 0.08}, 0.05) // the hood's back, down over the neck
-    tail := vm_capsule(p, {0, 0.38, -0.15}, {0, 0.27, -0.3}, 0.045)
-    open := p.z > 0.035 && q.x < 0.12 && p.y > 0.08 && p.y < 0.34 // where the face looks out
-    if ((hood < 0 && face > -0.012 && !open && p.y > 0.05) || (nape < 0 && face > -0.01 && p.z < 0.02) || tail < 0) {
-        if p.z > 0.05 && q.x < 0.15 && p.y > 0.06 && p.y < 0.37 { return .Robe_Dark } // the lining round the face
+    skull := la.length((p - {0, 0.255, 0}) / [3]f32{1, 1.08, 1.05}) - 0.148
+    chin := clamp((0.16 - p.y) / 0.1, 0, 1)
+    jaw := vm_round_box(p, {0, 0.14, 0.045}, {0.088 - 0.03 * chin, 0.06, 0.085}, 0.04)
+    neck := vm_capsule(p, {0, -0.02, -0.015}, {0, 0.1, -0.015}, 0.052)
+    face := min(vm_smin(skull, jaw, 0.04), neck)
+    bridge := vm_capsule(p, {0, HUM_EYE - 0.01, 0.146}, {0, 0.196, 0.168}, 0.013)
+    tip := vm_round_box(p, {0, 0.193, 0.163}, {0.021, 0.014, 0.015}, 0.01)
+    nose := min(bridge, tip)
+    head := min(face, nose)
+
+    // The cowl round it.
+    c := p - {0, 0.27, -0.02}
+    hood := la.length(c / [3]f32{0.2, 0.215, 0.228}) - 1
+    inner := la.length(c / [3]f32{0.168, 0.182, 0.196}) - 1
+    oval := (p.x / 0.128) * (p.x / 0.128) + ((p.y - 0.2) / 0.163) * ((p.y - 0.2) / 0.163) // the opening, arched round the face
+    open := p.z > 0 && oval < 1
+    drape := vm_round_box(p, {0, 0.05, -0.05}, {0.17, 0.08, 0.13}, 0.06)
+    tail := vm_capsule(p, {0, 0.44, -0.1}, {0, 0.2, -0.36}, 0.04 - 0.015 * clamp((0.44 - p.y) / 0.24, 0, 1))
+    if ((hood < 0 && inner > 0 && p.y > 0.03) || (drape < 0 && head > 0)) && !open || tail < 0 {
+        if p.z > 0.12 && oval < 1.22 { return .Guard_Dark } // the rim: a band of old gold
+        if p.z > -0.02 && oval < 1.7 { return .Robe_Dark } // the lining, seen within
+        a := math.atan2(p.x, -p.z)
+        if p.y < 0.32 && p.y > 0.06 && q.x > 0.1 && abs(math.sin(a * 6)) > 0.97 { return .Robe_Dark } // folds down the sides
         return .Shirt_Trim
     }
-    nose := vm_round_box(p, {0, 0.2, 0.152}, {0.016, 0.034, 0.02}, 0.01)
-    if face > 0 && nose > 0 { return .Empty }
-    if nose < 0 { return .Skin }
-    if p.z > 0.09 {
-        if abs(p.y - HUM_EYE) < 0.013 && q.x > 0.033 && q.x < 0.1 {
-            return abs(q.x - 0.064) < 0.013 ? .Eye : .Eye_White
-        }
-        if p.y > HUM_EYE + 0.027 && p.y < HUM_EYE + 0.042 && q.x > 0.03 && q.x < 0.105 { return .Leather_Dark } // brows (a dark brown)
-        if abs(p.y - 0.135) < 0.009 && q.x < 0.035 { return .Rust } // the mouth (a muted red-brown)
+    if head > 0 { return .Empty }
+    if nose < 0 && face > 0 {
+        return p.y < 0.184 && q.x < 0.014 ? .Skin_Shade : .Skin // nostrils under it
     }
-    if p.y > 0.31 { return .Hair } // a fringe under the hood
+    e := HUM_EYE
+    if p.z > 0.09 {
+        if abs(p.y - e) < 0.013 && q.x > 0.03 && q.x < 0.1 {
+            return abs(q.x - 0.064) < 0.013 ? .Eye : .Eye_White // iris toward the middle
+        }
+        if p.y >= e + 0.013 && p.y < e + 0.03 && q.x > 0.028 && q.x < 0.104 { return .Skin_Shade } // lids, under the brow
+        if p.y >= e + 0.03 && p.y < e + 0.044 && q.x > 0.03 && q.x < 0.1 - 0.15 * max(q.x - 0.07, 0) { return .Leather_Dark } // brows
+        if abs(p.y - 0.136) < 0.009 && q.x < 0.036 { return .Rust } // the mouth
+        if p.y < 0.127 && p.y > 0.112 && q.x < 0.026 { return .Skin_Shade } // under the lip
+    }
+    if p.y < 0.095 || (q.x > 0.085 && p.y < 0.15 && p.z > 0) { return .Skin_Shade } // the jaw's line, the neck in its shade
+    if p.y > 0.315 || (q.x > 0.12 && p.y > 0.19 && p.z < 0.1) { return .Hair } // a fringe, sideburns
     return .Skin
 }
 
@@ -246,7 +267,7 @@ creature_models_bake :: proc() {
     ent_models[.Bird_Wing] = model_bake({-0.02, -0.05, -0.24}, {1.02, 0.08, 0.12}, 1.0 / 16, shape_bird_wing)
     // As fine as the skeleton's.
     ent_models[.Hum_Torso] = model_bake({-0.27, -0.27, -0.16}, {0.27, 0.63, 0.16}, 1.0 / 24, shape_hum_torso)
-    ent_models[.Hum_Head]  = model_bake({-0.21, -0.04, -0.36}, {0.21, 0.5, 0.22}, 1.0 / 40, shape_hum_head) // finer: a face
+    ent_models[.Hum_Head]  = model_bake({-0.22, -0.04, -0.42}, {0.22, 0.5, 0.24}, 1.0 / 40, shape_hum_head) // finer: a face
     ent_models[.Hum_Arm]   = model_bake({-0.07, -0.36, -0.07}, {0.07, 0.06, 0.07}, 1.0 / 24, shape_hum_arm)
     ent_models[.Hum_Fore]  = model_bake({-0.08, -0.29, -0.08}, {0.08, 0.06, 0.08}, 1.0 / 24, shape_hum_fore)
     ent_models[.Hum_Hand]  = model_bake({-0.06, -0.14, -0.05}, {0.08, 0.01, 0.07}, 1.0 / 32, shape_hum_hand)

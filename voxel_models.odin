@@ -80,6 +80,7 @@ Pal :: enum u8 {
     Magic,               // glows in the part's tint (sparks, motes)
     Block, Block_Glow,   // the part's block, textured (ent_texture); glowing a little (motes)
     Robe_Dark, Trousers, // the player's: the robe's shade (hood lining, cape), its legs
+    Skin_Shade,          // ...and the face's shadows (lids, under the lip and chin)
 }
 #assert(len(Pal) <= 64) // ENT_PAL_BASE reserves 64 entries
 
@@ -149,6 +150,7 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Block_Glow:    return {255, 255, 255}, PAL_BLOCK | PAL_EMIT
     case .Robe_Dark:     return {130, 130, 130}, PAL_TINT
     case .Trousers:      return {84, 66, 50}, 0
+    case .Skin_Shade:    return {150, 102, 76}, 0
     }
     return {255, 0, 255}, 0
 }
