@@ -357,7 +357,7 @@ spring :: proc(x, v: ^f32, target, omega, dt: f32) {
 glider_can_toggle :: proc(gs: ^Game_State) -> bool {
     c := &gs.camera
     if gs.glider.deployed { return true }
-    if c.fly_mode || c.on_ground { return false }
+    if c.fly_mode || c.on_ground || c.climbing { return false } // not mid pull-up
     x, y, z := int(math.floor(c.pos.x)), int(math.floor(c.pos.y - PLAYER_EYE_HEIGHT * 0.5)), int(math.floor(c.pos.z))
     return !block_is_watery(u8(get_voxel(gs, x, y, z)))
 }

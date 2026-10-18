@@ -139,6 +139,7 @@ Game_State :: struct {
     w_last_press_ms:     u64,  // double-tap W sprints
     sprint_latched:      bool, // ... until W is let go
     jump_pressed:        bool, // single-frame jump signal
+    glider_pressed:      bool, // Space in mid-air: open the wing, unless it caught a ledge instead
 
     // UI
     ui: UI_State,
@@ -496,6 +497,7 @@ game_main :: proc() -> (relaunch: []string) {
         mouse_dx, mouse_dy: f32
         wheel_dy: f32
         gs.jump_pressed  = false
+        gs.glider_pressed = false
         gs.left_pressed  = false
         gs.right_pressed = false
         dodge_pressed   := false
@@ -614,6 +616,17 @@ game_main :: proc() -> (relaunch: []string) {
         orbiting := gs.sandbox.on && gs.sandbox.orbit
         if orbiting && (move_fwd || move_back || move_left || move_right) { gs.sandbox.orbit, orbiting = false, false }
         if play_dt > 0 && !orbiting {
+            // Space held, pushing toward a ledge, the wing only just opened
+            // (pressed a moment early): fold it and pull up instead.
+            if gs.glider.deployed && gs.glider.deploy_t < 0.6 && gs.camera.swim_up && gs.mouse_locked &&
+               (move_fwd || move_back || move_left || move_right) {
+                glider_toggle_deploy(gs) // the look back on the camera, to find the way pushed
+                wish := camera_flat_forward(gs.camera) * (f32(int(move_fwd)) - f32(int(move_back))) +
+                        camera_flat_right(gs.camera) * (f32(int(move_right)) - f32(int(move_left)))
+                if !(wish.x * wish.x + wish.z * wish.z > 1e-8 && ledge_climb(gs, &gs.camera, wish, MANTLE_REACH)) {
+                    gs.glider.deployed = true // nothing to catch: flying on as it was
+                }
+            }
             if gs.glider.deployed {
                 // W pulls the bar in (fast), S flares (brake), A/D lean, Ctrl looks around.
                 glider_update(gs, -mouse_dx, mouse_dy, play_dt,
@@ -622,6 +635,9 @@ game_main :: proc() -> (relaunch: []string) {
                 camera_update(&gs.camera, gs, -mouse_dx, mouse_dy, play_dt,
                     move_fwd, move_back, move_left, move_right, gs.jump_pressed,
                     sprint, sneak, ultra)
+                // Space pressed in mid-air: the wing opens, unless that
+                // move caught a ledge (camera.odin ledge_climb).
+                if gs.glider_pressed && glider_can_toggle(gs) { glider_toggle_deploy(gs) }
             }
         }
         combat_post_update(gs, play_dt)
@@ -765,9 +781,13 @@ on_key_down :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods, repeat, playi
         gs.w_last_press_ms = press_time
     case SDL.K_SPACE:
         // Glider equipped: Space in mid-air opens / releases the
-        // wing (and double-tap fly mode is off while it's on).
-        if gs.glider.equipped && glider_can_toggle(gs) {
+        // wing (and double-tap fly mode is off while it's on). Opening
+        // waits for this frame's move: Space facing a ledge pulls up
+        // onto it instead (the main loop).
+        if gs.glider.equipped && gs.glider.deployed {
             glider_toggle_deploy(gs)
+        } else if gs.glider.equipped && glider_can_toggle(gs) {
+            gs.glider_pressed = true
         } else if gs.glider.equipped {
             gs.jump_pressed = true
         } else {

@@ -702,6 +702,7 @@ others_update :: proc(gs: ^Game_State, dt: f32) {
         o.pos = p.pos
         o.t += dt
         anim_step(&o.anim, p.velocity, p.yaw, p.sword, p.on_ground || p.fly_mode, dt)
+        anim_climb(&o.anim, p.climbing, p.reach, p.pos)
         // Their spell hums where it works, as ours does.
         o.hum -= dt
         if p.channeling && o.hum <= 0 {

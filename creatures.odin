@@ -414,11 +414,26 @@ Player_Anim :: struct {
     walk_phase: f32,
     amp:        f32, // smoothed stride amplitude
     air:        f32, // 0 grounded .. 1 airborne, smoothed
+    climbing:   bool, // pulling up onto a ledge (anim_climb)...
+    climb_yaw:  f32,  // ... facing it, as when the hands caught the lip
 }
 
 player_anim_update :: proc(gs: ^Game_State, dt: f32) {
     cam := &gs.camera
     anim_step(&gs.player_anim, cam.velocity, cam.yaw, gs.combat.sword, cam.on_ground || cam.fly_mode, dt)
+    anim_climb(&gs.player_anim, cam.climbing, cam.mantle.hands, cam.pos)
+}
+
+// A pull-up faces the ledge throughout: the way to the lip as the hands
+// catch it, held (later the body passes over the lip, and the way to it
+// turns round). The body is left facing that way, to walk on from.
+anim_climb :: proc(a: ^Player_Anim, climbing: bool, lip, pos: [3]f32) {
+    if climbing && !a.climbing {
+        d := lip - pos
+        a.climb_yaw = d.x * d.x + d.z * d.z > 1e-4 ? math.atan2(-d.x, d.z) : a.body_yaw
+    }
+    a.climbing = climbing
+    if climbing { a.body_yaw = a.climb_yaw }
 }
 
 // A walking body's turn, stride and airborne tuck, for velocity v and the
@@ -520,7 +535,7 @@ humanoid_add_parts :: proc(f: ^Ent_Frame, feet: [3]f32, a: ^Player_Anim, look_ya
     // act's world points come back to that size.
     design :: proc(feet, w: [3]f32) -> [3]f32 { return feet + (w - feet) / world_scale }
     body_yaw := a.body_yaw
-    if climb {
+    if climb && !a.climbing { // no anim_climb (the sandbox): toward the lip
         d := act.at - feet
         if d.x * d.x + d.z * d.z > 1e-4 { body_yaw = math.atan2(-d.x, d.z) } // facing the ledge
     }
