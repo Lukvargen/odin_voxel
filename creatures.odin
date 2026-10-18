@@ -331,16 +331,19 @@ anim_step :: proc(a: ^Player_Anim, v: [3]f32, look_yaw: f32, sword, grounded: bo
     a.air += (air - a.air) * min(dt * 8, 1)
 }
 
-// Standing / walking / jumping player at its feet, for the chase view.
+// Standing / walking / jumping player at its feet, for the chase view. In
+// first person the body is only a shadow (the view starts inside its head),
+// and none in fly mode: a free camera (and the benches') has no body under it.
 player_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     a := &gs.player_anim
-    if gs.glider.deployed || gs.glider.chase_dist < 1.0 || !ent_begin(f) { return }
+    first := gs.glider.chase_dist < 1.0
+    if gs.glider.deployed || (first && gs.camera.fly_mode) || !ent_begin(f, seen = !first) { return }
     feet := gs.camera.pos - [3]f32{0, PLAYER_EYE_HEIGHT, 0}
     feet.y += gs.camera.step_visual_offset
     ent_scale_about(f, feet, world_scale)
     sword := gs.combat.sword
     hips := humanoid_add_parts(f, feet, a, gs.camera.yaw, gs.camera.pitch, PLAYER_TINT, right_arm = !sword)
-    if sword {
+    if sword && !first { // in first person combat_add_parts draws it, seen and with a shadow
         // The sword arm reaches for the grip, posed as in first person from
         // a viewpoint at the eyes.
         fwd, right, up := camera_basis(gs.camera)
@@ -390,8 +393,9 @@ basis_hang_along :: proc(d, ref: [3]f32) -> Basis {
 }
 
 // The pilot lying prone under the glider (body frame rot at the eye `p`),
-// hands on the base bar. Third person only.
-pilot_add_parts :: proc(f: ^Ent_Frame, p: [3]f32, rot: Basis, tint := PLAYER_TINT, grip := [3]f32{0.48, -0.42, 0.72}) {
+// hands on the base bar. Third person only (in first person, without the
+// arms, only as a shadow).
+pilot_add_parts :: proc(f: ^Ent_Frame, p: [3]f32, rot: Basis, tint := PLAYER_TINT, grip := [3]f32{0.48, -0.42, 0.72}, arms := true) {
     prone := rot * basis_rot_x(math.PI / 2) // humanoid up -> glider forward, face -> down
     feet := p + rot * [3]f32{0, 0.22, -1.56}
     hips := [3]f32{0, 0.74, 0}
@@ -399,6 +403,7 @@ pilot_add_parts :: proc(f: ^Ent_Frame, p: [3]f32, rot: Basis, tint := PLAYER_TIN
     attach(f, .Hum_Leg, feet, prone, 1, hips + {-0.1, 0, 0}, basis_rot_x(-0.05), tint)
     attach(f, .Hum_Torso, feet, prone, 1, hips, IDENTITY, tint)
     attach(f, .Hum_Head, feet, prone, 1, hips + {0, 0.58, 0}, basis_rot_x(-0.9), tint)
+    if !arms { return } // drawn by the caller
     up := rot * [3]f32{0, 1, 0}
     for side in ([2]f32{1, -1}) {
         shoulder := feet + prone * (hips + [3]f32{0.27 * side, 0.52, 0})

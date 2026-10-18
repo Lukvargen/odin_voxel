@@ -35,6 +35,19 @@ bench_torch_run :: proc(gs: ^Game_State) {
     bench_torch_view(gs, b + {-5, 3.6, -5.5}, b + {3, 1.5, 4}, "torch_room")
     bench_torch_view(gs, b + {5.5, 3.6, -5.5}, b + {-3, 1.5, 3}, "torch_room2")
     bench_torch_view(gs, b + {0.5, 4.5, -5.5}, b + {0.5, 1, 4}, "torch_wall")
+    // Creatures: a slime in the torchlight and one behind the short wall.
+    gs.slimes = {}
+    gs.slimes.spawn_timer = 1e9
+    for at in ([2][3]f32{{-3, 1, 0}, {0.5, 1, -5.3}}) {
+        if sl := slime_spawn(&gs.slimes, .Medium, b + at + {0.5, 0, 0.5}, {}, SLIME_COLORS[2]); sl != nil {
+            sl.age, sl.yaw, sl.timer = 10, 0, 1e9
+        }
+    }
+    for _ in 0 ..< 30 { client_send_input(gs); server_receive(&gs.server); slimes_update(gs, 1.0 / 60.0); server_flush(&gs.server, 1.0 / 60.0); client_receive(gs, 1.0 / 60.0) }
+    gs.entities_enabled = true
+    bench_torch_view(gs, b + {4.5, 3.4, -5.6}, b + {-1, 1, -2}, "torch_slimes")
+    gs.entities_enabled = false
+    entities_update(gs, 0)
     pad(gs, base, {-5, 1, 5}, {-5, 1, 5}, .Torch)
     pad(gs, base, {5, 1, -2}, {5, 1, -2}, .Torch)
     bench_torch_view(gs, b + {-5, 3.6, -5.5}, b + {3, 1.5, 4}, "torch_room3")

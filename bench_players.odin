@@ -50,5 +50,16 @@ bench_players_run :: proc(gs: ^Game_State) {
     path := fmt.tprintf("%s/players.bmp", bench_shot_dir)
     bench_screenshot(gs, path)
     fmt.printf("bench players: wrote %s\n", path)
+
+    // At night, the standing one holding a torch: it lights the ground
+    // around it here too (gpu.odin hand_lights).
+    hour := gs.day.hour
+    day_set_hour(gs, 22, settle = true)
+    others[1].latest.torch, others[1].hurt = true, 0
+    ms := bench_measure(gs)
+    path = fmt.tprintf("%s/players_torch.bmp", bench_shot_dir)
+    bench_screenshot(gs, path)
+    fmt.printf("bench players: %.2f ms with a torch in another's hand; wrote %s\n", ms, path)
+    day_set_hour(gs, hour, settle = true)
     others^ = {}
 }

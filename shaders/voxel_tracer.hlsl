@@ -122,24 +122,31 @@ float4 apply_fog(float4 color, float dist, float3 ray_dir) {
 
 #define MIN_AMBIENT       0.015                   // so pitch-black caves keep a hint of shape
 
-// The torch in the player's hand (u_hand_light, gpu.odin): a point light
-// that falls off with distance as block light does with levels, with a
-// shadow ray so it doesn't shine through walls. two_sided: thin plant
+// Torches in the players' hands (u_hand_lights, gpu.odin): point lights
+// that fall off with distance as block light does with levels, with a
+// shadow ray so they don't shine through walls. two_sided: thin plant
 // blades, lit from either side.
+#define HAND_LIGHTS 4 // gpu.odin HAND_LIGHTS
 float3 hand_light(float3 p, float3 n, bool two_sided) {
-    if (u_hand_light.w <= 0.0) return 0.0;
-    float3 to = u_hand_light.xyz - p;
-    float d = length(to);
-    float level = u_hand_light.w - d;
-    if (level <= 0.0) return 0.0;
-    float3 l = to / max(d, 1e-4);
-    float ndl = dot(n, l);
-    if (two_sided) ndl = abs(ndl) * 0.7 + 0.3;
-    if (ndl <= 0.0) return 0.0;
-    // Plants shade by their shapes: so close, whole-voxel shading shows as
-    // dark block-shaped wedges across the ground.
-    float sh = trace_shadow_transmittance(p + n * 0.01, l, max(d - 0.3, 0.0), true);
-    return TORCH_LIGHT_COLOR * (block_light_curve(level) * ndl * sh);
+    float3 sum = float3(0, 0, 0);
+    [loop]
+    for (int i = 0; i < HAND_LIGHTS; i++) {
+        float4 hl = u_hand_lights[i];
+        if (hl.w <= 0.0) break;
+        float3 to = hl.xyz - p;
+        float d = length(to);
+        float level = hl.w - d;
+        if (level <= 0.0) continue;
+        float3 l = to / max(d, 1e-4);
+        float ndl = dot(n, l);
+        if (two_sided) ndl = abs(ndl) * 0.7 + 0.3;
+        if (ndl <= 0.0) continue;
+        // Plants shade by their shapes: so close, whole-voxel shading shows as
+        // dark block-shaped wedges across the ground.
+        float sh = trace_shadow_transmittance(p + n * 0.01, l, max(d - 0.3, 0.0), true);
+        sum += TORCH_LIGHT_COLOR * (block_light_curve(level) * ndl * sh);
+    }
+    return sum;
 }
 
 // ---- Torch shadows (torch.odin) ----------------------------------------------
@@ -1045,6 +1052,9 @@ float4 shade_entity(EntityHit ehit, float3 dir, float t_off) {
     uint   lv    = sample_light(int3(floor(P + N * 0.6)));
     float3 ambient = sky_ambient() * light_curve(float(light_sky(lv))) * underwater_light(P + N * 0.3) + MIN_AMBIENT;
     float3 torch   = block_radiance(lv, torch_flicker(P));
+    // Behind a pillar from a placed torch, in its shadow as the ground is
+    // (the rays meet blocks only; a side turned away from it is dark).
+    if (torch.r + torch.g > 0.0) torch *= torch_shadow(P + N * 0.01, N, int3(floor(P + N * 0.6)), false);
     float3 q = P + N * 0.6, gi;
     float  gi_fade;
     if (gi_sample(int3(floor(q)), q, N, float3(0, 0, 0), gi, gi_fade)) ambient += gi * gi_fade;

@@ -750,6 +750,7 @@ bench_glider_run :: proc(gs: ^Game_State) {
     // third-person view.
     if bench_shot_dir == "" { return }
     g.third_person, g.chase_dist = false, 0 // no player body around the camera
+    cam.fly_mode = true                     // nor its shadow (player_add_parts)
     for kind in Entity_Kind {
         for e in gs.entities {
             if e.kind != kind { continue }

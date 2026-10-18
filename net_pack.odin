@@ -9,10 +9,10 @@ import la "core:math/linalg"
 // (Msg_Monsters.origin). About half the size of the structs they come from;
 // what's lost is far below what anyone could see.
 
-Net_Player_Flag :: enum u8 { Active, On_Ground, Fly_Mode, Sneaking, Sprinting, Sword, Gliding, Blocking }
+Net_Player_Flag :: enum u8 { Active, On_Ground, Fly_Mode, Sneaking, Sprinting, Sword, Gliding, Blocking, Torch }
 
 Net_Player :: struct #packed {
-    flags:      bit_set[Net_Player_Flag; u8],
+    flags:      bit_set[Net_Player_Flag; u16],
     pos:        [3]f32, // anywhere in the world: kept whole
     velocity:   [3]f16,
     yaw, pitch: f16,    // yaw wrapped to 0..360
@@ -63,6 +63,7 @@ player_pack :: proc(p: Player) -> (n: Net_Player) {
     if p.sword     { n.flags += {.Sword} }
     if p.gliding   { n.flags += {.Gliding} }
     if p.blocking  { n.flags += {.Blocking} }
+    if p.torch     { n.flags += {.Torch} }
     n.pos = p.pos
     n.velocity = la.array_cast(p.velocity, f16)
     n.yaw, n.pitch = f16(wrap_angle(p.yaw, 360)), f16(p.pitch)
@@ -79,7 +80,7 @@ player_pack :: proc(p: Player) -> (n: Net_Player) {
 player_unpack :: proc(n: Net_Player) -> (p: Player) {
     p.active, p.on_ground, p.fly_mode = .Active in n.flags, .On_Ground in n.flags, .Fly_Mode in n.flags
     p.sneaking, p.sprinting, p.sword = .Sneaking in n.flags, .Sprinting in n.flags, .Sword in n.flags
-    p.gliding, p.blocking = .Gliding in n.flags, .Blocking in n.flags
+    p.gliding, p.blocking, p.torch = .Gliding in n.flags, .Blocking in n.flags, .Torch in n.flags
     p.pos = n.pos
     p.velocity = la.array_cast(n.velocity, f32)
     p.yaw, p.pitch = f32(n.yaw), f32(n.pitch)

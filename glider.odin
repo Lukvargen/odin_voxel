@@ -645,13 +645,19 @@ glider_view_update :: proc(gs: ^Game_State, dt: f32) {
 // The glider as one entity of voxel-model parts (voxel_models.odin), all in
 // the body frame at the pilot's eye. The wing unfolds by scaling its span.
 // The pilot's body only shows in the chase view — in first person it would
-// sit around the camera — but the arms on the bar always do.
+// sit around the camera, so there it's only a shadow — but the arms on the
+// bar always do.
 glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     g := &gs.glider
     if !g.deployed || !ent_begin(f) { return }
     ent_scale_about(f, gs.camera.pos, world_scale)
     // The whole pilot in the chase view; from the eyes, just the arms.
-    glider_wing_parts(f, gs.camera.pos, g.heading, g.path_angle + g.aoa, g.bank, g.deploy_t, PLAYER_TINT, pilot = g.chase_dist > 1.5, bar = g.bar)
+    pilot := g.chase_dist > 1.5
+    rot, grip := glider_wing_parts(f, gs.camera.pos, g.heading, g.path_angle + g.aoa, g.bank, g.deploy_t, PLAYER_TINT, pilot = pilot, bar = g.bar)
+    ent_end(f)
+    if pilot || !ent_begin(f, seen = false) { return }
+    ent_scale_about(f, gs.camera.pos, world_scale)
+    pilot_add_parts(f, gs.camera.pos, rot, PLAYER_TINT, grip, arms = false)
     ent_end(f)
 }
 
@@ -659,17 +665,17 @@ glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
 // (radians), unfolded 0..1, the speed bar pulled in 0..1 (the base bar
 // drawn in to the chest: what tells you W is held). Inside an ent_begin /
 // ent_end.
-glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy_t: f32, tint: [3]f32, pilot: bool, bar: f32 = 0) {
+glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy_t: f32, tint: [3]f32, pilot: bool, bar: f32 = 0) -> (rot: Basis, grip: [3]f32) {
     fwd, up := glider_axes(heading, pitch, bank)
     left := la.cross(up, fwd)
-    rot := basis_from_axes(left, up, fwd)
+    rot = basis_from_axes(left, up, fwd)
     unfold := 0.12 + 0.88 * math.smoothstep(f32(0), 1, deploy_t)
     ent_part(f, .Glider_Wing, p, rot, {unfold, 1, 1})
     // A-frame (two downtubes and the base bar) and the arms holding the bar.
     at := proc(p: [3]f32, rot: Basis, b: [3]f32) -> [3]f32 { return p + rot * b }
     apex := at(p, rot, {0, 1.25, 0.15})
     pull := math.smoothstep(f32(0), 1, bar)
-    grip := [3]f32{0.46, -0.42 + 0.07 * pull, 0.72 - 0.24 * pull} // the right hand on the bar; the left mirrors it
+    grip = [3]f32{0.46, -0.42 + 0.07 * pull, 0.72 - 0.24 * pull} // the right hand on the bar; the left mirrors it
     bar_l := at(p, rot, {0.75, grip.y - 0.03, grip.z + 0.03})
     bar_r := at(p, rot, {-0.75, grip.y - 0.03, grip.z + 0.03})
     ent_segment(f, .Rod, apex, bar_l, up)
@@ -681,6 +687,7 @@ glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy
         ent_segment(f, .Arm, at(p, rot, {0.2, -0.16, -0.05}), at(p, rot, grip), up, tint)
         ent_segment(f, .Arm, at(p, rot, {-0.2, -0.16, -0.05}), at(p, rot, grip * {-1, 1, 1}), up, tint)
     }
+    return
 }
 
 // Screen position (pixels in a w x h window) of a world direction, or false

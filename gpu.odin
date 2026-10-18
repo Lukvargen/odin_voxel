@@ -48,7 +48,7 @@ Camera_Uniform :: struct #packed {
     thermals:       [MAX_SKY_THERMALS][4]f32, // cumulus over thermals: XZ centre at cloud base, radius, strength
     thermal_count:  [4]i32, // x = count
     cloud_puffs:    [MAX_SKY_THERMALS * 4][4]f32, // per thermal 4 towers: offset (cloud radii), radius
-    hand_light:     [4]f32, // torch in hand: xyz = position, w = light level (0 = none)
+    hand_lights:    [HAND_LIGHTS][4]f32, // torches in hand: xyz = position, w = light level (0 = none, ends the list)
     gi_origin:      [4]i32, // bounce-light probe grid (gi.odin): min corner in probe coords, w = enabled
     gi_frame:       [4]i32, // x = first probe slot renewed this frame, y = frame counter
     torch:          [4]i32, // torch shadows (torch.odin): xyz = the box's min chunk, w = emitters listed (0 = off)
@@ -58,21 +58,48 @@ Camera_Uniform :: struct #packed {
 // A held torch lights the world around the player as a point light in the
 // shader (it moves every frame, so it stays out of the CPU voxel light).
 // It sits low and to the right of the eye, where the hand is, unless that
-// is inside a block.
+// is inside a block. The other players' torches light it too: up to
+// HAND_LIGHTS in all, this player's first, then the nearest.
 HAND_TORCH_LIGHT :: BLOCK_LIGHT_MAX // as bright as a placed torch, fading out ~24 blocks away
+HAND_LIGHTS      :: 4               // voxel_tracer.hlsl HAND_LIGHTS
 
 // Width over height of the scene (and the window, give or take a pixel).
 render_aspect :: proc(gs: ^Game_State) -> f32 {
     return gs.render_h > 0 ? f32(gs.render_w) / f32(gs.render_h) : 1
 }
 
-hand_light :: proc(gs: ^Game_State, eye, fwd, right, up: [3]f32) -> [4]f32 {
-    if gs.selected_block != .Torch || gs.combat.sword { return {} }
-    p := eye + right * 0.35 - up * 0.3 + fwd * 0.3
-    if block_solid(u8(voxel_at(gs, p))) { p = eye }
+holding_torch :: proc(gs: ^Game_State) -> bool { return gs.selected_block == .Torch && !gs.combat.sword }
+
+// Lit entries first; w = 0 ends the list.
+hand_lights :: proc(gs: ^Game_State, eye, fwd, right, up: [3]f32) -> (lights: [HAND_LIGHTS][4]f32) {
     t := f32(SDL.GetTicks()) / 1000.0
-    flicker := 0.6 * math.sin(t * 9.3) + 0.4 * math.sin(t * 23.1 + 1.7)
-    return {p.x, p.y, p.z, HAND_TORCH_LIGHT + flicker * 0.35}
+    light :: proc(gs: ^Game_State, eye, fwd, right, up: [3]f32, t, phase: f32) -> [4]f32 {
+        p := eye + right * 0.35 - up * 0.3 + fwd * 0.3
+        if block_solid(u8(voxel_at(gs, p))) { p = eye }
+        flicker := 0.6 * math.sin(t * 9.3 + phase) + 0.4 * math.sin(t * 23.1 + 1.7 + phase * 2.3)
+        return {p.x, p.y, p.z, HAND_TORCH_LIGHT + flicker * 0.35}
+    }
+    n := 0
+    if holding_torch(gs) { lights[0] = light(gs, eye, fwd, right, up, t, 0); n = 1 }
+    // The nearest other players holding one (each flickering its own way).
+    Near :: struct { slot: int, d2: f32 }
+    near: [MAX_PLAYERS]Near
+    k := 0
+    for &o, slot in gs.net.others {
+        if !o.active || !o.latest.torch { continue }
+        d := o.pos - gs.camera.pos
+        near[k] = {slot, d.x * d.x + d.y * d.y + d.z * d.z}
+        k += 1
+    }
+    slice.sort_by(near[:k], proc(a, b: Near) -> bool { return a.d2 < b.d2 })
+    for c in near[:k] {
+        if n == HAND_LIGHTS { break }
+        o := &gs.net.others[c.slot]
+        f, r, u := camera_basis(Camera{yaw = o.latest.yaw, pitch = o.latest.pitch})
+        lights[n] = light(gs, o.pos, f, r, u, t, f32(c.slot) * 1.9)
+        n += 1
+    }
+    return
 }
 
 // (Re)create the scene color, depth, and half-res volumetric textures at the
@@ -743,7 +770,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
         }
     }
     uniform.thermal_count.x = i32(clouds)
-    uniform.hand_light = hand_light(gs, render_pos, fwd, right, up)
+    uniform.hand_lights = hand_lights(gs, render_pos, fwd, right, up)
     uniform.gi_origin, uniform.gi_frame = gi_uniforms(gs, render_pos)
     uniform.torch = torch_uniform(gs, render_pos)
     uniform.torch_params = {gs.torch.floor, 0, 0, 0}

@@ -32,7 +32,7 @@ cbuffer CameraUniforms : register(b0, space2) {
     float4 u_thermals[16];   // cumulus over thermals: XZ centre at cloud base, radius, strength (MAX_SKY_THERMALS)
     int4   u_thermal_count;  // x = count
     float4 u_cloud_puffs[64];// per thermal 4 cumulus towers: offset (cloud radii), radius
-    float4 u_hand_light;     // torch in hand: xyz = position, w = light level (0 = none)
+    float4 u_hand_lights[4]; // torches in hand (HAND_LIGHTS): xyz = position, w = light level (0 = none, ends the list)
     int4   u_gi_origin;      // bounce-light probe grid (gi_common.hlsl): min corner in probe coords, w = enabled
     int4   u_gi_frame;       // x = first probe slot updated this frame, y = frame counter
     int4   u_torch;          // torch shadows (torch.odin): xyz = the box's min chunk, w = emitters listed (0 = off)

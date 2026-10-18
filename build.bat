@@ -24,8 +24,13 @@ if %errorlevel% neq 0 ( echo bloom_blur_v shader failed! & exit /b 1 )
 if %errorlevel% neq 0 ( echo gi_probes shader failed! & exit /b 1 )
 echo Shaders compiled OK.
 
-echo Building Odin...
-odin build . -debug -out:odin_raytrace.exe
+rem `build.bat fast`: optimized (-o:speed), for playing. -debug alone means
+rem -o:none: quick to build, but terrain, light and streaming run 4-10x
+rem slower on the CPU (world loads in ~26 s instead of ~6). GPU time is the same.
+set OPT=
+if /i "%~1"=="fast" set OPT=-o:speed
+echo Building Odin... %OPT%
+odin build . -debug %OPT% -out:odin_raytrace.exe
 if %errorlevel% neq 0 (
     echo Odin build failed!
     exit /b 1

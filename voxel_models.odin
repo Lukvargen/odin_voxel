@@ -374,6 +374,7 @@ Ent_Frame :: struct {
     // CPU only below
     n_ents, n_parts: int,
     no_shadow: [MAX_ENTITIES]bool,
+    unseen:    [MAX_ENTITIES]bool, // shadow only: in no screen tile
     // The open entity drawn `scale` times its size about `anchor`
     // (ent_scale_about; 0: as given). Bodies are posed at their design size.
     anchor:    [3]f32,
@@ -453,6 +454,7 @@ ent_build_masks :: proc(f: ^Ent_Frame, gs: ^Game_State) {
         // Only a part whose box holds the eye covers the whole screen; the
         // glider's wing and frame otherwise claim just the tiles they span.
         for p in e.first_part ..< e.first_part + e.part_count {
+            if f.unseen[i] { break }
             r, ok := part_screen_rect(f, int(p), eye, fwd, right, up, w, h)
             if !ok { continue }
             ax := clamp(int(math.floor((r[0] - 1) / ENT_TILE)), 0, tx - 1)
@@ -509,9 +511,11 @@ basis_rot_x :: proc(a: f32) -> Basis {
 }
 
 // casts_shadow = false: only seen directly, never in shadow rays.
-ent_begin :: proc(f: ^Ent_Frame, casts_shadow := true) -> bool {
+// seen = false: the reverse, only a shadow (the body in first person).
+ent_begin :: proc(f: ^Ent_Frame, casts_shadow := true, seen := true) -> bool {
     if f.n_ents >= MAX_ENTITIES { return false }
     f.no_shadow[f.n_ents] = !casts_shadow
+    f.unseen[f.n_ents] = !seen
     f.ents[f.n_ents] = {
         aabb_min = {1e9, 1e9, 1e9}, aabb_max = {-1e9, -1e9, -1e9},
         first_part = u32(f.n_parts),
