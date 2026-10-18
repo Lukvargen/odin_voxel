@@ -21,7 +21,11 @@ import clay "thirdparty/clay-odin"
 // and the GPU's buffers are made once). "Main menu" in the pause menu ends
 // this run and starts the game again here (main_relaunch).
 
-Menu_Choice :: enum u8 { None, Quit, World, Sandbox }
+Menu_Choice :: enum u8 { None, Quit, World, Sandbox, Join }
+
+// Why the game is back at the main menu (note=, from main_menu_args): shown
+// on the Worlds page, where you'd try again.
+menu_note: string
 
 @(private="file")
 Menu_Page :: enum u8 { Title, Worlds }
@@ -41,13 +45,14 @@ Main_Menu :: struct {
     picked:   int, // in worlds, -1 none
     clicked:  u64, // when the picked one was last clicked (ms): a second click soon after plays it
     new_name: Text_Field,
+    join_to:  Text_Field, // the address of someone's game
     note:     string, // why the new name won't do
     survival: bool,   // a new world's game mode
     choice:   Menu_Choice,
 }
 
 // Runs the menu until something is chosen; for .World, the world's folder
-// name under saves/.
+// name under saves/; for .Join, the address.
 main_menu_run :: proc(gs: ^Game_State) -> (choice: Menu_Choice, world: string) {
     // On the heap: its name box is where the UI types (ui.typing) for a while.
     m := new_clone(Main_Menu{picked = -1})
@@ -57,6 +62,7 @@ main_menu_run :: proc(gs: ^Game_State) -> (choice: Menu_Choice, world: string) {
         free(m)
     }
     menu_scan_worlds(m)
+    if menu_note != "" { m.note, m.page = menu_note, .Worlds }
     gs.mouse_locked = false
     _ = SDL.SetWindowRelativeMouseMode(gs.window, false)
     ui := &gs.ui
@@ -97,6 +103,7 @@ main_menu_run :: proc(gs: ^Game_State) -> (choice: Menu_Choice, world: string) {
     }
     ui_type_into(gs, nil)
     if m.choice == .World { world = strings.clone(m.worlds[m.picked].name) }
+    if m.choice == .Join { world = strings.clone(strings.trim_space(string(m.join_to.buf[:m.join_to.len]))) }
     return m.choice, world
 }
 
@@ -137,6 +144,7 @@ main_menu_args :: proc(gs: ^Game_State) -> []string {
     args := make([dynamic]string)
     append(&args, "menu")
     if name := client_name(gs); name != "" { append(&args, fmt.aprintf("name=%s", name)) }
+    if gs.ui.menu_note != "" { append(&args, fmt.aprintf("note=%s", gs.ui.menu_note)) }
     if r, ok := window_rect(gs); ok { append(&args, fmt.aprintf("window=%d,%d,%d,%d", r[0], r[1], r[2], r[3])) }
     return args[:]
 }
@@ -290,6 +298,17 @@ menu_worlds :: proc(gs: ^Game_State, m: ^Main_Menu) {
         submitted := text_field(gs, clay.ID("NewWorldName"), &m.new_name, "New world", height = 44)
         if menu_button(clay.ID("NewWorldMode"), m.survival ? "Survival" : "Creative", width = 120, height = 44, lit = m.survival) { m.survival = !m.survival }
         if menu_button(clay.ID("NewWorld"), "Create", width = 120, height = 44) || submitted { menu_new_world(m) }
+    }
+    // Someone else's game: its address (on this PC, 127.0.0.1).
+    if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 8}}) {
+        submitted := text_field(gs, clay.ID("JoinAddress"), &m.join_to, "Join a game: its address", height = 44)
+        if menu_button(clay.ID("Join"), "Join", width = 120, height = 44) || submitted {
+            if strings.trim_space(string(m.join_to.buf[:m.join_to.len])) == "" {
+                m.note = "Type the address of the game to join."
+            } else {
+                m.choice = .Join
+            }
+        }
     }
     if m.note != "" { text(m.note, COLOR_BAD, 13) }
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 8, padding = {0, 0, 10, 0}}}) {

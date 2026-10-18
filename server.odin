@@ -437,6 +437,12 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
             m := msg_get(&r, Msg_Text) or_break
             name := text_set(text_of(&m), NAME_MAX)
             if name.len == 0 { break }
+            // Someone here by that name already (the same person twice, on
+            // one PC, testing): this one is numbered, kept apart from them.
+            base := string(name.text[:min(int(name.len), NAME_MAX - 3)]) // room for " 12"
+            for k := 2; k <= MAX_PLAYERS + 1 && server_name_taken(srv, player, name); k += 1 {
+                name = text_set(fmt.tprintf("%s %d", base, k), NAME_MAX)
+            }
             first := srv.names[player].len == 0
             srv.names[player] = name
             server_broadcast(srv, .Player_Name, Msg_Player_Name{slot = u8(player), name = name})
@@ -627,4 +633,15 @@ server_flush :: proc(srv: ^Server, dt: f32) {
     if srv.host == nil { return }
     for &rem in srv.remotes { if rem.peer != nil { outbox_send(&rem.out, rem.peer) } }
     enet.host_flush(srv.host)
+}
+
+// Whether another player here goes by `name`.
+@(private="file")
+server_name_taken :: proc(srv: ^Server, player: int, name: Msg_Text) -> bool {
+    name := name
+    for &other, slot in srv.names {
+        if slot == player || other.len == 0 || !srv.sim.players[slot].active { continue }
+        if string(other.text[:other.len]) == string(name.text[:name.len]) { return true }
+    }
+    return false
 }

@@ -161,6 +161,7 @@ game_main :: proc() -> (relaunch: []string) {
     defer free(gs)
     // (the server points the simulation at its own world: server_init)
     net_host, net_port, join_to := false, NET_PORT, ""
+    away := false // joining from the main menu: a stand-in world of our own, never saved
     {
         // Called by your user name, until you say otherwise (name=, or the
         // Multiplayer tab).
@@ -346,6 +347,7 @@ game_main :: proc() -> (relaunch: []string) {
             case a == "sandbox":
                 start = .Sandbox
             case a == "menu":
+            case strings.has_prefix(a, "note="): menu_note = a[5:]
             case strings.has_prefix(a, "window="):
                 window, window_given = parse_rect(a[7:])
             case a == "nofocus":
@@ -419,10 +421,11 @@ game_main :: proc() -> (relaunch: []string) {
         case .None, .Quit: return
         case .World:       save_dir = strings.concatenate({"saves/", world})
         case .Sandbox:     start = .Sandbox
+        case .Join:        join_to, away, save_dir = world, true, "saves/.away"
         }
     }
     if start == .Sandbox { sandbox_begin(gs) } // before the world is made: it's flat
-    if !bench && !shots { main_menu_loading(gs, start == .Sandbox ? "the Entity Sandbox" : save_dir[len("saves/"):]) }
+    if !bench && !shots { main_menu_loading(gs, start == .Sandbox ? "the Entity Sandbox" : away ? join_to : save_dir[len("saves/"):]) }
 
     if bench {
         // Benches drive the simulation directly, in the world they look at:
@@ -436,7 +439,7 @@ game_main :: proc() -> (relaunch: []string) {
         // Our own server opens the world and tells us which columns differ
         // from the generated one: we fetch those from it while loading.
         if m, ok := mode_arg.?; ok && start == .World { world_survival_save(save_dir, m) }
-        server_open(&gs.server, saves = start != .Sandbox)
+        server_open(&gs.server, saves = start != .Sandbox && !away)
         server_greet_local(&gs.server, client_name(gs), resume = !start_at && start != .Sandbox)
         client_receive(gs, 0)
     }
@@ -464,7 +467,11 @@ game_main :: proc() -> (relaunch: []string) {
     // (the pause menu's Multiplayer tab does the same). Failing, play alone.
     defer session_shutdown(gs)
     if join_to != "" {
-        session_join(gs, join_to)
+        joined := session_join(gs, join_to)
+        gs.net.away = away
+        if away && !joined {
+            gs.ui.menu_note, gs.ui.menu_requested = fmt.aprintf("Couldn't join %s", join_to), true
+        }
     } else if net_host {
         session_host(gs, net_port)
     }
@@ -474,6 +481,8 @@ game_main :: proc() -> (relaunch: []string) {
     _ = SDL.SetWindowRelativeMouseMode(gs.window, gs.mouse_locked)
 
     gs.last_ticks = SDL.GetTicks()
+    // Loaded: a log that ends before this line hung while loading.
+    fmt.printfln("Ready after %.1f s (%s)", f32(gs.last_ticks) / 1000, away ? join_to : save_dir)
 
     // Event loop
     for {

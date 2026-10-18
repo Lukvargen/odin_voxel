@@ -52,6 +52,7 @@ UI_State :: struct {
     menu_tab:       Menu_Tab,
     quit_requested: bool, // "Save and quit" in the menu
     menu_requested: bool, // "Main menu": the same, then the game starts again at the main menu (main_menu.odin)
+    menu_note:      string, // ...saying why, there (a game joined from the menu ended)
     typing:         ^Text_Field, // the text box keys go to, nil if none
     field_hovered:  bool,        // a text box is under the pointer this frame
     join_field:     Text_Field,  // Multiplayer tab: address to join...
@@ -1919,7 +1920,9 @@ menu_multiplayer :: proc(gs: ^Game_State) {
             text(fmt.tprintf("Not connected to %s.", address), COLOR_BAD, 15)
         }
         if n.no_build { text("The host has turned off building for visitors.", COLOR_TEXT_DIM, 13) }
-        if button(clay.ID("Leave"), "Leave: back to your own world") { session_leave(gs) }
+        if n.away {
+            if button(clay.ID("Leave"), "Leave: back to the main menu") { ui.menu_requested = true }
+        } else if button(clay.ID("Leave"), "Leave: back to your own world") { session_leave(gs) }
         return
     }
 

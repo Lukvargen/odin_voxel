@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import "core:strings"
 import "core:time"
 import la "core:math/linalg"
 import enet "vendor:ENet"
@@ -27,6 +28,7 @@ Client_Net :: struct {
     items_base:   [Block_Type]u32,
     item_guesses: [dynamic]Item_Guess,
     remote:   bool,       // joined a server elsewhere (for good: no own server if it drops)
+    away:     bool,       // joined from the main menu: no world of our own to go back to (the menu instead)
     host:     ^enet.Host, // our end of it, while connected
     peer:     ^enet.Peer,
     slot:     int,        // our player slot
@@ -187,6 +189,10 @@ client_dropped :: proc(gs: ^Game_State) {
         why = n.welcomed ? fmt.tprintf("Lost the connection to %s", address) : fmt.tprintf("Couldn't reach %s", address)
     }
     n.dropped, n.refused = false, ""
+    if n.away {
+        gs.ui.menu_note, gs.ui.menu_requested = strings.clone(why), true
+        return
+    }
     session_leave(gs)
     ui_toast(gs, why, 5)
     chat_add(gs, fmt.tprintf("%s. Back in your own world.", why), SERVER_SLOT)
