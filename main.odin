@@ -236,6 +236,7 @@ game_main :: proc() -> (relaunch: []string) {
             case a == "slimes": bench_slimes = true
             case a == "enemies": bench_enemies = true
             case a == "fight": bench_fight = true
+            case a == "spawns": bench_spawns = true
             case a == "nav": bench_nav = true
             case a == "crowd": bench_crowd = true
             case a == "build": bench_build = true

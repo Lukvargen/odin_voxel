@@ -27,8 +27,14 @@ import la "core:math/linalg"
 // the player comes close, and the site stays empty for a while once cleared.
 
 MAX_ENEMIES      :: 24
-ENEMY_RANGE      :: f32(64)  // roaming population counted within this...
-ENEMY_DESPAWN    :: f32(110) // ...and forgotten this far behind (guards: their site's spawn is undone)
+ENEMY_DESPAWN    :: f32(110) // roamers counted within this of a player, and forgotten beyond it (guards: their site's spawn is undone)
+ROAM_SPAWN_NEAR  :: f32(40)  // roamers appear between these (design blocks) from a player: out
+ROAM_SPAWN_FAR   :: f32(60)  // there, to be come upon, never at your back
+ROAM_DAY         :: 2        // roamers kept about a player by day...
+ROAM_NIGHT       :: 4        // ...and at night
+ROAM_CHECK       :: f32(10)  // seconds between looks for a place to put one
+ROAM_GAP_MIN     :: f32(60)  // after one spawns, at least this long before the next...
+ROAM_GAP_MAX     :: f32(120) // ...and at most this
 ENEMY_GRAVITY    : f32 = f32(26)
 ENEMY_JUMP       : f32 = f32(8.5)
 SITE_NOTICE      :: f32(80)  // a site's guards appear when the player is this close
@@ -201,6 +207,7 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
     s := &sim.enemies
     if dt <= 0 { return }
     s.time += dt
+    sim.time += dt
     enemy_paths_frame()
     night := sim.day.night
 
@@ -220,7 +227,7 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
         s.spawn_timer -= dt
         s.site_timer -= dt
         spawn, sites := s.spawn_timer <= 0, s.site_timer <= 0
-        if spawn { s.spawn_timer = 6 }
+        if spawn { s.spawn_timer = ROAM_CHECK }
         if sites { s.site_timer = 1 }
         for &p in sim.players {
             if !player_hunted(&p) || p.fly_mode { continue }
@@ -228,11 +235,10 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
             if spawn {
                 roaming := 0
                 for &e in s.list {
-                    if e.alive && !e.guard && la.length((e.pos - feet).xz) < ENEMY_RANGE { roaming += 1 }
+                    if e.alive && !e.guard && la.length((e.pos - feet).xz) < ENEMY_DESPAWN { roaming += 1 }
                 }
-                if want := 3 + int(math.round(4 * night)); roaming < want {
-                    s.spawn_timer = 2.5
-                    enemy_try_spawn(sim, feet, night)
+                if want := ROAM_DAY + int(math.round(f32(ROAM_NIGHT - ROAM_DAY) * night)); roaming < want {
+                    if enemy_try_spawn(sim, feet, night) { s.spawn_timer = rand.float32_range(ROAM_GAP_MIN, ROAM_GAP_MAX) }
                 }
             }
             if sites { sites_update(sim, feet) }
@@ -524,6 +530,7 @@ enemy_die :: proc(sim: ^Sim, e: ^Enemy, knock: [3]f32) {
     e.bar = 0
     sim_emit(sim, {kind = .Enemy_Die, enemy = e.kind, pos = enemy_center(e), vec = knock})
     if e.guard { site_lost_one(&sim.enemies, e.site) }
+    calm_mark(sim, e.pos)
 }
 
 // Skeletons of the night at dawn: a puff of bone dust, gone.
@@ -536,7 +543,6 @@ enemy_crumble :: proc(sim: ^Sim, e: ^Enemy) {
 // ─── Spawning ───────────────────────────────────────────────────────────────
 
 // Top of the loaded ground at (x, z) with room to stand, searched down from y.
-@(private="file")
 stand_y :: proc(sim: ^Sim, x, z, from_y: int) -> (y: int, ok: bool) {
     for yy := from_y; yy > from_y - 40; yy -= 1 {
         if solid_at(sim.world, x, yy, z) {
@@ -560,33 +566,36 @@ roamer_for :: proc(b: Biome, night: f32) -> (kind: Enemy_Kind, pack: int, ok: bo
     return .Goblin, 0, false
 }
 
+// A pack somewhere out from the player (not where it's calm); whether one came.
 @(private="file")
-enemy_try_spawn :: proc(sim: ^Sim, feet: [3]f32, night: f32) {
+enemy_try_spawn :: proc(sim: ^Sim, feet: [3]f32, night: f32) -> bool {
     for _ in 0 ..< 8 {
         a := rand.float32_range(0, 2 * math.PI)
-        r := rand.float32_range(22, 40) * world_scale
+        r := rand.float32_range(ROAM_SPAWN_NEAR, ROAM_SPAWN_FAR) * world_scale
         x := int(math.floor(feet.x + math.cos(a) * r))
         z := int(math.floor(feet.z + math.sin(a) * r))
+        if calm_at(sim, f32(x), f32(z)) { continue }
         g := surface_height_at(x, z)
         if g <= SEA_LEVEL { continue }
         y, ok := stand_y(sim, x, z, g + 2)
         if !ok { continue }
         kind, pack, any := roamer_for(terrain_at(x, z).biome, night)
-        if !any { return }
+        if !any { return false }
         for i in 0 ..< pack {
             px, pz := x + rand.int_max(5) - 2, z + rand.int_max(5) - 2
             py, ok2 := stand_y(sim, px, pz, y + 3)
             if !ok2 { continue }
             e := enemy_spawn(sim, i == 0 ? kind : (kind == .Orc ? .Goblin : kind), {f32(px) + 0.5, f32(py), f32(pz) + 0.5})
-            if e == nil { return }
+            if e == nil { return true }
             if kind == .Skeleton && night > 0.6 {
                 e.nocturnal = true
                 e.rising = 1 // claws up out of the ground
                 sim_emit(sim, {kind = .Enemy_Rise, enemy = e.kind, pos = e.pos})
             }
         }
-        return
+        return true
     }
+    return false
 }
 
 // Landmarks near the player get their guards; cleared ones refill after a while.

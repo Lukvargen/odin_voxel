@@ -6,7 +6,7 @@ import "core:math/rand"
 import la "core:math/linalg"
 
 // Slimes, Cube World style: bouncy rounded cubes that live
-// around the player (a handful within SLIME_RANGE, topped up as they die or
+// around the player (a few within SLIME_DESPAWN, topped up slowly as they die or
 // get left behind).
 //
 // Idle they hop about; with the player near and the sword drawn (they leave
@@ -23,9 +23,10 @@ import la "core:math/linalg"
 
 MAX_SLIMES        :: 40
 
-SLIME_RANGE       :: f32(64)  // keep SLIME_POPULATION slimes within this...
-SLIME_POPULATION  :: 6
-SLIME_SPAWN_EVERY :: f32(3)   // ...spawning one this often while short
+SLIME_POPULATION  :: 2       // keep this many slimes about each player (within SLIME_DESPAWN)...
+SLIME_SPAWN_EVERY :: f32(40)  // ...spawning one this often while short
+SLIME_SPAWN_NEAR  :: f32(36)  // out between these (design blocks), not where it's calm (sim.odin)
+SLIME_SPAWN_FAR   :: f32(54)
 SLIME_DESPAWN     :: f32(90)  // and forget the ones left this far behind
 SLIME_GRAVITY     : f32 = f32(26)
 SLIME_AGGRO       : f32 = f32(18)  // notices the player this close...
@@ -154,9 +155,8 @@ slimes_update :: proc(sim: ^Sim, dt: f32) {
             feet := player_feet(&p)
             near := 0
             for &sl in s.list {
-                if sl.alive && la.length((sl.pos - feet).xz) < SLIME_RANGE { near += 1 }
+                if sl.alive && la.length((sl.pos - feet).xz) < SLIME_DESPAWN { near += 1 }
             }
-            if near < SLIME_POPULATION / 2 { s.spawn_timer = 0.5 }
             if near < SLIME_POPULATION { slime_try_spawn(sim, feet) }
         }
     }
@@ -203,16 +203,20 @@ slimes_update :: proc(sim: ^Sim, dt: f32) {
 slime_try_spawn :: proc(sim: ^Sim, feet: [3]f32) {
     for _ in 0 ..< 8 {
         a := rand.float32_range(0, 2 * math.PI)
-        r := rand.float32_range(16, 36) * world_scale
+        r := rand.float32_range(SLIME_SPAWN_NEAR, SLIME_SPAWN_FAR) * world_scale
         x := feet.x + math.cos(a) * r
         z := feet.z + math.sin(a) * r
+        if calm_at(sim, x, z) { continue }
         ix, iz := int(math.floor(x)), int(math.floor(z))
         ground := surface_height_at(ix, iz)
         if ground <= SEA_LEVEL { continue }
-        if !solid_at(sim.world, ix, ground, iz) || solid_at(sim.world, ix, ground + 1, iz) { continue } // not loaded, or built over
+        // On open ground, loaded (stand_y: the surface's own block can be a
+        // plant or the air above it).
+        y, ok := stand_y(sim, ix, iz, ground + 2)
+        if !ok { continue }
         roll := rand.float32()
         size := roll < 0.45 ? Slime_Size.Big : (roll < 0.85 ? .Medium : .Small)
-        slime_spawn(&sim.slimes, size, {x, f32(ground) + 1.5 * world_scale, z}, {}, slime_color_for(terrain_at(ix, iz).biome))
+        slime_spawn(&sim.slimes, size, {x, f32(y) + 0.5 * world_scale, z}, {}, slime_color_for(terrain_at(ix, iz).biome))
         return
     }
 }
@@ -401,6 +405,7 @@ slime_damage :: proc(sim: ^Sim, sl: ^Slime, damage: f32, knock: [3]f32, boosted:
 
     if sl.hp > 0 { return false }
     sl.alive = false
+    calm_mark(sim, sl.pos)
     sim_emit(sim, {kind = .Slime_Pop, slime = sl.size, pos = c, vec = knock, color = sl.color})
     if sl.size > .Small {
         child := Slime_Size(int(sl.size) - 1)

@@ -43,6 +43,31 @@ Player :: struct {
     block_time: f32,    // since the guard went up
 }
 
+// Peace where the fighting was: a player's kill quiets the land about it
+// for CALM_SECONDS, and nothing roaming (slimes, skeletons, goblins, orcs)
+// spawns within CALM_RADIUS of it till then. Clear an area and it stays
+// clear; landmark guards keep their own clock (SITE_RESPAWN).
+CALM_SECONDS :: f32(480)
+CALM_RADIUS  :: f32(160) // blocks: past the spawn ring (60-90 out) of a player still about the fight
+
+Calm_Spot :: struct { xz: [2]f32, until: f32 }
+
+calm_mark :: proc(sim: ^Sim, pos: [3]f32) {
+    for &c in sim.calm {
+        if la.length(c.xz - pos.xz) < CALM_RADIUS * 0.25 { c.until = sim.time + CALM_SECONDS; return } // the same fight
+    }
+    append(&sim.calm, Calm_Spot{pos.xz, sim.time + CALM_SECONDS})
+}
+
+// Whether a roamer may spawn at (x, z); forgets the spots whose time is up.
+calm_at :: proc(sim: ^Sim, x, z: f32) -> bool {
+    #reverse for c, i in sim.calm {
+        if c.until <= sim.time { unordered_remove(&sim.calm, i); continue }
+        if la.length(c.xz - [2]f32{x, z}) < CALM_RADIUS { return true }
+    }
+    return false
+}
+
 Sim :: struct {
     world:    ^World,    // the voxels it plays in (world.odin)
     monsters: bool,      // slimes and enemies spawn and hunt (the options' entities toggle)
@@ -50,6 +75,8 @@ Sim :: struct {
     slimes:   Slimes,    // (slime.odin)
     enemies:  Enemies,   // skeletons, goblins, orcs; landmark guards (enemies.odin)
     day:      Day_Clock, // the time of day, and how much night (daycycle.odin)
+    calm:     [dynamic]Calm_Spot, // where a player's kills keep roamers away for a while
+    time:     f32,       // seconds the simulation has run (calm)
     events:   [dynamic]Sim_Event, // this frame's happenings, for the client (events.odin)
 }
 
