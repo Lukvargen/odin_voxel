@@ -401,8 +401,8 @@ biome_boulders :: proc(s: Terrain_Sample) -> f64 {
 }
 
 // Per design block of ground; together at most TREE_MAX_DENSITY. Cooler
-// forests are birch woods; a few dead trees and fallen logs about.
-@(private="file")
+// forests are birch woods; a few dead trees and fallen logs about. (What a
+// sapling grows into, too: saplings.odin.)
 biome_trees :: proc(s: Terrain_Sample) -> [6]Tree_Rate {
     // River banks: willows lean over the water.
     if s.wet > 0.4 && (s.biome == .Plains || s.biome == .Forest || s.biome == .Savanna) {

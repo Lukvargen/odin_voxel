@@ -20,7 +20,8 @@ import win "core:sys/windows"
 
 // saves/<world name> (the world= argument); set before the first load.
 save_dir          := "saves/world"
-SAVE_MAGIC        :: "VXC2" // VXC1 saves predate biome terrain and are ignored
+SAVE_MAGIC        :: "VXC3" // VXC1 saves predate biome terrain and are ignored
+SAVE_MAGIC_V2     :: "VXC2" // before saplings: doors a place lower (column_decode moves them)
 AUTOSAVE_INTERVAL :: 30 * time.Second
 COLUMN_VOXELS     :: CHUNKS_H * VOXELS_PER_BRICK
 
@@ -99,14 +100,17 @@ column_encode :: proc(col: ^Column, out: ^[dynamic]u8) {
 
 // A column from column_encode's bytes, or nil if they don't make one
 // (unknown blocks, wrong length). No light yet.
-column_decode :: proc(rle: []u8) -> ^Column {
+// doors_from: VXC2 bytes, whose doors start one id lower; they're moved up.
+column_decode :: proc(rle: []u8, doors_from := 0) -> ^Column {
     voxels := make([]u8, COLUMN_VOXELS)
     defer delete(voxels)
     n := 0
     for i := 0; i + 3 <= len(rle); i += 3 {
         count := int(endian.unchecked_get_u16le(rle[i + 1:]))
-        if n + count > COLUMN_VOXELS || int(rle[i]) >= BLOCK_IDS { return nil }
-        for &v in voxels[n:][:count] { v = rle[i] }
+        b := rle[i]
+        if doors_from > 0 && int(b) >= doors_from { b += 1 }
+        if n + count > COLUMN_VOXELS || int(b) >= BLOCK_IDS { return nil }
+        for &v in voxels[n:][:count] { v = b }
         n += count
     }
     if n != COLUMN_VOXELS { return nil }
@@ -156,8 +160,16 @@ load_column :: proc(key: [2]int) -> ^Column {
     data, err := os.read_entire_file(column_path(buf[:], key), context.allocator)
     if err != nil { return nil }
     defer delete(data)
-    if len(data) < len(SAVE_MAGIC) || string(data[:len(SAVE_MAGIC)]) != SAVE_MAGIC { return nil }
-    return column_decode(data[len(SAVE_MAGIC):])
+    if len(data) < len(SAVE_MAGIC) { return nil }
+    switch string(data[:len(SAVE_MAGIC)]) {
+    case SAVE_MAGIC:
+        return column_decode(data[len(SAVE_MAGIC):])
+    case SAVE_MAGIC_V2:
+        col := column_decode(data[len(SAVE_MAGIC):], doors_from = int(Block_Type.Sapling))
+        if col != nil { col.modified = true } // saved again in the new form
+        return col
+    }
+    return nil
 }
 
 // A world's game mode: mode.txt in its folder says "survival", or there's

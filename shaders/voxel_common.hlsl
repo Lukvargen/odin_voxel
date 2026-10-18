@@ -95,8 +95,9 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_ROOTS         42u // hanging plant
 #define BLOCK_GLOW_MUSHROOM 43u // plant, emissive
 #define BLOCK_GLOW_MOSS     44u // emissive
-#define BLOCK_DOOR          45u // doors: 48 ids, one per state (door_shape)
-#define BLOCK_DOOR_LAST     92u
+#define BLOCK_SAPLING       45u // a land plant (micro model)
+#define BLOCK_DOOR          46u // doors: 48 ids, one per state (door_shape)
+#define BLOCK_DOOR_LAST     93u
 
 // World blocks per design block (terrain.odin TERRAIN_SCALE): textures laid
 // out over the world in design sizes use it.
@@ -105,7 +106,7 @@ int region_of(int rx, int ry, int rz) {
 #define SEA_LEVEL_Y 24.0 // top of the sea (terrain.odin SEA_LEVEL)
 
 bool block_is_leaves(uint id) { return id == BLOCK_LEAVES || id == BLOCK_SPRUCE_LEAVES || id == BLOCK_BIRCH_LEAVES || id == BLOCK_AUTUMN_LEAVES || id == BLOCK_ACACIA_LEAVES || id == BLOCK_WILLOW_LEAVES; }
-bool block_is_land_plant(uint id) { return (id >= BLOCK_TALL_GRASS && id <= BLOCK_DRY_BUSH) || id == BLOCK_MUSHROOM || id == BLOCK_ROOTS || id == BLOCK_GLOW_MUSHROOM; }
+bool block_is_land_plant(uint id) { return (id >= BLOCK_TALL_GRASS && id <= BLOCK_DRY_BUSH) || id == BLOCK_MUSHROOM || id == BLOCK_ROOTS || id == BLOCK_GLOW_MUSHROOM || id == BLOCK_SAPLING; }
 bool block_is_water_plant(uint id) { return id == BLOCK_KELP || id == BLOCK_SEAGRASS || id == BLOCK_SEA_PICKLE; }
 // Water, or a plant standing in it (the camera is "in water" in either).
 bool block_is_watery(uint id) { return id == BLOCK_WATER || block_is_water_plant(id); }
@@ -115,7 +116,7 @@ bool block_is_cutout(uint id) { return block_is_water_plant(id) || block_is_land
 // cutouts for everything else (light, shadows, walking through).
 bool block_is_micro(uint id) {
     return id == BLOCK_MUSHROOM || id == BLOCK_GLOW_MUSHROOM || id == BLOCK_FLOWER || id == BLOCK_FERN ||
-           id == BLOCK_SEA_PICKLE || id == BLOCK_DRY_BUSH;
+           id == BLOCK_SEA_PICKLE || id == BLOCK_DRY_BUSH || id == BLOCK_SAPLING;
 }
 // A thin panel in its voxel (door_hit).
 bool block_is_door(uint id) { return id >= BLOCK_DOOR && id <= BLOCK_DOOR_LAST; }
@@ -361,12 +362,25 @@ void micro_box(uint id, int3 vkey, out int3 lo, out int3 hi) {
     else if (id == BLOCK_GLOW_MUSHROOM) { lo = int3(1, 0, 1); hi = int3(7, 5, 8); }
     else if (id == BLOCK_SEA_PICKLE)    { lo = int3(1, 0, 1); hi = int3(6, 4, 7); }
     else if (id == BLOCK_DRY_BUSH)      { lo = int3(0, 0, 0); hi = int3(8, 6, 8); }
+    else if (id == BLOCK_SAPLING)       { lo = int3(1, 0, 1); hi = int3(7, 8, 7); }
     else                           { lo = int3(0, 0, 0); hi = int3(8, 4, 8); } // fern
     // Model to voxel: micro_model_cell's steps undone, last first.
     uint v = uint(hash31i(vkey + int3(5, 9, 2)) * 8.0);
     if ((v & 4u) != 0u) { lo.xz = lo.zx; hi.xz = hi.zx; }
     if ((v & 2u) != 0u) { int l = lo.z; lo.z = MICRO - hi.z; hi.z = MICRO - l; }
     if ((v & 1u) != 0u) { int l = lo.x; lo.x = MICRO - hi.x; hi.x = MICRO - l; }
+}
+
+// A sapling, o from its stem: a thin stem, a pair of leaves halfway up and
+// a little crown of them on top.
+bool sapling_leaf(int2 o, int y) {
+    if (y == 3) return (o.x == 1 && o.y == 0) || (o.x == -1 && o.y == 0) || (o.x == 2 && o.y == 0);
+    if (y == 5) return abs(o.x) + abs(o.y) <= 2 && !all(o == 0);
+    if (y == 6) return abs(o.x) + abs(o.y) <= 1;
+    return y == 7 && all(o == 0);
+}
+bool sapling_cell(int2 o, int y) {
+    return (all(o == 0) && y <= 5) || sapling_leaf(o, y);
 }
 
 // Whether model cell c of plant `id` is filled.
@@ -420,6 +434,7 @@ bool micro_cell(uint id, int3 c) {
         // The fork: off the long twig, straight up from its second step.
         return all(o == int2(2, 2)) && c.y >= 3 && c.y <= 5;
     }
+    if (id == BLOCK_SAPLING) { int2 o = c.xz - int2(3, 3); return sapling_cell(o, c.y); }
     // Fern: a tuft, and four fronds arching out (a pinwheel), each with a
     // leaflet beside it halfway.
     if (c.y <= 1) return abs(d.x) < 1.0 && abs(d.y) < 1.0;

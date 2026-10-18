@@ -842,6 +842,27 @@ health_bar :: proc(gs: ^Game_State, w, h: f32) {
     }
 }
 
+// Survival: mana while it isn't full, over where health shows; it flashes
+// when a spell wants more than there is.
+@(private="file")
+mana_bar :: proc(gs: ^Game_State) {
+    m := &gs.magic
+    W :: f32(220)
+    a := clamp(m.mana_spent / 4, 0, 1) // fades out as it fills up
+    if m.starved_t > 0 { a = 1 }
+    if a <= 0 { return }
+    if clay.UI(clay.ID("Mana"))({
+        layout = {sizing = {clay.SizingFixed(W), clay.SizingFixed(6)}},
+        floating = anchored(.CenterBottom, {0, gs.combat.sword ? -38 : -112}), // over the held block's name
+        backgroundColor = fade(COLOR_BAR_BG, a), cornerRadius = clay.CornerRadiusAll(3),
+    }) {
+        fill := clamp(magic_mana(m) / MANA_MAX, 0, 1)
+        col := clay.Color{90, 160, 255, 255}
+        if m.starved_t > 0 && int(m.starved_t * 10) % 2 == 0 { col = {235, 245, 255, 255} }
+        if clay.UI()({layout = {sizing = {clay.SizingFixed(W * fill), clay.SizingGrow()}}, backgroundColor = fade(col, a), cornerRadius = clay.CornerRadiusAll(3)}) {}
+    }
+}
+
 // Fighting: health while hurt, red at the screen edges when hit, and damage
 // numbers popping up over what you hit. Nothing else: the hits, flashes and
 // shakes say the rest.
@@ -853,6 +874,7 @@ combat_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     eye := camera_view_eye(cam)
 
     health_bar(gs, w, h)
+    if gs.survival { mana_bar(gs) }
 
     // A thin health bar over an enemy for a while after it's hit.
     for &en, i in gs.enemies.list {
@@ -981,6 +1003,7 @@ icon_colors :: proc(b: Block_Type) -> (top, side: [3]f32) {
     case .Roots:         return {0.50, 0.38, 0.24}, {0.45, 0.34, 0.22}
     case .Glow_Mushroom: return {0.40, 0.95, 0.95}, {0.70, 0.75, 0.70}
     case .Glow_Moss:     return {0.35, 0.85, 0.70}, {0.25, 0.55, 0.45}
+    case .Sapling:       return {0.28, 0.58, 0.20}, {0.40, 0.28, 0.16}
     case .Snow:       return {0.93, 0.95, 0.98}, {0.90, 0.92, 0.96}
     case .Ice:        return {0.68, 0.80, 0.93}, {0.62, 0.75, 0.90}
     case .Terracotta: return {0.70, 0.40, 0.27}, {0.70, 0.40, 0.27}

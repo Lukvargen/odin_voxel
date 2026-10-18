@@ -177,10 +177,11 @@ Block_Type :: enum u8 {
     Roots         = 42,  // hanging from cave ceilings: a plant (cutout)
     Glow_Mushroom = 43,  // a plant, and a dim light
     Glow_Moss     = 44,  // on cave ceilings: a dim light
+    Sapling       = 45,  // a land plant: planted, it grows into a tree (saplings.odin)
     // Doors (door.odin): 48 ids from here, one per state (facing, hinge,
     // open, which part). Door itself is the one in hand and in the
     // inventory; the rest only appear placed, so this stays the last name.
-    Door          = 45,
+    Door          = 46,  // (45 before saplings: VXC2 saves are moved up a place on load)
 }
 
 // Every block id there is: the named ones and the doors' states.
@@ -194,7 +195,7 @@ block_is_water_plant :: #force_inline proc(b: u8) -> bool {
 // Grass tufts, flowers, ferns, dry bushes.
 block_is_land_plant :: #force_inline proc(b: u8) -> bool {
     return b >= u8(Block_Type.Tall_Grass) && b <= u8(Block_Type.Dry_Bush) || b == u8(Block_Type.Mushroom) ||
-           b == u8(Block_Type.Roots) || b == u8(Block_Type.Glow_Mushroom)
+           b == u8(Block_Type.Roots) || b == u8(Block_Type.Glow_Mushroom) || b == u8(Block_Type.Sapling)
 }
 
 // Water, or a plant standing in it: swimming, buoyancy, underwater sound.

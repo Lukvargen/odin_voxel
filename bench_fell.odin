@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:math"
+import "core:os"
 import la "core:math/linalg"
 import "core:time"
 
@@ -48,7 +49,9 @@ bench_fell_run :: proc(gs: ^Game_State) {
     // Stand a few steps off, looking at the trunk a little above the cut.
     gs.survival = true
     gs.mouse_locked = true
-    gs.items = {}
+    clear(&gs.net.item_guesses) // carrying nothing: what's counted is the server's word and our guesses since (items.odin)
+    gs.net.items_base = {}
+    client_items_sum(gs)
     gs.hotbar = {}
     hotbar_select(gs, 0)
     cam := &gs.camera
@@ -122,6 +125,22 @@ bench_fell_run :: proc(gs: ^Game_State) {
     step(gs, false, false)
     check(&ok_all, "and with none left, nothing", around(gs, dirt) == restored)
 
+    // Mana: spent by all that; with none, the spell holds; it comes back.
+    check(&ok_all, fmt.tprintf("casting spends mana (%.1f left)", magic_mana(&gs.magic)), magic_mana(&gs.magic) < MANA_MAX)
+    for _ in 0 ..< 200 { step(gs, false, false) }
+    check(&ok_all, "...and it comes back", magic_mana(&gs.magic) == MANA_MAX)
+    gs.magic.mana_spent = MANA_MAX
+    look_at(cam, block_center(dirt))
+    aim2, _, _ := raycast_voxel(gs, camera_aim_eye(cam^), camera_forward(cam^), MAGIC_REACH, plants = true)
+    held := u8(get_voxel(gs, aim2.x, aim2.y, aim2.z))
+    for _ in 0 ..< 60 { step(gs, true, false) }
+    check(&ok_all, "with no mana the spell holds", u8(get_voxel(gs, aim2.x, aim2.y, aim2.z)) == held && gs.magic.starved)
+    for i := 0; i < 400 && get_voxel(gs, aim2.x, aim2.y, aim2.z) != 0; i += 1 {
+        step(gs, i % 120 > 80, false) // let go now and then: it comes back while resting
+    }
+    check(&ok_all, "...and goes on once it's back", get_voxel(gs, aim2.x, aim2.y, aim2.z) == 0)
+    for _ in 0 ..< 200 { step(gs, false, false) }
+
     // The tree.
     target := block_center(trunk + {0, 1, 0})
     look_at(cam, target)
@@ -153,7 +172,9 @@ bench_fell_run :: proc(gs: ^Game_State) {
         return false
     }
 
-    gs.items = {}
+    clear(&gs.net.item_guesses) // carrying nothing: what's counted is the server's word and our guesses since (items.odin)
+    gs.net.items_base = {}
+    client_items_sum(gs)
     t := 0
     for !gs.felling.trees[0].active && t < 400 {
         t1 := time.tick_now()
@@ -169,8 +190,9 @@ bench_fell_run :: proc(gs: ^Game_State) {
     drops := 0
     for n in tree.drops { drops += int(n) }
     after := count_tree(gs, trunk)
-    fmt.printf("bench fell: %d voxels taken (%d logs and leaves before, %d left about: the stump and other trees)\n", drops, before, after)
-    check(&ok_all, "its voxels left the world", before - after == drops)
+    fmt.printf("bench fell: %d voxels taken (%d logs and leaves before, %d left about: the stump and other trees), giving %d (%d saplings)\n", tree.taken, before, after, drops, tree.drops[.Sapling])
+    check(&ok_all, "its voxels left the world", before - after == tree.taken)
+    check(&ok_all, "fewer leaves come back than it had, and saplings", drops < tree.taken && tree.drops[.Sapling] > 0)
     step(gs, false, false)
     shot(gs, dir, "fall_0")
     for i in 0 ..< 600 {
@@ -203,7 +225,45 @@ bench_fell_run :: proc(gs: ^Game_State) {
     fmt.printf("bench fell: carried %d (motes still out with %d)\n", got, left)
     check(&ok_all, "everything it was came home", got == drops)
     shot(gs, dir, "after")
+
+    // One of its saplings, planted where it stood.
+    for b, i in gs.hotbar { if b == .Sapling { hotbar_select(gs, i) } }
+    if gs.selected_block == .Sapling {
+        stump := trunk + {2, 0, -2}
+        ground := ground_top(gs, stump.x, stump.z)
+        world_clear(gs, {{stump.x, ground + 1, stump.z}})
+        look_at(cam, block_center({stump.x, ground, stump.z}) + {0, 0.49, 0})
+        step(gs, false, true)
+        step(gs, false, false)
+        check(&ok_all, "a sapling from it goes into the grass", Block_Type(u8(get_voxel(gs, stump.x, ground + 1, stump.z))) == .Sapling)
+        for _ in 0 ..< 60 { step(gs, false, false) } // the sparks die down
+        cam.pos = block_center({stump.x, ground, stump.z}) + {-2.2, 2.2, -1.2}
+        look_at(cam, block_center({stump.x, ground + 1, stump.z}))
+        shot(gs, dir, "sapling")
+    }
     bench_fell_server(&ok_all, trunk)
+
+    // A save from before saplings: its doors come back as doors.
+    {
+        col := generate_column_at(0, 0)
+        defer column_free(col)
+        c := &col.chunks[chunk_y_index(2)]
+        old_door := u8(Block_Type.Door) - 1 // where doors started then
+        chunk_set_voxel(c, 5, old_door)
+        out := make([dynamic]u8, context.temp_allocator)
+        append(&out, SAVE_MAGIC_V2)
+        column_encode(col, &out)
+        keep := save_dir
+        save_dir = bench_shot_dir != "" ? bench_shot_dir : "."
+        path := fmt.tprintf("%s/c.%d.%d.bin", save_dir, 999999, 999999)
+        _ = os.write_entire_file(path, out[:])
+        back := load_column({999999, 999999})
+        _ = os.remove(path)
+        save_dir = keep
+        ok := back != nil && chunk_voxel(&back.chunks[chunk_y_index(2)], 5) == u8(Block_Type.Door) && back.modified
+        check(&ok_all, "an old save's door loads as a door, to be saved anew", ok)
+        if back != nil { column_free(back) }
+    }
     fmt.println(ok_all ? "bench fell: all ok" : "bench fell: FAILED")
 }
 
@@ -279,6 +339,37 @@ bench_fell_server :: proc(ok_all: ^bool, at: [3]int) {
     check(ok_all, "server: ...all of it, out of reach as it is", get_voxel(&srv.world, high.x, high.y, high.z) == 0 && !back6)
     _, back7 := send(&srv, 7, deep, 0)
     check(ok_all, "server: but not the ground under it", get_voxel(&srv.world, deep.x, deep.y, deep.z) == deep_was && back7)
+
+    // A sapling planted in grass grows into a tree, and the player's told.
+    g := at + {12, 0, 9}
+    for dz in -4 ..= 4 { for dx in -4 ..= 4 {
+        k := [2]int{(g.x >> 3) + dx, (g.z >> 3) + dz}
+        if k not_in srv.world.columns { srv.world.columns[k] = generate_column_at(k.x, k.y) }
+    } }
+    for g.y = 200; g.y > WORLD_Y_MIN && !solid_at(&srv.world, g.x, g.y, g.z); g.y -= 1 {}
+    server_write(&srv, g, u8(Block_Type.Grass))
+    for y in g.y + 1 ..< g.y + 40 { server_write(&srv, {g.x, y, g.z}, 0) } // room to grow
+    srv.items[LOCAL_PLAYER][.Sapling] = 1
+    sim.players[LOCAL_PLAYER].pos = block_center(g) + {-3, 4, 0}
+    _, back8 := send(&srv, 8, g + {0, 1, 0}, u8(Block_Type.Sapling))
+    check(ok_all, "server: a sapling planted is kept growing", !back8 && len(srv.saplings) == 1 && srv.items[LOCAL_PLAYER][.Sapling] == 0)
+    fmt.printf("bench fell: it'll grow into a %v\n", sapling_kind(g + {0, 1, 0}))
+    clear(&srv.local_out.reliable)
+    srv.saplings[0].left = 0
+    server_saplings_update(&srv, 0.1)
+    told := 0
+    {
+        r := Msg_Reader{data = srv.local_out.reliable[:]}
+        for kind in msg_next(&r) {
+            if kind != .Voxels { r.at = len(r.data); break }
+            m, _ := msg_get(&r, Msg_Voxels)
+            told += int(m.count)
+        }
+    }
+    trunk_up := 0
+    for y in g.y + 1 ..< g.y + 6 { if block_is_log(u8(get_voxel(&srv.world, g.x, y, g.z))) || block_is_log(u8(get_voxel(&srv.world, g.x + 1, y, g.z))) { trunk_up += 1 } }
+    check(ok_all, fmt.tprintf("server: ...into a tree (%d blocks, all sent)", told), len(srv.saplings) == 0 && trunk_up >= 3 && told > 20)
+    delete(srv.saplings)
     delete(srv.local_out.reliable)
 }
 

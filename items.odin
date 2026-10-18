@@ -20,11 +20,23 @@ voxel_item :: proc(v: u8) -> Block_Type {
     return Block_Type(v)
 }
 
-// One voxel changed from old to new: what the player gains (what was
-// there) and what it costs (what's there now); .Air for neither.
-item_change :: proc(old, new: u8) -> (gain, cost: Block_Type) {
-    if old == new { return .Air, .Air }
-    return voxel_item(old), voxel_item(new)
+// Of a felled tree's leaves, this share come back as leaves (by their spot,
+// so the server and the client agree), and this many as saplings too.
+FELLED_LEAF_SHARE :: 0.25
+FELLED_SAPLINGS   :: 1.0 / 120
+
+// One voxel at p changed from old to new: what the player gains (what was
+// there, and with a felled tree's leaves now and then a sapling) and what
+// it costs (what's there now); .Air for none. felled: it went with a tree
+// coming down, and leaves give back only some.
+item_change :: proc(old, new: u8, p: [3]int, felled: bool) -> (gain, extra, cost: Block_Type) {
+    if old == new { return .Air, .Air, .Air }
+    gain, cost = voxel_item(old), voxel_item(new)
+    if felled && block_is_leaves(old) {
+        if tree_hash(p.x, p.z + p.y * 7919, 91) >= FELLED_LEAF_SHARE { gain = .Air }
+        if tree_hash(p.x, p.z + p.y * 7919, 92) < FELLED_SAPLINGS { extra = .Sapling }
+    }
+    return
 }
 
 // A survival player's edit of the voxel at p to `new`, as the server sees
@@ -34,11 +46,11 @@ item_change :: proc(old, new: u8) -> (gain, cost: Block_Type) {
 server_survival_edit :: proc(srv: ^Server, slot: int, p: [3]int, new: u8) -> bool {
     old := u8(get_voxel(srv.sim.world, p.x, p.y, p.z))
     if !server_in_reach(srv, slot, p, old, new) { return false }
-    gain, cost := item_change(old, new)
-    if gain == .Air && cost == .Air { return true }
+    gain, extra, cost := item_change(old, new, p, block_is_leaves(old) && fell_granted(srv, slot, p))
     items := &srv.items[slot]
     if cost != .Air && items[cost] == 0 && gain != cost { return false }
     if gain != .Air { items[gain] += 1 }
+    if extra != .Air { items[extra] += 1 }
     if cost != .Air { items[cost] -= 1 }
     return true
 }
@@ -64,7 +76,12 @@ server_in_reach :: proc(srv: ^Server, slot: int, p: [3]int, old, new: u8) -> boo
     if pl.active && la.length(block_center(p) - pl.pos) <= MAGIC_REACH + SURVIVAL_REACH_SLACK { return true }
     tree := (block_is_log(old) || block_is_leaves(old)) && (new == 0 || new == u8(Block_Type.Water))
     flood := old == 0 && new == u8(Block_Type.Water)
-    if !tree && !flood { return false }
+    return (tree || flood) && fell_granted(srv, slot, p)
+}
+
+// Whether p lies in a tree player `slot` is felling.
+@(private="file")
+fell_granted :: proc(srv: ^Server, slot: int, p: [3]int) -> bool {
     now := time.tick_now()
     for g in srv.fell_grants[slot] {
         if time.tick_diff(now, g.until) <= 0 { continue }
@@ -103,17 +120,19 @@ Item_Guess :: struct {
     delta: [Block_Type]i32,
 }
 
-// This client just changed `changed` (old values in `olds`): counted as the
-// server will, under the number its messages carry. Survival only.
-client_items_predict :: proc(gs: ^Game_State, changed: [][3]int, olds: []u8) -> (seq: u32) {
+// This client just changed `changed` (old values in `olds`; felled: a tree
+// coming down): counted as the server will, under the number its messages
+// carry. Survival only.
+client_items_predict :: proc(gs: ^Game_State, changed: [][3]int, olds: []u8, felled: bool) -> (seq: u32) {
     n := &gs.net
     n.edit_seq += 1
     if !gs.survival || len(olds) != len(changed) { return n.edit_seq }
     g := Item_Guess{seq = n.edit_seq}
     any := false
     for p, i in changed {
-        gain, cost := item_change(olds[i], u8(get_voxel(gs, p.x, p.y, p.z)))
+        gain, extra, cost := item_change(olds[i], u8(get_voxel(gs, p.x, p.y, p.z)), p, felled)
         if gain != .Air { g.delta[gain] += 1; any = true }
+        if extra != .Air { g.delta[extra] += 1; any = true }
         if cost != .Air { g.delta[cost] -= 1; any = true }
     }
     if any {

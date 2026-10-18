@@ -18,6 +18,18 @@ MAX_MOTES   :: 192
 MAX_SPARKS  :: 96
 MAGIC_TINT  :: [3]f32{0.10, 0.28, 0.75} // the spell's sparks (they glow: ×4 in the shader)
 
+// Mana: unweaving draws it all the while (harder blocks take longer, so
+// cost more; a tree, by its size), conjuring takes a little; it comes back
+// once you stop. With too little, the spell holds where it is.
+MANA_MAX         :: f32(100)
+MANA_REGEN       :: f32(14)  // per second, after a rest
+MANA_REST        :: f32(0.8) // seconds after casting before it comes back
+UNWEAVE_MANA     :: f32(10)  // per second of unweaving
+CONJURE_MANA     :: f32(2)
+
+// What felling a tree of n logs takes, all told.
+fell_mana :: proc(n: int) -> f32 { return clamp(15 + f32(n) * 0.12, 15, 75) }
+
 // A piece of something unwoven, on its way to you.
 Mote :: struct {
     pos, vel: [3]f32,
@@ -57,6 +69,27 @@ Magic :: struct {
     next_spark: int,
     pickup_gap: f32, // since a mote last arrived: a quick run of them rises in pitch
     pickup_run: int,
+    // Mana (zero: full).
+    mana_spent: f32,
+    mana_rest:  f32, // since mana was last drawn
+    starved:    bool, // the spell is waiting for mana
+    starved_t:  f32,  // > 0: the bar flashes
+}
+
+magic_mana :: proc(m: ^Magic) -> f32 { return MANA_MAX - m.mana_spent }
+
+// Draws `amount` of mana if there's that much.
+@(private="file")
+mana_draw :: proc(m: ^Magic, amount: f32) -> bool {
+    if magic_mana(m) < amount {
+        if !m.starved { m.starved_t = 0.6 }
+        m.starved = true
+        return false
+    }
+    m.mana_spent += amount
+    m.mana_rest = 0
+    m.starved = false
+    return true
 }
 
 // Seconds of channelling to unweave a block.
@@ -126,13 +159,15 @@ magic_build_update :: proc(gs: ^Game_State, dt: f32) {
                 if m.tree_logs > 0 { m.need = fell_time(m.tree_logs) }
             }
         }
-        m.progress += dt
+        rate := m.tree_logs > 0 ? fell_mana(m.tree_logs) / m.need : UNWEAVE_MANA
+        if mana_draw(m, rate * dt) { m.progress += dt }
         if m.progress >= m.need {
             magic_unweave(gs, hit)
             m.channeling = false
         }
     } else {
         m.channeling = false
+        m.starved = false
     }
     placing := gs.right_pressed || (gs.right_held && gs.edit_timer <= 0)
     if placing && !gs.left_held {
@@ -168,11 +203,20 @@ magic_conjure :: proc(gs: ^Game_State, hit, nrm: [3]int) {
         ui_toast(gs, fmt.tprintf("No %s left", block_name(b)), 1.2)
         return
     }
+    m := &gs.magic
+    if magic_mana(m) < CONJURE_MANA {
+        m.starved_t = 0.6
+        return
+    }
     target := hit
     if !block_is_land_plant(u8(get_voxel(gs, hit.x, hit.y, hit.z))) { target = hit + nrm }
+    if b == .Sapling && !sapling_ground(Block_Type(u8(get_voxel(gs, target.x, target.y - 1, target.z)))) {
+        ui_toast(gs, "Saplings take root in grass or dirt", 1.5)
+        return
+    }
     placed := b == .Door ? door_place(gs, hit, nrm) : build_apply(gs, sphere_region(target, 0), b, .All) > 0
     if !placed { return } // (spent as the edit is counted: items.odin)
-    m := &gs.magic
+    mana_draw(m, CONJURE_MANA)
     m.conjure, m.conjure_at = 0.2, block_center(target)
     sparks_burst(gs, m.conjure_at, mote_tint(b), 8, 3)
     play_at(.Magic_Place, m.conjure_at, 0.45, vary(0.06))
@@ -217,6 +261,9 @@ magic_update :: proc(gs: ^Game_State, dt: f32) {
     if dt <= 0 { return }
     m.t += dt
     m.conjure -= dt
+    m.starved_t -= dt
+    m.mana_rest += dt
+    if m.mana_rest > MANA_REST { m.mana_spent = max(m.mana_spent - MANA_REGEN * dt, 0) }
     if !gs.survival || !gs.mouse_locked || gs.combat.sword || gs.glider.deployed { m.channeling = false }
     up := m.channeling || m.conjure > 0
     m.raise = clamp(m.raise + (up ? dt * 6 : -dt * 2.5), 0, 1)
@@ -233,7 +280,7 @@ magic_update :: proc(gs: ^Game_State, dt: f32) {
                 life = 0.5, max = 0.5, size = rand.float32_range(0.08, 0.16), color = block_color(m.block) * 1.4, floor = c.y - 3})
         }
         m.hum_timer -= dt
-        if m.hum_timer <= 0 {
+        if m.hum_timer <= 0 && !m.starved {
             m.hum_timer = 0.24
             play_at(.Magic_Channel, c, 0.22 + 0.2 * frac, 0.85 + 0.5 * frac, 10)
         }
@@ -294,60 +341,83 @@ mote_arrive :: proc(gs: ^Game_State, mo: ^Mote) {
 
 // ─── Drawing ───────────────────────────────────────────────────────────────
 
-// The wand's tip, in first person (world), and the arm holding it.
+// The hands, in first person: both come up when you cast, palms to the
+// block. Each: the arm (design metres about the eye, drawn world_scale times
+// as big), the glove's frame, and where its palm sends the spell from (world).
 @(private="file")
-wand_pose :: proc(gs: ^Game_State) -> (shoulder, elbow, wrist, tip: [3]f32, rot: Basis) {
+Cast_Hand :: struct {
+    shoulder, elbow, wrist: [3]f32,
+    rot:  Basis,
+    palm: [3]f32,
+}
+
+@(private="file")
+cast_hands :: proc(gs: ^Game_State) -> (hands: [2]Cast_Hand) {
     m := &gs.magic
     cam := gs.camera
     fwd, right, up := camera_view_basis(cam, 1)
     right, up = la.normalize(right), la.normalize(up)
     eye := camera_view_eye(cam)
     r := 1 - (1 - m.raise) * (1 - m.raise)
-    // Design metres about the eye (drawn world_scale times as big).
-    shoulder = eye + right * 0.22 - up * 0.3 - fwd * 0.05
-    hand := eye + right * 0.24 - up * 0.27 + fwd * 0.34 - up * (1 - r) * 0.4
-    if m.channeling {
-        w := m.t * 31
-        hand += (right * math.sin(w) + up * math.cos(w * 1.3)) * 0.004 * (1 + m.progress / max(m.need, 0.01))
+    frac := m.channeling ? clamp(m.progress / max(m.need, 0.01), 0, 1) : 0
+    for &h, i in hands {
+        s := i == 0 ? f32(1) : -1 // right, left
+        h.shoulder = eye + right * (0.2 * s) - up * 0.42 - fwd * 0.05
+        // Out in front, pressing on as the block gives, trembling with it.
+        wrist := eye + right * (0.16 * s) - up * 0.2 + fwd * (0.42 + 0.04 * frac) - up * (1 - r) * 0.45
+        if m.channeling {
+            w := m.t * 31 + f32(i) * 2
+            wrist += (right * math.sin(w) + up * math.cos(w * 1.3)) * 0.003 * (1 + frac)
+        }
+        pole := right * (0.25 * s) - up - fwd * 0.4 // elbows hang down: the forearms rise from below the view
+        h.elbow, h.wrist = two_bone_ik(h.shoulder, wrist, pole, UPPER_ARM_LEN, FOREARM_LEN)
+        // Palm to the front and a little in, fingers up.
+        palm_n := la.normalize(fwd - right * (0.22 * s) - up * 0.4)
+        lean := up + fwd * 0.55
+        fingers := la.normalize(lean - palm_n * la.dot(lean, palm_n))
+        y := -palm_n
+        h.rot = basis_from_axes(la.cross(y, fingers), y, fingers)
+        palm := h.wrist + fingers * 0.05 + palm_n * 0.03
+        h.palm = eye + (palm - eye) * world_scale
     }
-    pole := right * 0.7 - up - fwd * 0.2
-    elbow, wrist = two_bone_ik(shoulder, hand, pole, UPPER_ARM_LEN, FOREARM_LEN)
-    // The wand rises from the corner of the view toward the middle.
-    aim := la.normalize(fwd - right * 0.45 + up * 0.75)
-    x := la.normalize(la.cross(up, aim))
-    rot = basis_from_axes(x, la.cross(aim, x), aim)
-    tip = wrist + aim * 0.27
-    // To world: about the eye, scaled.
-    world :: proc(eye, p: [3]f32) -> [3]f32 { return eye + (p - eye) * world_scale }
-    tip = world(eye, tip)
     return
 }
 
 magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     m := &gs.magic
     first := !gs.camera.climbing && !gs.glider.deployed && gs.glider.chase_dist <= 1.5 && !gs.combat.sword
-    tip: [3]f32
+    hands := cast_hands(gs)
+    frac := m.channeling ? clamp(m.progress / m.need, 0, 1) : 1
     if first && m.raise > 0.01 && ent_begin(f) {
-        eye := camera_view_eye(gs.camera)
-        shoulder, elbow, wrist, t, rot := wand_pose(gs)
-        tip = t
-        ent_scale_about(f, eye, world_scale)
-        pole := la.normalize(elbow - shoulder)
-        ent_segment(f, .Arm_Upper, shoulder, elbow, pole, PLAYER_TINT)
-        ent_segment(f, .Arm_Fore, elbow, wrist, pole, PLAYER_TINT)
-        aim := [3]f32{rot[0, 2], rot[1, 2], rot[2, 2]}
-        ent_part(f, .Fist, wrist, rot)
-        ent_part(f, .Rod, wrist - aim * 0.04, rot, {0.5, 0.5, 0.31})
+        ent_scale_about(f, camera_view_eye(gs.camera), world_scale)
+        // The runes on the palms glow brighter as the spell takes hold.
+        rune := MAGIC_TINT * ((m.channeling || m.conjure > 0 ? 0.7 + 0.8 * frac : 0.35) * (0.9 + 0.1 * math.sin(m.t * 9)))
+        for h, i in hands {
+            // Slimmer than the sword arm's sleeves: these come right past the eye.
+            limb :: proc(f: ^Ent_Frame, model: Model_Id, a, b: [3]f32, k: f32) {
+                d := b - a
+                l := la.length(d)
+                if l < 1e-4 { return }
+                z := d / l
+                x := la.normalize0(la.cross([3]f32{0, 1, 0}, z))
+                if x == 0 { x = {1, 0, 0} }
+                ent_part(f, model, a, basis_from_axes(x, la.cross(z, x), z), {k, k, l}, PLAYER_TINT)
+            }
+            limb(f, .Arm_Upper, h.shoulder, h.elbow, 0.6)
+            limb(f, .Arm_Fore, h.elbow, h.wrist, 0.45)
+            ent_part(f, i == 0 ? .Glove_R : .Glove_L, h.wrist, h.rot, {1, 1, 1}, rune)
+        }
         ent_end(f)
     }
 
     if !ent_begin(f, false) { return }
-    // The beam, from the wand's tip to the block: sparks flowing in (toward
-    // you while unweaving, out while conjuring), weaving about the line.
+    // The beam, from the palms to the block: two strands of sparks braided
+    // about the line, flowing in (toward you while unweaving, out while
+    // conjuring).
     beam := first && m.raise > 0.5 && (m.channeling || m.conjure > 0)
     if beam {
         c := m.channeling ? block_center(m.target) : m.conjure_at
-        frac := m.channeling ? clamp(m.progress / m.need, 0, 1) : 1
+        tip := (hands[0].palm + hands[1].palm) * 0.5
         d := c - tip
         l := la.length(d)
         dir := d / max(l, 0.001)
@@ -360,15 +430,20 @@ magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
             u := (f32(i) + 0.5) / f32(n) + flow
             u -= math.floor(u)
             bulge := math.sin(u * math.PI)
-            p := tip + d * u + (s1 * math.sin(m.t * 9 + u * 13) + s2 * math.cos(m.t * 7 + u * 10)) * bulge * (0.25 + 0.2 * frac)
-            k := (0.3 + 0.35 * bulge) * clamp(la.length(p - tip) / 3 + 0.25, 0.25, 1) // small by the wand, where they're near the eye
+            // Each strand leaves its own palm and they meet at the block.
+            from := hands[i & 1].palm
+            ph := f32(i & 1) * math.PI
+            p := from + (c - from) * u + (s1 * math.sin(m.t * 9 + u * 13 + ph) + s2 * math.cos(m.t * 7 + u * 10 + ph)) * bulge * (0.2 + 0.2 * frac)
+            k := (0.3 + 0.35 * bulge) * clamp(la.length(p - from) / 3 + 0.25, 0.25, 1) // small by the hands, where they're near the eye
             ent_part(f, .Spark, p, IDENTITY, {k, k, k}, MAGIC_TINT * (0.5 + 0.5 * bulge))
         }
-        // An orb at the tip.
-        for j in 0 ..< 3 {
-            a := m.t * 8 + f32(j) * math.TAU / 3
-            p := tip + (s1 * math.cos(a) + s2 * math.sin(a)) * 0.05
-            ent_part(f, .Spark, p, IDENTITY, {0.12, 0.12, 0.12}, MAGIC_TINT * 0.9)
+        // A little swirl at each palm.
+        for h in hands {
+            for j in 0 ..< 2 {
+                a := m.t * 8 + f32(j) * math.PI
+                p := h.palm + (s1 * math.cos(a) + s2 * math.sin(a)) * 0.06
+                ent_part(f, .Spark, p, IDENTITY, {0.12, 0.12, 0.12}, MAGIC_TINT * 0.9)
+            }
         }
         // Round the block, a ring closing in and quickening as it comes undone.
         if m.channeling {
@@ -397,4 +472,52 @@ magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         ent_part(f, .Spark, mo.pos, IDENTITY, {k, k, k}, mo.tint)
     }
     ent_end(f)
+}
+
+// ─── The gloves ─────────────────────────────────────────────────────────────
+// Open hands in leather gloves, the wrist at the origin, fingers along +z,
+// the palm facing -y; a gold-trimmed cuff, and a rune on the palm and a stone
+// on the back that glow in the part's tint (Pal.Magic).
+
+GLOVE_VOXEL :: f32(0.01)
+
+magic_models_bake :: proc() {
+    ent_models[.Glove_R] = model_bake({-0.065, -0.04, -0.07}, {0.095, 0.04, 0.2}, GLOVE_VOXEL, proc(p: [3]f32, voxel: f32) -> Pal { return glove_shape(p) })
+    ent_models[.Glove_L] = model_bake({-0.095, -0.04, -0.07}, {0.065, 0.04, 0.2}, GLOVE_VOXEL, proc(p: [3]f32, voxel: f32) -> Pal { return glove_shape({-p.x, p.y, p.z}) })
+}
+
+// A right glove (thumb toward +x: seen from behind, palm out, it's on the left).
+@(private="file")
+glove_shape :: proc(p: [3]f32) -> Pal {
+    // The cuff, round the wrist, banded in gold where it meets the hand.
+    if p.z < 0.004 && p.z > -0.04 {
+        if vm_round_box(p, {0, 0, -0.018}, {0.04, 0.022, 0.02}, 0.008) < 0 {
+            return p.z > -0.01 ? .Guard : .Leather_Dark
+        }
+        return .Empty
+    }
+    palm := vm_round_box(p, {0, 0, 0.05}, {0.043, 0.014, 0.05}, 0.007)
+    if palm < 0 {
+        if p.y < 0 {
+            // The rune: a ring and a dot in the middle of the palm.
+            r := la.length(p.xz - {0, 0.05})
+            if (r > 0.012 && r < 0.02) || r < 0.006 { return .Magic }
+        }
+        if p.y > 0 {
+            if abs(p.x) + abs(p.z - 0.048) < 0.018 { return .Magic } // the stone: a diamond
+            if p.z > 0.086 { return .Glove_Light } // knuckles
+        }
+        return .Glove
+    }
+    // Fingers, a little curled toward the palm; index (nearest the thumb) first.
+    XS   :: [4]f32{0.03, 0.01, -0.01, -0.03}
+    LENS :: [4]f32{0.075, 0.085, 0.078, 0.062}
+    xs, lens := XS, LENS
+    for i in 0 ..< 4 {
+        a := [3]f32{xs[i], 0, 0.092}
+        b := [3]f32{xs[i], -0.014, 0.092 + lens[i]}
+        if vm_capsule(p, a, b, 0.0095) < 0 { return p.z > b.z - 0.014 ? .Glove_Dark : .Glove }
+    }
+    if vm_capsule(p, {0.034, -0.006, 0.028}, {0.074, -0.02, 0.074}, 0.011) < 0 { return .Glove } // thumb
+    return .Empty
 }

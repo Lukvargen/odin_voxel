@@ -717,6 +717,11 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
             // Pale lime capsules with brighter, glowing tips.
             return sea_pickle_tip(mc) ? float3(0.70, 0.95, 0.40) : float3(0.40, 0.62, 0.22) * (0.9 + 0.2 * th);
         }
+        if (block_id == BLOCK_SAPLING) {
+            // A brown stem, fresh green leaves, paler at the top.
+            if (sapling_leaf(mc.xz - int2(3, 3), mc.y)) return float3(0.16, 0.42, 0.10) * (0.85 + 0.3 * th) * lerp(0.9, 1.2, float(mc.y) / 7.0);
+            return float3(0.32, 0.21, 0.11) * (0.85 + 0.25 * th);
+        }
         if (block_id == BLOCK_DRY_BUSH) {
             // Grey-brown twigs, paler toward their tips.
             return float3(0.36, 0.26, 0.15) * (0.8 + 0.4 * th) * lerp(0.85, 1.25, float(mc.y) / 5.0);

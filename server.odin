@@ -48,6 +48,7 @@ Server :: struct {
     items_seq:    [MAX_PLAYERS]u32,
     items_due:    [MAX_PLAYERS]bool,
     fell_grants:  [MAX_PLAYERS][FELL_SLOTS]Fell_Grant, // trees they may take down out of reach (items.odin)
+    saplings:     [dynamic]Sapling_Growing, // planted, growing (saplings.odin)
     kicked:       [MAX_PLAYERS]bool, // sent away by the host, on its way out
     // Characters, by name (player_save.odin): those seen this session, and
     // what each slot's client last said it carries.
@@ -108,6 +109,7 @@ server_simulate :: proc(srv: ^Server, dt: f32) {
     day_tick(srv.sim, dt)
     slimes_update(srv.sim, dt)
     enemies_update(srv.sim, dt)
+    server_saplings_update(srv, dt)
 }
 
 // Take in what the clients sent since the last step: the local one's
@@ -484,9 +486,8 @@ server_door_swing :: proc(srv: ^Server, player: int, cur: u8, v: Msg_Voxel) {
     sim_emit(srv.sim, {kind = .Door_Swing, player = u8(player), pos = la.array_cast(v.pos, f32), amount = door_is_open(v.block) ? 1 : 0})
 }
 
-// One block a player changed, into the world: its loaded column, or the
-// column's save (server_save_away).
-@(private="file")
+// One block a player changed (or a tree grew), into the world: its loaded
+// column, or the column's save (server_save_away).
 server_write :: proc(srv: ^Server, p: [3]int, block: u8) {
     if p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX || int(block) >= BLOCK_IDS { return }
     w := srv.sim.world
@@ -501,7 +502,10 @@ server_write :: proc(srv: ^Server, p: [3]int, block: u8) {
         }
     }
     vi := (p.x & 7) + (p.y & 7) * CHUNK_VOXELS + (p.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS
-    if chunk_set_voxel(&col.chunks[chunk_y_index(p.y >> 3)], vi, block) { col.modified = true }
+    if chunk_set_voxel(&col.chunks[chunk_y_index(p.y >> 3)], vi, block) {
+        col.modified = true
+        if block == u8(Block_Type.Sapling) { server_sapling_planted(srv, p) }
+    }
 }
 
 // The columns edited out of the loaded world this step go to their saves.

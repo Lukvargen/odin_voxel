@@ -41,7 +41,8 @@ Felled_Tree :: struct {
     owner:   u8, // who felled it: 0 us, else that player's slot + 1
     probes:  [dynamic][3]f32,    // high voxels (model space) checked against the ground
     spots:   [dynamic]Fell_Spot, // where its motes come from
-    drops:   [Block_Type]u32,
+    drops:   [Block_Type]u32, // what it gives (fewer leaves than it had; saplings)
+    taken:   int,             // voxels it took from the world
 }
 
 Fell_Spot :: struct { p: [3]f32, block: Block_Type }
@@ -315,10 +316,18 @@ fell_begin :: proc(gs: ^Game_State, found: Tree_Found, p: [3]int, dir: [3]f32, o
             }
         }
     }
+    // What it gives, counted as the server will (item_change).
+    drop :: proc(t: ^Felled_Tree, v: u8, q: [3]int) {
+        gain, extra, _ := item_change(v, 0, q, true)
+        t.drops[gain] += 1
+        t.drops[extra] += 1
+        t.drops[.Air] = 0
+    }
+    t.taken = len(found.logs) + len(found.leaves)
     for q in found.logs {
         b := Block_Type(u8(get_voxel(gs, q.x, q.y, q.z)))
         kinds[b] += 1
-        t.drops[b] += 1
+        drop(t, u8(b), q)
         height_sum += f32(q.y - p.y) + 0.5
         place(&t.wood, q, lo, rand.float32() < 0.3 ? .Fell_Dark : .Fell)
         note(t, q, b, pivot, top, &seen, p.y)
@@ -326,7 +335,7 @@ fell_begin :: proc(gs: ^Game_State, found: Tree_Found, p: [3]int, dir: [3]f32, o
     for q in found.leaves {
         b := Block_Type(u8(get_voxel(gs, q.x, q.y, q.z)))
         kinds[b] += 1
-        t.drops[b] += 1
+        drop(t, u8(b), q)
         height_sum += f32(q.y - p.y) + 0.5
         place(&t.leaves, q, lo, rand.float32() < 0.45 ? .Fell_Dark : .Fell)
         note(t, q, b, pivot, top, &seen, p.y)

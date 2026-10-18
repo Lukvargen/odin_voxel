@@ -703,14 +703,15 @@ build_set :: proc(gs: ^Game_State, pos: [][3]int, blocks: []u8, undo: bool) -> i
 // server (which passes the change on to the other players). olds: what each
 // of `changed` was, for counting what's carried (items.odin).
 @(private="file")
-build_commit :: proc(gs: ^Game_State, changed: [][3]int, dirty: map[int]bool, olds: []u8) {
+build_commit :: proc(gs: ^Game_State, changed: [][3]int, dirty: map[int]bool, olds: []u8, felled := false) {
     light_on_edit(gs, changed)
     for slot in dirty { gpu_sync_slot(gs, slot) }
     far_update_edited(gs, changed)
-    client_send_voxels(gs, changed, client_items_predict(gs, changed, olds))
+    client_send_voxels(gs, changed, client_items_predict(gs, changed, olds, felled))
 }
 
-// Clears every voxel of `pos` to air, as a felled tree leaves (no undo):
+// Clears every voxel of `pos` to air, as a felled tree leaves (no undo;
+// counted as felled, items.odin):
 // water beside them flows in, and everyone's told. How many changed.
 world_clear :: proc(gs: ^Game_State, pos: [][3]int) -> int {
     changed := make([dynamic][3]int, 0, len(pos), context.temp_allocator)
@@ -730,7 +731,7 @@ world_clear :: proc(gs: ^Game_State, pos: [][3]int) -> int {
     }
     if len(changed) == 0 { return 0 }
     fill_dug_water(gs, changed[:])
-    build_commit(gs, changed[:], dirty, olds[:])
+    build_commit(gs, changed[:], dirty, olds[:], felled = true)
     return len(changed)
 }
 

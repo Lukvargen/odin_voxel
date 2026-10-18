@@ -37,6 +37,7 @@ Model_Id :: enum u32 {
     Fish_Body, Fish_Body_Striped, Fish_Tail,
     // magic.odin, felling.odin
     Spark,      // a small glowing cube, coloured by the part's tint
+    Glove_R, Glove_L, // open hands in magic gloves: wrist at the origin, fingers +z, palm -y
     // A felled tree's wood and leaves, one pair per falling tree: reserved
     // room in the buffer, filled when a tree comes down (ent_model_upload).
     Fell_Wood_0, Fell_Leaves_0, Fell_Wood_1, Fell_Leaves_1,
@@ -268,6 +269,7 @@ ent_models_bake :: proc() {
     combat_models_bake()
     enemy_models_bake()
     fish_models_bake()
+    magic_models_bake()
     ent_models[.Crystal]      = model_bake({-0.3, -0.52, -0.3}, {0.3, 0.52, 0.3}, 1.0 / 16, shape_crystal)
     ent_models[.Glider_Wing]  = model_bake({-3.85, 0.95, -2.05}, {3.85, 2.05, 2.0}, 1.0 / 12, shape_glider_wing)
     ent_models[.Rod]          = model_bake({-0.05, -0.05, 0}, {0.05, 0.05, 1}, 1.0 / 24, shape_rod)

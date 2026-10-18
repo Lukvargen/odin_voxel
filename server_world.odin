@@ -36,6 +36,7 @@ server_open :: proc(srv: ^Server, saves: bool) {
     if saves {
         w.save_enabled = world_open(w)
         srv.survival = world_survival_load(save_dir)
+        saplings_load(srv)
     }
     srv.last_autosave = time.tick_now()
     l := &srv.loader
@@ -66,6 +67,7 @@ server_close :: proc(srv: ^Server) {
 // Every column with unsaved edits, to its save, and every player's character.
 server_save_all :: proc(srv: ^Server) {
     save_all_modified(&srv.world)
+    saplings_save(srv)
     for slot in 0 ..< MAX_PLAYERS { player_record_note(srv, slot, write = true) }
     srv.last_autosave = time.tick_now()
 }
