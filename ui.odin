@@ -1220,6 +1220,10 @@ build_hud_layout :: proc(gs: ^Game_State, w: f32) {
         switch b.tool {
         case .Block:
             param_row("Brush", gs.brush_radius == 0 ? "1 block" : fmt.tprintf("radius %d", gs.brush_radius), "Ctrl", live == .Brush)
+        case .Magic:
+            s := magic_spell_size(gs)
+            param_row("Spell", s == 0 ? "1 block" : fmt.tprintf("radius %d", s), "Ctrl", live == .Brush)
+            hint("hold left: unweave   right: conjure")
         case .Area:
             param_row("Cursor", build_cursor_name(b.cursor), "C", false)
             if b.cursor == .Air { param_row("Reach", fmt.tprintf("%d", b.air_dist), "Alt", live == .Distance) }
@@ -1375,7 +1379,7 @@ help_card :: proc(gs: ^Game_State, a: f32) {
             key_row("Middle click", "pick block", a)
             key_row("1-9, wheel", "hotbar", a)
             key_row("E", "all blocks", a)
-            key_row("T", "block / area / shape", a)
+            key_row("T", "block / magic / area / shape", a)
             key_row("B", "brush size", a)
             key_row("Ctrl Z / Y", "undo / redo", a)
         }

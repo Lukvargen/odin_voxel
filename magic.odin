@@ -14,6 +14,20 @@ import la "core:math/linalg"
 // the whole tree down (felling.odin).
 
 MAGIC_REACH :: f32(12) // voxels: 8 m
+
+// Spells come in sizes: a radius about the block aimed at (0: just it). B or
+// Ctrl+wheel sets it (gs.brush_radius) in creative's Magic tool; survival
+// allows up to survival_spell_size, which upgrades are to raise.
+MAGIC_MAX_SIZE      :: 3
+survival_spell_size := 0
+
+magic_spell_size :: proc(gs: ^Game_State) -> int {
+    return min(gs.brush_radius, gs.survival ? survival_spell_size : MAGIC_MAX_SIZE)
+}
+
+// Whether the spell is in your hands: survival's only way to build, or
+// creative's Magic tool.
+magic_active :: proc(gs: ^Game_State) -> bool { return gs.survival || gs.build.tool == .Magic }
 MAX_MOTES   :: 192
 MAX_SPARKS  :: 96
 MAGIC_TINT  :: [3]f32{0.10, 0.28, 0.75} // the spell's sparks (they glow: ×4 in the shader)
@@ -55,6 +69,9 @@ Magic :: struct {
     block:      Block_Type,
     progress:   f32, // seconds on this block
     need:       f32, // seconds it takes
+    size:       int, // the spell's radius when it started
+    count:      int, // blocks it takes
+    mana_total: f32, // mana it takes, all told
     tree_logs:  int, // > 0: a tree's trunk; this many logs come down with it
     chip_timer: f32,
     hum_timer:  f32,
@@ -151,16 +168,26 @@ magic_build_update :: proc(gs: ^Game_State, dt: f32) {
     hit, nrm, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), MAGIC_REACH, plants = true)
     if gs.left_held && ok {
         b := Block_Type(u8(get_voxel(gs, hit.x, hit.y, hit.z)))
-        if !m.channeling || hit != m.target || b != m.block {
-            m.channeling, m.target, m.block, m.progress = true, hit, b, 0
-            m.need, m.tree_logs = unweave_time(b), 0
-            if block_is_log(u8(b)) {
-                m.tree_logs = felling_trunk_logs(gs, hit)
-                if m.tree_logs > 0 { m.need = fell_time(m.tree_logs) }
+        size := magic_spell_size(gs)
+        if !m.channeling || hit != m.target || b != m.block || size != m.size {
+            m.channeling, m.target, m.block, m.progress, m.size = true, hit, b, 0, size
+            m.tree_logs = block_is_log(u8(b)) ? felling_trunk_logs(gs, hit) : 0
+            if m.tree_logs > 0 {
+                m.need, m.mana_total, m.count = fell_time(m.tree_logs), fell_mana(m.tree_logs), m.tree_logs
+            } else {
+                // The hardest block sets the pace; more of them, longer.
+                hardest: f32
+                m.count, m.mana_total = 0, 0
+                for q in spell_take_targets(gs, hit, size) {
+                    t := unweave_time(Block_Type(u8(get_voxel(gs, q.x, q.y, q.z))))
+                    hardest = max(hardest, t)
+                    m.count += 1
+                    m.mana_total += t * UNWEAVE_MANA
+                }
+                m.need = hardest * (1 + 0.45 * math.sqrt(f32(max(m.count - 1, 0))))
             }
         }
-        rate := m.tree_logs > 0 ? fell_mana(m.tree_logs) / m.need : UNWEAVE_MANA
-        if mana_draw(m, rate * dt) { m.progress += dt }
+        if !gs.survival || mana_draw(m, m.mana_total / max(m.need, 0.01) * dt) { m.progress += dt } // creative: no mana
         if m.progress >= m.need {
             magic_unweave(gs, hit)
             m.channeling = false
@@ -176,21 +203,63 @@ magic_build_update :: proc(gs: ^Game_State, dt: f32) {
     }
 }
 
-// The block at p comes apart (or, a tree's trunk, the tree comes down).
+// The blocks a spell of radius `size` about p takes: what's solid or a plant
+// in the sphere (not air, not water). Temp.
+spell_take_targets :: proc(gs: ^Game_State, p: [3]int, size: int) -> [dynamic][3]int {
+    out := make([dynamic][3]int, context.temp_allocator)
+    ball := sphere_region(p, size) // the brush's ball, as build_apply takes it
+    for dz in -size ..= size { for dy in -size ..= size { for dx in -size ..= size {
+        q := p + {dx, dy, dz}
+        if !region_contains(&ball, q) { continue }
+        v := u8(get_voxel(gs, q.x, q.y, q.z))
+        if v == 0 || block_is_watery(v) { continue }
+        append(&out, q)
+    } } }
+    return out
+}
+
+// The blocks at p (and round it, by the spell's size) come apart (or, a
+// tree's trunk, the tree comes down).
 @(private="file")
 magic_unweave :: proc(gs: ^Game_State, p: [3]int) {
     m := &gs.magic
     if m.tree_logs > 0 && felling_start(gs, p) { return }
-    b := m.block
-    if build_apply(gs, sphere_region(p, 0), .Air, .All) == 0 { return }
-    drop := block_is_door(u8(b)) ? Block_Type.Door : b
+    // What they'll give, by kind, and where each kind is: for the motes.
+    targets := spell_take_targets(gs, p, m.size)
+    drops: [Block_Type]u32
+    for q in targets { drops[voxel_item(u8(get_voxel(gs, q.x, q.y, q.z)))] += 1 }
+    kinds := make([]Block_Type, len(targets), context.temp_allocator)
+    for q, i in targets { kinds[i] = voxel_item(u8(get_voxel(gs, q.x, q.y, q.z))) }
+    if build_apply(gs, sphere_region(p, m.size), .Air, .All, merge = false) == 0 { return }
     c := block_center(p)
-    sparks_burst(gs, c, MAGIC_TINT, 10, 5)
-    for i in 0 ..< 3 {
-        mote_add(gs, {pos = c + rand_dir() * 0.25, vel = rand_dir() * 4 + {0, 3, 0}, block = drop,
-            count = i == 0 ? 1 : 0, tint = mote_tint(drop), size = i == 0 ? 0.9 : 0.5})
+    sparks_burst(gs, c, MAGIC_TINT, 10 + 4 * m.size, 5 + f32(m.size))
+    motes_burst(gs, targets[:], kinds, drops)
+    play_at(.Magic_Break, c, 0.45 + 0.1 * f32(m.size), vary(0.1) * (1 - 0.08 * f32(m.size)))
+}
+
+// Motes from these spots (kinds[i] at spots[i]) bringing `drops`: each kind
+// shared among its spots, at most a few dozen motes, and a little sparkle.
+@(private="file")
+motes_burst :: proc(gs: ^Game_State, spots: [][3]int, kinds: []Block_Type, drops: [Block_Type]u32) {
+    MOTES :: 30
+    stride := max(1, (len(spots) + MOTES - 1) / MOTES)
+    of, given: [Block_Type]u32
+    for i := 0; i < len(spots); i += stride { of[kinds[i]] += 1 }
+    left := drops
+    left[.Air] = 0
+    for i := 0; i < len(spots); i += stride {
+        b := kinds[i]
+        if b == .Air { continue }
+        given[b] += 1
+        count := drops[b] / of[b]
+        if given[b] == of[b] { count = left[b] } // the last of its kind takes the rest
+        left[b] -= count
+        mote_add(gs, {pos = block_center(spots[i]) + rand_dir() * 0.25, vel = rand_dir() * 4 + {0, 3, 0}, block = b,
+            count = count, tint = mote_tint(b), size = 0.9})
+        if len(spots) < 4 {
+            mote_add(gs, {pos = block_center(spots[i]) + rand_dir() * 0.25, vel = rand_dir() * 4 + {0, 3, 0}, block = b, tint = mote_tint(b), size = 0.5})
+        }
     }
-    play_at(.Magic_Break, c, 0.45, vary(0.1))
 }
 
 // The block in hand, out of what you carry, on the face aimed at (in a
@@ -199,24 +268,53 @@ magic_unweave :: proc(gs: ^Game_State, p: [3]int) {
 magic_conjure :: proc(gs: ^Game_State, hit, nrm: [3]int) {
     b := gs.selected_block
     if b == .Air { return }
-    if items_shown(gs, b) == 0 {
+    if gs.survival && items_shown(gs, b) == 0 {
         ui_toast(gs, fmt.tprintf("No %s left", block_name(b)), 1.2)
         return
     }
     m := &gs.magic
-    if magic_mana(m) < CONJURE_MANA {
+    if gs.survival && magic_mana(m) < CONJURE_MANA {
         m.starved_t = 0.6
         return
     }
     target := hit
     if !block_is_land_plant(u8(get_voxel(gs, hit.x, hit.y, hit.z))) { target = hit + nrm }
-    if b == .Sapling && !sapling_ground(Block_Type(u8(get_voxel(gs, target.x, target.y - 1, target.z)))) {
-        ui_toast(gs, "Saplings take root in grass or dirt", 1.5)
-        return
+    if b == .Door {
+        if !door_place(gs, hit, nrm) { return } // (spent as the edit is counted: items.odin)
+        if gs.survival { mana_draw(m, CONJURE_MANA) }
+    } else {
+        // A disc of them on the face, the spell's size across, nearest the
+        // middle first; in survival as many as you have and can pay for.
+        size := magic_spell_size(gs)
+        u, v := [3]int{nrm.y != 0 ? 1 : 0, nrm.y == 0 ? 1 : 0, 0}, [3]int{0, 0, 1}
+        if nrm.z != 0 { v = {1, 0, 0} }
+        cells := make([dynamic][3]int, context.temp_allocator)
+        for ring in 0 ..= size * size { // round, as the brush's ball
+            for j in -size ..= size { for i in -size ..= size {
+                if i * i + j * j != ring { continue }
+                q := target + u * i + v * j
+                cur := u8(get_voxel(gs, q.x, q.y, q.z))
+                if !(cur == 0 || block_is_watery(cur) || block_is_land_plant(cur)) { continue }
+                if block_solid(u8(b)) && aabb_hits_voxel(gs.camera.pos, q) { continue }
+                if b == .Sapling && !sapling_ground(Block_Type(u8(get_voxel(gs, q.x, q.y - 1, q.z)))) { continue }
+                append(&cells, q)
+            } }
+        }
+        if len(cells) == 0 {
+            if b == .Sapling { ui_toast(gs, "Saplings take root in grass or dirt", 1.5) }
+            return
+        }
+        n := len(cells)
+        if gs.survival {
+            n = min(n, int(items_shown(gs, b)), int(magic_mana(m) / CONJURE_MANA))
+            if n == 0 { m.starved_t = 0.6; return }
+        }
+        blocks := make([]u8, n, context.temp_allocator)
+        for &x in blocks { x = u8(b) }
+        if build_set(gs, cells[:n], blocks, undo = !gs.survival) == 0 { return } // (spent as the edit is counted: items.odin)
+        audio_edit(target, b, .Air, min(size * 2, 8))
+        if gs.survival { mana_draw(m, CONJURE_MANA * f32(n)) }
     }
-    placed := b == .Door ? door_place(gs, hit, nrm) : build_apply(gs, sphere_region(target, 0), b, .All) > 0
-    if !placed { return } // (spent as the edit is counted: items.odin)
-    mana_draw(m, CONJURE_MANA)
     m.conjure, m.conjure_at = 0.2, block_center(target)
     sparks_burst(gs, m.conjure_at, mote_tint(b), 8, 3)
     play_at(.Magic_Place, m.conjure_at, 0.45, vary(0.06))
@@ -225,7 +323,7 @@ magic_conjure :: proc(gs: ^Game_State, hit, nrm: [3]int) {
 // A mote brought blocks home (they were counted when the edit was made:
 // items.odin): a block that had no hotbar slot gets the first empty one.
 magic_collect :: proc(gs: ^Game_State, b: Block_Type, n: u32) {
-    if n == 0 || b == .Air { return }
+    if n == 0 || b == .Air || !gs.survival { return } // creative's hotbar is yours to set
     for h in gs.hotbar { if h == b { return } }
     for h, i in gs.hotbar {
         if h != .Air { continue }
@@ -264,7 +362,7 @@ magic_update :: proc(gs: ^Game_State, dt: f32) {
     m.starved_t -= dt
     m.mana_rest += dt
     if m.mana_rest > MANA_REST { m.mana_spent = max(m.mana_spent - MANA_REGEN * dt, 0) }
-    if !gs.survival || !gs.mouse_locked || gs.combat.sword || gs.glider.deployed { m.channeling = false }
+    if !magic_active(gs) || !gs.mouse_locked || gs.combat.sword || gs.glider.deployed { m.channeling = false }
     up := m.channeling || m.conjure > 0
     m.raise = clamp(m.raise + (up ? dt * 6 : -dt * 2.5), 0, 1)
 
@@ -447,8 +545,8 @@ magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         }
         // Round the block, a ring closing in and quickening as it comes undone.
         if m.channeling {
-            ring := m.tree_logs > 0 ? f32(1.6) : 0.85
-            k := 4 + int(frac * 10)
+            ring := m.tree_logs > 0 ? f32(1.6) : 0.85 + f32(m.size)
+            k := 4 + int(frac * 10) + 4 * m.size
             tint := la.lerp(MAGIC_TINT, mote_tint(m.block), frac)
             for j in 0 ..< k {
                 a := m.t * (2 + 7 * frac) + f32(j) * math.TAU / f32(k)

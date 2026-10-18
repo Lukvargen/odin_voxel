@@ -29,7 +29,7 @@ import SDL "vendor:sdl3"
 // never the plain key's action (Ctrl+wheel is not the hotbar). Shift is also
 // sneak, so keys and wheel actions with no Shift binding ignore it.
 
-Build_Tool  :: enum u8 { Block, Area, Shape }
+Build_Tool  :: enum u8 { Block, Magic, Area, Shape } // Magic: survival's spell, to try in creative (magic.odin)
 Build_Shape :: enum u8 { Sphere, Box, Cylinder, Cone, Pyramid, Torus, Dome }
 Build_Mask  :: enum u8 { All, Air, Solid } // what a fill may replace
 Build_Cursor :: enum u8 { Block, Face, Air } // where an area corner goes
@@ -96,6 +96,7 @@ build_destroy :: proc(b: ^Build) {
 build_tool_name :: proc(t: Build_Tool) -> string {
     switch t {
     case .Block: return "Block"
+    case .Magic: return "Magic"
     case .Area:  return "Area"
     case .Shape: return "Shape"
     }
@@ -159,7 +160,7 @@ Wheel_Target :: enum u8 { None, Hotbar, Brush, Push, Move, Distance, Size, Heigh
 
 wheel_target :: proc(tool: Build_Tool, mods: Mods) -> Wheel_Target {
     switch tool {
-    case .Block:
+    case .Block, .Magic:
         switch mods - {.Shift} {
         case {}:      return .Hotbar
         case {.Ctrl}: return .Brush
@@ -311,6 +312,7 @@ build_update :: proc(gs: ^Game_State, dt: f32) {
         return
     }
     switch b.tool {
+    case .Magic: magic_build_update(gs, dt)
     case .Block: build_block_update(gs)
     case .Area:  build_area_update(gs)
     case .Shape: build_shape_update(gs)
@@ -838,7 +840,17 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
     pv.face = make([dynamic][2][3]f32, context.temp_allocator)
     b := &gs.build
     eye := gs.camera.pos
-    switch b.tool {
+    switch gs.survival ? .Magic : b.tool {
+    case .Magic:
+        // What the spell would take: the block, and the sphere round it.
+        hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), MAGIC_REACH, plants = true)
+        if !ok { return }
+        lo := [3]f32{f32(hit.x), f32(hit.y), f32(hit.z)}
+        wire_box(&pv.segs, lo + 0.5, {0.502, 0.502, 0.502}, 1, 0)
+        if s := magic_spell_size(gs); s > 0 {
+            r := f32(s) + 0.5
+            wire_shape(&pv.segs, .Sphere, lo + 0.5, r, r, 1, 0, eye)
+        }
     case .Block:
         hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH, plants = true)
         if !ok { return }

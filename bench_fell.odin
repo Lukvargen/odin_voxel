@@ -5,6 +5,7 @@ import "core:math"
 import "core:os"
 import la "core:math/linalg"
 import "core:time"
+import SDL "vendor:sdl3"
 
 // `bench fell [dir]`: survival magic out on the plains. Unweaves a block of
 // ground (holding left, as a player would), conjures it back, then fells the
@@ -241,6 +242,52 @@ bench_fell_run :: proc(gs: ^Game_State) {
         look_at(cam, block_center({stump.x, ground + 1, stump.z}))
         shot(gs, dir, "sapling")
     }
+    // Creative's Magic tool, a bigger spell: a ball of ground unwoven (and
+    // undone), a disc of blocks conjured.
+    {
+        gs.survival = false
+        gs.build.tool, gs.brush_radius = .Magic, 2
+        for _ in 0 ..< 120 { step(gs, false, false) }
+        spot := [3]int{trunk.x - 4, 0, trunk.z - 8}
+        spot.y = ground_top(gs, spot.x, spot.z)
+        cam.pos = block_center(spot) + {-7, 6, -2}
+        look_at(cam, block_center(spot))
+        aim, _, _ := raycast_voxel(gs, camera_aim_eye(cam^), camera_forward(cam^), MAGIC_REACH, plants = true)
+        ball := len(spell_take_targets(gs, aim, 2))
+        solid_near :: proc(gs: ^Game_State, c: [3]int) -> (n: int) {
+            for dz in -4 ..= 4 { for dy in -4 ..= 4 { for dx in -4 ..= 4 {
+                v := u8(get_voxel(gs, c.x + dx, c.y + dy, c.z + dz))
+                if v != 0 && !block_is_watery(v) { n += 1 }
+            } } }
+            return
+        }
+        before_ball := solid_near(gs, aim)
+        t0 := 0
+        for i := 0; i < 600 && solid_near(gs, aim) == before_ball; i += 1 {
+            step(gs, true, false)
+            if i == 30 { shot(gs, dir, "spell_ball") }
+            t0 = i
+        }
+        step(gs, false, false)
+        gone := before_ball - solid_near(gs, aim)
+        fmt.printf("bench fell: a radius 2 spell took %d blocks (of %d in its ball) in %.2f s\n", gone, ball, f32(t0) * DT)
+        check(&ok_all, "creative: a bigger spell takes the ball", gone >= ball && ball > 10)
+        build_key(gs, SDL.K_Z, {.Ctrl})
+        check(&ok_all, "creative: ...and Ctrl+Z puts it back", solid_near(gs, aim) == before_ball)
+        h, nrm, _ := raycast_voxel(gs, camera_aim_eye(cam^), camera_forward(cam^), MAGIC_REACH, plants = true)
+        before_disc := solid_near(gs, h + nrm)
+        hotbar_select(gs, 0)
+        if gs.selected_block == .Air || gs.selected_block == .Sapling { gs.hotbar[0] = .Stone; hotbar_select(gs, 0) }
+        step(gs, false, true)
+        step(gs, false, false)
+        placed := solid_near(gs, h + nrm) - before_disc
+        check(&ok_all, fmt.tprintf("creative: right conjures a disc (%d blocks)", placed), placed >= 8)
+        for _ in 0 ..< 10 { step(gs, false, false) }
+        shot(gs, dir, "spell_disc")
+        gs.build.tool, gs.brush_radius = .Block, 0
+        gs.survival = true
+    }
+
     bench_fell_server(&ok_all, trunk)
 
     // A save from before saplings: its doors come back as doors.

@@ -102,7 +102,7 @@ fell_granted :: proc(srv: ^Server, slot: int, p: [3]int) -> bool {
 // Player `slot` says it's felling the tree cut at m.cut: fine if it's a log
 // in its reach. Then the tree's voxels may go, and the others see it fall.
 server_fell :: proc(srv: ^Server, slot: int, m: Msg_Fell) -> bool {
-    if !srv.survival { return false }
+    if !srv.survival { return true } // creative: nothing to pay or permit, the others just see it fall
     p := la.array_cast(m.cut, int)
     pl := &srv.sim.players[slot]
     if !pl.active || la.length(block_center(p) - pl.pos) > MAGIC_REACH + SURVIVAL_REACH_SLACK { return false }
