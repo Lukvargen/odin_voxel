@@ -369,6 +369,19 @@ bench_fell_server :: proc(ok_all: ^bool, at: [3]int) {
     trunk_up := 0
     for y in g.y + 1 ..< g.y + 6 { if block_is_log(u8(get_voxel(&srv.world, g.x, y, g.z))) || block_is_log(u8(get_voxel(&srv.world, g.x + 1, y, g.z))) { trunk_up += 1 } }
     check(ok_all, fmt.tprintf("server: ...into a tree (%d blocks, all sent)", told), len(srv.saplings) == 0 && trunk_up >= 3 && told > 20)
+    // Mana: the server draws it too, and won't let a spell by without it.
+    sim.players[LOCAL_PLAYER].pos = block_center(p) + {3, 4, 0}
+    srv.mana_spent[LOCAL_PLAYER], srv.mana_at[LOCAL_PLAYER] = MANA_MAX, time.tick_now()
+    server_write(&srv, p, u8(Block_Type.Stone)) // dearer than the slack it allows
+    was := u8(get_voxel(&srv.world, p.x, p.y, p.z))
+    _, back9 := send(&srv, 9, p, 0)
+    check(ok_all, "server: with no mana, nothing's unwoven", u8(get_voxel(&srv.world, p.x, p.y, p.z)) == was && back9)
+    sim.players[LOCAL_PLAYER].pos = block_center(at) + {-8, 4, 0}
+    check(ok_all, "server: nor felled", !server_fell(&srv, LOCAL_PLAYER, cut))
+    sim.players[LOCAL_PLAYER].pos = block_center(p) + {3, 4, 0}
+    srv.mana_at[LOCAL_PLAYER] = time.tick_add(time.tick_now(), -10 * time.Second) // a rest
+    _, back10 := send(&srv, 10, p, 0)
+    check(ok_all, fmt.tprintf("server: rested, it is (mana %.0f after)", server_mana(&srv, LOCAL_PLAYER)), get_voxel(&srv.world, p.x, p.y, p.z) == 0 && !back10)
     delete(srv.saplings)
     delete(srv.local_out.reliable)
 }

@@ -49,6 +49,8 @@ Server :: struct {
     items_due:    [MAX_PLAYERS]bool,
     fell_grants:  [MAX_PLAYERS][FELL_SLOTS]Fell_Grant, // trees they may take down out of reach (items.odin)
     saplings:     [dynamic]Sapling_Growing, // planted, growing (saplings.odin)
+    mana_spent:   [MAX_PLAYERS]f32,       // survival: mana drawn (items.odin server_mana), as of mana_at
+    mana_at:      [MAX_PLAYERS]time.Tick,
     kicked:       [MAX_PLAYERS]bool, // sent away by the host, on its way out
     // Characters, by name (player_save.odin): those seen this session, and
     // what each slot's client last said it carries.

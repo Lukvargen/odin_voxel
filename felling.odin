@@ -68,7 +68,7 @@ Tree_Found :: struct {
 // The tree whose trunk p is a log of: its logs from p's height up, and with
 // `leaves` its leaves too. ok false if it isn't a tree.
 @(private="file")
-tree_find :: proc(gs: ^Game_State, p: [3]int, leaves: bool) -> (f: Tree_Found) {
+tree_find :: proc(w: ^World, p: [3]int, leaves: bool) -> (f: Tree_Found) {
     f.logs = make([dynamic][3]int, context.temp_allocator)
     f.leaves = make([dynamic][3]int, context.temp_allocator)
     lo := p - {FIND_R, FIND_BELOW, FIND_R}
@@ -82,9 +82,9 @@ tree_find :: proc(gs: ^Game_State, p: [3]int, leaves: bool) -> (f: Tree_Found) {
     // What each voxel of the space is to the search: 0 not seen, 1 ours
     // (a log), 2 a log not ours, then 3 + steps from our wood for leaves.
     mark := make([]u8, n, context.temp_allocator)
-    voxel :: #force_inline proc(gs: ^Game_State, q: [3]int) -> u8 { return u8(get_voxel(gs, q.x, q.y, q.z)) }
+    voxel :: #force_inline proc(w: ^World, q: [3]int) -> u8 { return u8(get_voxel(w, q.x, q.y, q.z)) }
 
-    if !block_is_log(voxel(gs, p)) { return }
+    if !block_is_log(voxel(w, p)) { return }
     mark[index(p, lo, size)] = 1
     append(&f.logs, p)
     touching_leaves := 0
@@ -95,7 +95,7 @@ tree_find :: proc(gs: ^Game_State, p: [3]int, leaves: bool) -> (f: Tree_Found) {
             if r.y < p.y { continue }
             k := index(r, lo, size)
             if k < 0 || mark[k] != 0 { continue }
-            v := voxel(gs, r)
+            v := voxel(w, r)
             if block_is_leaves(v) {
                 if abs(dx) + abs(dy) + abs(dz) == 1 { touching_leaves += 1 }
                 continue
@@ -114,7 +114,7 @@ tree_find :: proc(gs: ^Game_State, p: [3]int, leaves: bool) -> (f: Tree_Found) {
             hi_y = max(hi_y, q.y)
             if q.y == p.y { foot += 1 }
         }
-        under := Block_Type(voxel(gs, p - {0, 1, 0}))
+        under := Block_Type(voxel(w, p - {0, 1, 0}))
         ground := block_is_log(u8(under)) || under == .Grass || under == .Dirt || under == .Dry_Grass || under == .Snow ||
                   under == .Sand || under == .Red_Sand || under == .Moss || under == .Gravel
         if hi_y - p.y < 4 || foot > 9 || !ground { return }
@@ -137,7 +137,7 @@ tree_find :: proc(gs: ^Game_State, p: [3]int, leaves: bool) -> (f: Tree_Found) {
             r := q + {dx, dy, dz}
             k := index(r, lo, size)
             if k < 0 || mark[k] != 0 { continue }
-            v := voxel(gs, r)
+            v := voxel(w, r)
             if block_is_log(v) {
                 mark[k] = 2
                 append(&others, r)
@@ -181,8 +181,8 @@ tree_find :: proc(gs: ^Game_State, p: [3]int, leaves: bool) -> (f: Tree_Found) {
 }
 
 // How many logs come down if p is cut (0: p isn't a tree's).
-felling_trunk_logs :: proc(gs: ^Game_State, p: [3]int) -> int {
-    f := tree_find(gs, p, false)
+felling_trunk_logs :: proc(w: ^World, p: [3]int) -> int {
+    f := tree_find(w, p, false)
     return f.ok ? len(f.logs) : 0
 }
 

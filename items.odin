@@ -46,9 +46,17 @@ item_change :: proc(old, new: u8, p: [3]int, felled: bool) -> (gain, extra, cost
 server_survival_edit :: proc(srv: ^Server, slot: int, p: [3]int, new: u8) -> bool {
     old := u8(get_voxel(srv.sim.world, p.x, p.y, p.z))
     if !server_in_reach(srv, slot, p, old, new) { return false }
-    gain, extra, cost := item_change(old, new, p, block_is_leaves(old) && fell_granted(srv, slot, p))
+    felled := (block_is_log(old) || block_is_leaves(old)) && fell_granted(srv, slot, p)
+    gain, extra, cost := item_change(old, new, p, felled && block_is_leaves(old))
     items := &srv.items[slot]
     if cost != .Air && items[cost] == 0 && gain != cost { return false }
+    // Mana, as the spell draws it: unweaving by how hard the block is (a
+    // felled tree's paid for already, server_fell; a plant going with its
+    // ground is free), conjuring a little.
+    mana: f32
+    if taken := voxel_item(old); taken != .Air && !felled && !block_is_land_plant(old) { mana += unweave_time(taken) * UNWEAVE_MANA }
+    if cost != .Air { mana += CONJURE_MANA }
+    if mana > 0 && !server_mana_draw(srv, slot, mana) { return false }
     if gain != .Air { items[gain] += 1 }
     if extra != .Air { items[extra] += 1 }
     if cost != .Air { items[cost] -= 1 }
@@ -99,6 +107,8 @@ server_fell :: proc(srv: ^Server, slot: int, m: Msg_Fell) -> bool {
     pl := &srv.sim.players[slot]
     if !pl.active || la.length(block_center(p) - pl.pos) > MAGIC_REACH + SURVIVAL_REACH_SLACK { return false }
     if !block_is_log(u8(get_voxel(srv.sim.world, p.x, p.y, p.z))) { return false }
+    logs := felling_trunk_logs(srv.sim.world, p)
+    if logs == 0 || !server_mana_draw(srv, slot, fell_mana(logs)) { return false }
     // The older grant makes way.
     grants := &srv.fell_grants[slot]
     k := time.tick_diff(grants[0].until, grants[1].until) > 0 ? 0 : 1
@@ -107,10 +117,32 @@ server_fell :: proc(srv: ^Server, slot: int, m: Msg_Fell) -> bool {
 }
 
 // A player's character arrived (Restore): its things as it left them, or a
-// new one's.
+// new one's; full of mana.
 server_items_restore :: proc(srv: ^Server, slot: int, rec: Player_Record, known: bool) {
     srv.items[slot] = known ? rec.kept.items : (srv.survival ? survival_fresh().items : {})
     srv.items_due[slot] = true
+    srv.mana_spent[slot] = 0
+}
+
+// The server keeps each player's mana too, drawn by the edits it applies and
+// coming back as the client's does (magic.odin). It's the more forgiving of
+// the two (it draws at the end of a spell, not all the while, and lets a
+// little overdraw by for jitter), so it only ever stops a client that cheats.
+MANA_SLACK :: f32(5)
+
+// Player `slot`'s mana now.
+server_mana :: proc(srv: ^Server, slot: int) -> f32 {
+    rest := f32(time.duration_seconds(time.tick_since(srv.mana_at[slot]))) - MANA_REST
+    return clamp(MANA_MAX - srv.mana_spent[slot] + max(rest, 0) * MANA_REGEN, 0, MANA_MAX)
+}
+
+// Draws `amount` of player `slot`'s mana, if it has it.
+server_mana_draw :: proc(srv: ^Server, slot: int, amount: f32) -> bool {
+    have := server_mana(srv, slot)
+    if have + MANA_SLACK < amount { return false }
+    srv.mana_spent[slot] = MANA_MAX - have + amount
+    srv.mana_at[slot] = time.tick_now()
+    return true
 }
 
 // The edits this client sent, not yet answered by the server's count: each
