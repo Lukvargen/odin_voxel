@@ -179,6 +179,10 @@ bench_run :: proc(gs: ^Game_State) {
         bench_doors_run(gs)
         return
     }
+    if bench_fell {
+        bench_fell_run(gs)
+        return
+    }
     if bench_plants {
         bench_plants_run(gs)
         return
@@ -426,7 +430,7 @@ bench_hud_shot :: proc(gs: ^Game_State, path: string) {
 bench_teleports_first :: proc() -> bool {
     return bench_look || bench_caves || bench_gi || bench_landmarks || bench_trees || bench_sea ||
            bench_slimes || bench_enemies || bench_fight || bench_nav || bench_crowd || bench_players ||
-           bench_build || bench_combat || bench_relight || bench_view || bench_torch || bench_shade
+           bench_build || bench_combat || bench_relight || bench_view || bench_torch || bench_shade || bench_fell
 }
 
 // Save the last frame as a BMP; with ab=gi also the same view with the

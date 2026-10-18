@@ -26,6 +26,7 @@ Player_Kept :: struct {
     glider:      bool, // equipped
     hotbar:      [HOTBAR_SLOTS]Block_Type,
     hotbar_slot: u8,
+    items:       [Block_Type]u32, // survival: the blocks carried, as the server counts them (items.odin); clients don't send it
 }
 
 // A whole character: the server's Player (where, how) and what it kept.
@@ -39,6 +40,14 @@ Player_Record :: struct {
 }
 
 PLAYER_FRESH :: Player_Kept{hp = PLAYER_MAX_HP, hotbar = DEFAULT_HOTBAR}
+
+// New in a survival world: empty hands but for a few torches.
+survival_fresh :: proc() -> (k: Player_Kept) {
+    k.hp = PLAYER_MAX_HP
+    k.hotbar[HOTBAR_SLOTS - 1] = .Torch
+    k.items[.Torch] = 8
+    return
+}
 
 // The file's layout. Blocks by name, not number, so reordering Block_Type
 // doesn't scramble anyone's hotbar.
@@ -55,6 +64,7 @@ Player_File :: struct {
     glider:      bool,
     hotbar:      []string,
     hotbar_slot: int,
+    items:       map[string]int, // survival: how many of each block, by name
 }
 
 // Player `name`'s character: the server's own copy if it has one (they were
@@ -75,6 +85,7 @@ player_record_note :: proc(srv: ^Server, slot: int, write: bool) {
     if !p.active || n.len == 0 || !srv.kept_known[slot] { return }
     name := string(n.text[:n.len])
     rec := Player_Record{pos = p.pos, yaw = p.yaw, pitch = p.pitch, fly_mode = p.fly_mode, sword = p.sword, kept = srv.kept[slot]}
+    rec.kept.items = srv.items[slot] // the server's count, never the client's word (items.odin)
     if _, known := srv.records[name]; !known { name = strings.clone(name) }
     srv.records[name] = rec
     if write && srv.world.save_enabled { player_file_save(name, rec) }
@@ -112,6 +123,9 @@ player_file_load :: proc(name: string) -> (rec: Player_Record, ok: bool) {
         if b, found := reflect.enum_from_name(Block_Type, s); found && b != .Air { rec.kept.hotbar[i] = b }
     }
     rec.kept.hotbar_slot = u8(clamp(f.hotbar_slot, 0, HOTBAR_SLOTS - 1))
+    for s, n in f.items {
+        if b, found := reflect.enum_from_name(Block_Type, s); found && b != .Air { rec.kept.items[b] = u32(clamp(n, 0, int(max(i32)))) }
+    }
     return rec, true
 }
 
@@ -119,11 +133,13 @@ player_file_load :: proc(name: string) -> (rec: Player_Record, ok: bool) {
 player_file_save :: proc(name: string, rec: Player_Record) {
     hotbar := make([]string, HOTBAR_SLOTS, context.temp_allocator)
     for b, i in rec.kept.hotbar { hotbar[i] = fmt.tprint(b) }
+    items := make(map[string]int, allocator = context.temp_allocator)
+    for n, b in rec.kept.items { if n > 0 { items[fmt.tprint(b)] = int(n) } }
     f := Player_File{
         version = PLAYER_FILE_VERSION, name = name,
         pos = rec.pos, yaw = rec.yaw, pitch = rec.pitch,
         health = rec.kept.hp, flying = rec.fly_mode, sword_drawn = rec.sword, glider = rec.kept.glider,
-        hotbar = hotbar, hotbar_slot = int(rec.kept.hotbar_slot),
+        hotbar = hotbar, hotbar_slot = int(rec.kept.hotbar_slot), items = items,
     }
     data, err := json.marshal(f, {pretty = true, use_spaces = true, spaces = 2}, context.temp_allocator)
     if err != nil { return }

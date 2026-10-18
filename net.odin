@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), size_of(Msg_Rules), size_of(Net_Player), size_of(Net_Slime), size_of(Net_Enemy), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), size_of(Msg_Rules), size_of(Msg_Items), size_of(Msg_Fell), size_of(Net_Player), size_of(Net_Slime), size_of(Net_Enemy), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -53,6 +53,7 @@ Msg_Kind :: enum u8 {
     // both ways: blocks a player changed (client → server → the others)
     Voxels,       // Msg_Voxels
     Chunk_Voxels, // Msg_Chunk_Voxels: a whole chunk, when an edit changed much of it
+    Fell,         // Msg_Fell: a tree felled (felling.odin), sent before its voxels
     // server → client
     Welcome,      // Msg_Welcome: your player slot, and where to appear
     Refuse,       // Refuse_Reason
@@ -69,6 +70,7 @@ Msg_Kind :: enum u8 {
     Restore,      // Msg_Restore: your character here: carry on as you were, or start fresh
     Chat_Line,    // Msg_Chat_Line: a chat line, or the server's news (someone joined, left)
     Rules,        // Msg_Rules: what the host lets visitors do
+    Items,        // Msg_Items: what you carry, as the server counts it (survival: items.odin)
 }
 
 TEXT_MAX    :: 96   // bytes of a chat line
@@ -87,8 +89,14 @@ Msg_Restore :: struct {
     record: Player_Record,
 }
 
+Msg_Items :: struct {
+    seq:   u32, // the last of your edits counted in it
+    items: [Block_Type]u32,
+}
+
 Msg_Rules :: struct {
     guests_build: bool, // players other than the host may change blocks
+    survival:     bool, // the world's game mode (magic.odin); else creative
 }
 
 Msg_Player_Name :: struct {
@@ -128,11 +136,13 @@ Msg_Voxel :: struct {
 }
 
 Msg_Voxels :: struct {
+    seq:   u32, // the sender's edit number (client_items_predict); the server's count answers to it
     count: u8,
     items: [VOXEL_BATCH]Msg_Voxel,
 }
 
 Msg_Chunk_Voxels :: struct {
+    seq:    u32,
     key:    [3]i32, // world chunk coordinate
     voxels: [VOXELS_PER_BRICK]u8,
 }

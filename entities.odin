@@ -247,6 +247,8 @@ entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
     others_add_parts(gs, frame)
     combat_add_parts(gs, frame)
     mantle_add_parts(gs, frame)
+    magic_add_parts(gs, frame)
+    felling_add_parts(gs, frame)
     slimes_add_parts(gs, frame)
     enemies_add_parts(gs, frame)
     sandbox_add_parts(gs, frame)

@@ -159,3 +159,15 @@ load_column :: proc(key: [2]int) -> ^Column {
     if len(data) < len(SAVE_MAGIC) || string(data[:len(SAVE_MAGIC)]) != SAVE_MAGIC { return nil }
     return column_decode(data[len(SAVE_MAGIC):])
 }
+
+// A world's game mode: mode.txt in its folder says "survival", or there's
+// none and it's creative (as every world was before there were modes).
+world_survival_load :: proc(dir: string) -> bool {
+    data, err := os.read_entire_file(fmt.tprintf("%s/mode.txt", dir), context.temp_allocator)
+    return err == nil && strings.trim_space(string(data)) == "survival"
+}
+
+world_survival_save :: proc(dir: string, survival: bool) {
+    _ = os.make_directory_all(dir)
+    _ = os.write_entire_file(fmt.tprintf("%s/mode.txt", dir), transmute([]u8)string(survival ? "survival\n" : "creative\n"))
+}

@@ -53,6 +53,9 @@ Sound :: enum u8 {
     // enemies.odin
     Bone_Hit, Bone_Rattle, Bone_Break,
     Clang, // a blow caught on the blade
+    // magic.odin, felling.odin
+    Magic_Channel, Magic_Break, Magic_Place, Pickup,
+    Tree_Creak, Tree_Fall,
 }
 
 Loop_Kind :: enum u8 { Wind, Rush, Leaves, Water, Underwater, Cave, Insects }
@@ -898,6 +901,13 @@ synth :: proc(sound: Sound) -> []f32 {
     case .Bone_Hit:    return crunch({length = 0.25, attack = 0.001, decay = 0.07, band = {0.08, 0.6}, hiss = 0.1, grains = 900, grain_len = 0.002, thump = 0.5, thump_hz = 140, ring = 0.6, ring_hz = 1100, ring_q = 0.12})
     case .Bone_Rattle: return crunch({length = 0.5, attack = 0.02, decay = 0.25, band = {0.1, 0.55}, hiss = 0.02, grains = 140, grain_len = 0.003, thump_hz = 60, ring = 0.5, ring_hz = 900, ring_q = 0.15}) // thump_hz: the slide divides by it, even silent
     case .Bone_Break:  return crunch({length = 0.9, attack = 0.002, decay = 0.4, band = {0.05, 0.55}, hiss = 0.1, grains = 700, grain_len = 0.003, thump = 0.7, thump_hz = 90, ring = 0.4, ring_hz = 800, ring_q = 0.18})
+    case .Magic_Channel: return synth_shimmer()
+    case .Magic_Break:   return synth_unweave()
+    case .Magic_Place:   return synth_conjure()
+    case .Pickup:        return synth_pickup()
+    case .Tree_Creak:    return synth_creak()
+    // A tree hitting the ground: a deep thud, branches cracking, leaves thrashing.
+    case .Tree_Fall:     return crunch({length = 1.8, attack = 0.004, decay = 0.9, band = {0.02, 0.6}, hiss = 0.5, grains = 2600, grain_len = 0.004, thump = 1.3, thump_hz = 38, ring = 0.5, ring_hz = 240, ring_q = 0.08})
     }
     return new_buf(0.01)
 }
@@ -1358,4 +1368,73 @@ write_wav :: proc(path: string, samples: []f32, channels: int) {
     if err := os.write_entire_file(path, data[:]); err != nil {
         fmt.eprintln("couldn't write", path, err)
     }
+}
+
+// The spell channelling: a soft cluster of high partials, wavering, with air.
+@(private="file")
+synth_shimmer :: proc() -> []f32 {
+    buf := crunch({length = 0.32, attack = 0.06, decay = 0.2, band = {0.4, 0.95}, hiss = 0.25, grains = 200, grain_len = 0.001, thump = 0, thump_hz = 100})
+    normalize(buf, 0.25)
+    base := rand.float32_range(620, 700)
+    for k in ([4]f32{1, 1.5, 2, 3}) {
+        p: f32
+        rate := rand.float32_range(9, 15)
+        for &s, i in buf {
+            t := f32(i) / SAMPLE_RATE
+            s += osc(&p, base * k * (1 + 0.004 * math.sin(t * rate * math.TAU))) * env(t, 0.05, 0.22) * 0.22 / k
+        }
+    }
+    return buf
+}
+
+// A block coming undone: a glassy pop and a quick fall of bright notes.
+@(private="file")
+synth_unweave :: proc() -> []f32 {
+    buf := crunch({length = 0.6, attack = 0.001, decay = 0.12, band = {0.2, 0.9}, hiss = 0.3, grains = 1500, grain_len = 0.0015, thump = 0.4, thump_hz = 160})
+    normalize(buf, 0.45)
+    f := rand.float32_range(1500, 1800)
+    for i in 0 ..< 4 {
+        note(buf, 0.02 + f32(i) * 0.05, 0.25, f, f * 0.97, 6, 0.25)
+        f *= 0.8
+    }
+    return buf
+}
+
+// A block conjured: a soft rising chime over a muted knock.
+@(private="file")
+synth_conjure :: proc() -> []f32 {
+    buf := synth_place()
+    normalize(buf, 0.5)
+    f := rand.float32_range(700, 780)
+    note(buf, 0, 0.18, f, f * 1.5, 4, 0.3)
+    note(buf, 0.04, 0.16, f * 1.5, f * 2, 4, 0.18)
+    return buf
+}
+
+// A mote reaching you: a tiny bright blip.
+@(private="file")
+synth_pickup :: proc() -> []f32 {
+    buf := new_buf(0.09)
+    note(buf, 0, 0.09, 1250, 1900, 0, 0.6)
+    note(buf, 0, 0.06, 2500, 3600, 0, 0.2)
+    return buf
+}
+
+// A trunk giving way: a long low groan of wood with cracks through it.
+@(private="file")
+synth_creak :: proc() -> []f32 {
+    buf := crunch({length = 1.3, attack = 0.15, decay = 0.9, band = {0.03, 0.4}, hiss = 0.05, grains = 90, grain_len = 0.006, thump = 0, thump_hz = 100, ring = 1.0, ring_hz = 260, ring_q = 0.05})
+    normalize(buf, 0.5)
+    p, lp: f32
+    f0 := rand.float32_range(70, 90)
+    for &s, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        // A bowed, stuttering tone: a buzz whose pitch sags and jitters.
+        f := f0 * (1.25 - 0.3 * t) * (1 + 0.06 * math.sin(t * 23) + 0.03 * white())
+        p = fract(p + f / SAMPLE_RATE)
+        saw := 2 * p - 1
+        lp += (saw - lp) * 0.08
+        s += lp * env(t, 0.2, 0.8) * (0.6 + 0.4 * math.sin(t * 37)) * 0.8
+    }
+    return buf
 }

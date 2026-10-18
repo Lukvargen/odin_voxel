@@ -592,7 +592,6 @@ heading :: proc(s: string, a: f32 = 1) {
 }
 
 // "Red_Sand" -> "Red sand".
-@(private="file")
 block_name :: proc(b: Block_Type) -> string {
     if block_is_door(u8(b)) { return "Door" }
     s, _ := strings.replace_all(fmt.tprint(b), "_", " ", context.temp_allocator)
@@ -663,7 +662,7 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
 
     if !gliding && ui.screen != .Inventory && !gs.combat.sword {
         hotbar_layout(gs)
-        if playing { build_hud_layout(gs, w) }
+        if playing && !gs.survival { build_hud_layout(gs, w) } // survival has no tools: magic (magic.odin)
     }
     if playing { combat_hud_layout(gs, w, h) }
     name_tags_layout(gs, w, h)
@@ -925,12 +924,15 @@ hotbar_slots :: proc(gs: ^Game_State, clickable: bool) {
             layout = {sizing = {clay.SizingFixed(SLOT), clay.SizingFixed(SLOT)}, childAlignment = {.Center, .Center}},
             custom = deco(on ? .Slot_On : (hovered ? .Slot_Hover : .Slot), radius = 6),
         }) {
-            if clay.UI()({layout = {sizing = {clay.SizingFixed(SLOT - 6), clay.SizingFixed(SLOT - 6)}}, custom = deco(.Block_Icon, b)}) {}
+            if b != .Air {
+                if clay.UI()({layout = {sizing = {clay.SizingFixed(SLOT - 6), clay.SizingFixed(SLOT - 6)}}, custom = deco(.Block_Icon, b)}) {}
+            }
             if clay.UI(clay.ID(clickable ? "InvHotKey" : "HotKey", u32(i)))({
                 floating = {attachTo = .Parent, offset = {5, 3}, zIndex = 12, attachment = {.LeftTop, .LeftTop}, pointerCaptureMode = .Passthrough},
             }) {
                 text(fmt.tprintf("%d", i + 1), on ? COLOR_ACCENT : COLOR_TEXT_FAINT, 10, FONT_ID_TITLE)
             }
+            if gs.survival && b != .Air { item_count(gs, clay.ID(clickable ? "InvHotCount" : "HotCount", u32(i)), items_shown(gs, b)) }
         }
         if hovered && gs_ui_left_pressed() {
             hotbar_select(gs, i)
@@ -939,8 +941,18 @@ hotbar_slots :: proc(gs: ^Game_State, clickable: bool) {
     }
 }
 
-// sRGB face colours for the icons: top, side.
+// How many of a block you carry, in a slot's corner (survival).
 @(private="file")
+item_count :: proc(gs: ^Game_State, id: clay.ElementId, n: u32) {
+    if clay.UI(id)({
+        floating = {attachTo = .Parent, offset = {-4, -2}, zIndex = 12, attachment = {.RightBottom, .RightBottom}, pointerCaptureMode = .Passthrough},
+    }) {
+        label := n >= 10_000 ? fmt.tprintf("%dk", n / 1000) : fmt.tprintf("%d", n)
+        text(label, n == 0 ? COLOR_BAD : COLOR_TEXT, 12, FONT_ID_TITLE)
+    }
+}
+
+// sRGB face colours for the icons: top, side.
 icon_colors :: proc(b: Block_Type) -> (top, side: [3]f32) {
     #partial switch b {
     case .Grass:      return {0.38, 0.60, 0.24}, {0.47, 0.33, 0.22}
@@ -1326,15 +1338,24 @@ help_card :: proc(gs: ^Game_State, a: f32) {
         key_row("WASD", "move", a)
         key_row("Ctrl / W W", "sprint", a)
         key_row("Shift", "sneak", a)
-        key_row("Space", "jump; twice to fly", a)
-        key_row("Left click", "break", a)
-        key_row("Right click", "place", a)
-        key_row("Middle click", "pick block", a)
-        key_row("1-9, wheel", "hotbar", a)
-        key_row("E", "all blocks", a)
-        key_row("T", "block / area / shape", a)
-        key_row("B", "brush size", a)
-        key_row("Ctrl Z / Y", "undo / redo", a)
+        if gs.survival {
+            key_row("Space", "jump", a)
+            key_row("Hold left", "unweave a block", a)
+            key_row("Right click", "conjure a block", a)
+            key_row("Middle click", "pick block", a)
+            key_row("1-9, wheel", "hotbar", a)
+            key_row("E", "what you carry", a)
+        } else {
+            key_row("Space", "jump; twice to fly", a)
+            key_row("Left click", "break", a)
+            key_row("Right click", "place", a)
+            key_row("Middle click", "pick block", a)
+            key_row("1-9, wheel", "hotbar", a)
+            key_row("E", "all blocks", a)
+            key_row("T", "block / area / shape", a)
+            key_row("B", "brush size", a)
+            key_row("Ctrl Z / Y", "undo / redo", a)
+        }
         key_row("G", "hang glider", a)
         key_row("R", "sword", a)
         key_row("F5", "camera", a)
@@ -1896,15 +1917,18 @@ inventory_layout :: proc(gs: ^Game_State) {
         custom = deco(.Glass, radius = 12),
     }) {
         if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childAlignment = {y = .Bottom}}}) {
-            text("Blocks", COLOR_ACCENT, 24, FONT_ID_TITLE)
+            text(gs.survival ? "Carried" : "Blocks", COLOR_ACCENT, 24, FONT_ID_TITLE)
         }
+        carried := 0
+        for _, b in gs.items { if items_shown(gs, b) > 0 { carried += 1 } }
+        if gs.survival && carried == 0 { text("Nothing yet: hold left on a block to unweave it", COLOR_TEXT_DIM, 14) }
         n := 0
         if clay.UI()({layout = {layoutDirection = .TopToBottom, childGap = 5}}) {
             for n < len(Block_Type) {
                 if clay.UI()({layout = {childGap = 5}}) {
                     for col := 0; col < 9 && n < len(Block_Type); n += 1 {
                         b := Block_Type(n)
-                        if b == .Air || b == .Water { continue }
+                        if b == .Air || b == .Water || (gs.survival && items_shown(gs, b) == 0) { continue }
                         id := clay.ID("Inv", u32(n))
                         hov := clay.PointerOver(id)
                         if hov { hovered_block = b }
@@ -1914,6 +1938,7 @@ inventory_layout :: proc(gs: ^Game_State) {
                             custom = deco(hov ? .Slot_Hover : (in_hand ? .Slot_On : .Slot), radius = 6),
                         }) {
                             if clay.UI()({layout = {sizing = {clay.SizingFixed(SLOT - 6), clay.SizingFixed(SLOT - 6)}}, custom = deco(.Block_Icon, b)}) {}
+                            if gs.survival { item_count(gs, clay.ID("InvCount", u32(n)), items_shown(gs, b)) }
                         }
                         if hov && gs_ui_left_pressed() {
                             gs.hotbar[gs.hotbar_slot] = b

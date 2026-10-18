@@ -35,6 +35,11 @@ Model_Id :: enum u32 {
     Club, Old_Sword, Axe, // grip at the origin, along +z
     // sea.odin
     Fish_Body, Fish_Body_Striped, Fish_Tail,
+    // magic.odin, felling.odin
+    Spark,      // a small glowing cube, coloured by the part's tint
+    // A felled tree's wood and leaves, one pair per falling tree: reserved
+    // room in the buffer, filled when a tree comes down (ent_model_upload).
+    Fell_Wood_0, Fell_Leaves_0, Fell_Wood_1, Fell_Leaves_1,
 }
 
 Voxel_Model :: struct {
@@ -65,6 +70,8 @@ Pal :: enum u8 {
     Bone, Bone_Shadow, Eye_Glow, Hide, Hide_Dark, Leather, Leather_Dark,
     Tusk, Iron, Rust, Wood, Wood_Dark, Cloth, Eye_Yellow, Eye_Red,
     Fish_Scale, Fish_Belly, Fish_Fin, Fish_Stripe,
+    Magic,               // glows in the part's tint (sparks, motes)
+    Fell, Fell_Dark,     // a felled tree's voxels, in the part's tint
 }
 #assert(len(Pal) <= 64) // ENT_PAL_BASE reserves 64 entries
 
@@ -129,6 +136,9 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Fish_Belly:    return {236, 232, 222}, 0
     case .Fish_Fin:      return {180, 180, 180}, PAL_TINT | PAL_THIN
     case .Fish_Stripe:   return {246, 244, 238}, 0
+    case .Magic:         return {255, 255, 255}, PAL_TINT | PAL_EMIT
+    case .Fell:          return {255, 255, 255}, PAL_TINT
+    case .Fell_Dark:     return {196, 196, 196}, PAL_TINT
     }
     return {255, 0, 255}, 0
 }
@@ -262,6 +272,42 @@ ent_models_bake :: proc() {
     ent_models[.Glider_Wing]  = model_bake({-3.85, 0.95, -2.05}, {3.85, 2.05, 2.0}, 1.0 / 12, shape_glider_wing)
     ent_models[.Rod]          = model_bake({-0.05, -0.05, 0}, {0.05, 0.05, 1}, 1.0 / 24, shape_rod)
     ent_models[.Arm]          = model_bake({-0.08, -0.08, 0}, {0.08, 0.08, 1}, 1.0 / 24, shape_arm)
+    ent_models[.Spark]        = model_bake({-0.0625, -0.0625, -0.0625}, {0.0625, 0.0625, 0.0625}, 1.0 / 16, proc(p: [3]f32, voxel: f32) -> Pal { return .Magic })
+    // Room for the biggest tree there is (TREE_VOXEL_REACH, TREE_MAX_HEIGHT).
+    for id in FELL_MODELS {
+        ent_models[id] = {dims = FELL_DIMS, voxel = 1, data = make([]u8, FELL_DIMS.x * FELL_DIMS.y * FELL_DIMS.z)}
+    }
+}
+
+FELL_DIMS   :: [3]int{96, 64, 96}
+FELL_MODELS :: [4]Model_Id{.Fell_Wood_0, .Fell_Leaves_0, .Fell_Wood_1, .Fell_Leaves_1}
+
+// Where each model's voxels and brick masks start in the buffer (u32 words).
+@(private="file")
+ent_model_words: [Model_Id][2]u32
+
+// Puts model `id` (one of the reserved ones) in the buffer as `m`, no bigger
+// than the room it had at startup: its table entry, voxels and masks. The
+// model's data stays the caller's.
+ent_model_upload :: proc(gs: ^Game_State, id: Model_Id, m: Voxel_Model) {
+    assert(m.dims.x * m.dims.y * m.dims.z <= FELL_DIMS.x * FELL_DIMS.y * FELL_DIMS.z && m.dims % 4 == 0)
+    ent_models[id] = m
+    bd := m.dims / 4
+    masks := make([]u64, bd.x * bd.y * bd.z, context.temp_allocator)
+    for z in 0 ..< m.dims.z {
+        for y in 0 ..< m.dims.y {
+            for x in 0 ..< m.dims.x {
+                if m.data[x + m.dims.x * (y + m.dims.y * z)] != 0 {
+                    masks[x / 4 + bd.x * (y / 4 + bd.y * (z / 4))] |= 1 << u64(x % 4 + 4 * (y % 4) + 16 * (z % 4))
+                }
+            }
+        }
+    }
+    vword, bword := ent_model_words[id][0], ent_model_words[id][1]
+    gpu_upload_buffer(gs, gs.entity_buf, raw_data(m.data), (len(m.data) + 3) &~ 3, int(vword) * 4)
+    gpu_upload_buffer(gs, gs.entity_buf, raw_data(masks), len(masks) * 8, int(bword) * 4)
+    table := [8]u32{u32(m.dims.x), u32(m.dims.y), u32(m.dims.z), vword, u32(bd.x), u32(bd.y), u32(bd.z), bword}
+    gpu_upload_buffer(gs, gs.entity_buf, &table, size_of(table), (ENT_MODEL_BASE + 2 * int(id)) * 16)
 }
 
 // GPU layout of gs.entity_buf, in uint4 units (shaders/entity_voxel.hlsl):
@@ -310,6 +356,7 @@ ent_static_words :: proc() -> (words: []u32, dyn_base: int) {
             }
         }
         bword := append_bytes(&out, slice.to_bytes(masks))
+        ent_model_words[id] = {vword, bword}
         t := (ENT_MODEL_BASE + 2 * int(id)) * 4
         out[t + 0], out[t + 1], out[t + 2], out[t + 3] = u32(m.dims.x), u32(m.dims.y), u32(m.dims.z), vword
         out[t + 4], out[t + 5], out[t + 6], out[t + 7] = u32(bd.x), u32(bd.y), u32(bd.z), bword

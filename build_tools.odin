@@ -191,6 +191,7 @@ cycle :: proc(i, n, step: int) -> int { return ((i + step) % n + n) % n }
 // key was used (main then does nothing else with it).
 build_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
     b := &gs.build
+    if gs.survival { return false } // magic, not tools (magic.odin); no undo either: it'd make blocks
     // T, Q, V, B: plain cycles forward, Shift back; with Ctrl or Alt, nothing.
     step := .Shift in mods ? -1 : 1
     plain := mods & {.Ctrl, .Alt} == {}
@@ -269,6 +270,10 @@ brush_step :: proc(gs: ^Game_State, step: int) {
 build_wheel :: proc(gs: ^Game_State, steps: int, mods: Mods) {
     b := &gs.build
     if steps == 0 { return }
+    if gs.survival {
+        if mods - {.Shift} == {} { hotbar_select(gs, cycle(gs.hotbar_slot, HOTBAR_SLOTS, -steps)) }
+        return
+    }
     switch wheel_target(b.tool, mods) {
     case .None:
     case .Hotbar: hotbar_select(gs, cycle(gs.hotbar_slot, HOTBAR_SLOTS, -steps)) // down = next
@@ -301,6 +306,10 @@ build_update :: proc(gs: ^Game_State, dt: f32) {
         }
     }
     if b.door_click { return }
+    if gs.survival {
+        magic_build_update(gs, dt)
+        return
+    }
     switch b.tool {
     case .Block: build_block_update(gs)
     case .Area:  build_area_update(gs)
@@ -637,7 +646,7 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
         append(&rec.changes, Voxel_Change{{i32(q.x), i32(q.y), i32(q.z)}, v})
     }
     if block == .Air { fill_dug_water(gs, changed[:]) }
-    build_commit(gs, changed[:], dirty)
+    build_commit(gs, changed[:], dirty, change_olds(rec.changes[:]))
     radius := r.is_shape ? max(r.size, r.height) : la.max(r.hi - r.lo) / 2
     audio_edit(r.is_shape ? r.center : (r.lo + r.hi) / 2, block, first_old, min(radius, 8))
 
@@ -663,6 +672,7 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
 build_set :: proc(gs: ^Game_State, pos: [][3]int, blocks: []u8, undo: bool) -> int {
     rec: Edit_Record
     changed := make([dynamic][3]int, context.temp_allocator)
+    olds := make([dynamic]u8, context.temp_allocator)
     dirty := make(map[int]bool, 4, context.temp_allocator)
     for p, i in pos {
         col := gs.columns[{p.x >> 3, p.z >> 3}]
@@ -674,10 +684,11 @@ build_set :: proc(gs: ^Game_State, pos: [][3]int, blocks: []u8, undo: bool) -> i
         col.modified = true
         dirty[ring_slot(p.x >> 3, p.y >> 3, p.z >> 3)] = true
         append(&changed, p)
+        append(&olds, cur)
         if undo { append(&rec.changes, Voxel_Change{{i32(p.x), i32(p.y), i32(p.z)}, cur}) }
     }
     if len(changed) == 0 { return 0 }
-    build_commit(gs, changed[:], dirty)
+    build_commit(gs, changed[:], dirty, olds[:])
     if undo {
         b := &gs.build
         b.stroke = false
@@ -689,13 +700,38 @@ build_set :: proc(gs: ^Game_State, pos: [][3]int, blocks: []u8, undo: bool) -> i
 }
 
 // Relight, re-upload and re-summarise after voxels changed, and tell the
-// server (which passes the change on to the other players).
+// server (which passes the change on to the other players). olds: what each
+// of `changed` was, for counting what's carried (items.odin).
 @(private="file")
-build_commit :: proc(gs: ^Game_State, changed: [][3]int, dirty: map[int]bool) {
+build_commit :: proc(gs: ^Game_State, changed: [][3]int, dirty: map[int]bool, olds: []u8) {
     light_on_edit(gs, changed)
     for slot in dirty { gpu_sync_slot(gs, slot) }
     far_update_edited(gs, changed)
-    client_send_voxels(gs, changed)
+    client_send_voxels(gs, changed, client_items_predict(gs, changed, olds))
+}
+
+// Clears every voxel of `pos` to air, as a felled tree leaves (no undo):
+// water beside them flows in, and everyone's told. How many changed.
+world_clear :: proc(gs: ^Game_State, pos: [][3]int) -> int {
+    changed := make([dynamic][3]int, 0, len(pos), context.temp_allocator)
+    olds := make([dynamic]u8, 0, len(pos), context.temp_allocator)
+    dirty := make(map[int]bool, 64, context.temp_allocator)
+    for p in pos {
+        col := gs.columns[{p.x >> 3, p.z >> 3}]
+        if col == nil || p.y < WORLD_Y_MIN || p.y >= WORLD_Y_MAX { continue }
+        c := &col.chunks[chunk_y_index(p.y >> 3)]
+        vi := (p.x & 7) + (p.y & 7) * CHUNK_VOXELS + (p.z & 7) * CHUNK_VOXELS * CHUNK_VOXELS
+        cur := chunk_voxel(c, vi)
+        if !chunk_set_voxel(c, vi, 0) { continue }
+        col.modified = true
+        dirty[ring_slot(p.x >> 3, p.y >> 3, p.z >> 3)] = true
+        append(&changed, p)
+        append(&olds, cur)
+    }
+    if len(changed) == 0 { return 0 }
+    fill_dug_water(gs, changed[:])
+    build_commit(gs, changed[:], dirty, olds[:])
+    return len(changed)
 }
 
 // Relight, re-upload and re-summarise after another player changed voxels.
@@ -706,6 +742,14 @@ world_refresh :: proc(gs: ^Game_State, changed: [][3]int) {
     light_on_edit(gs, changed)
     for slot in dirty { gpu_sync_slot(gs, slot) }
     far_update_edited(gs, changed)
+}
+
+// The old voxels of an edit record's changes, in order (temp).
+@(private="file")
+change_olds :: proc(changes: []Voxel_Change) -> []u8 {
+    olds := make([]u8, len(changes), context.temp_allocator)
+    for ch, i in changes { olds[i] = ch.old }
+    return olds
 }
 
 // Pushes onto the undo (or redo) stack, dropping the oldest edits past the
@@ -767,7 +811,7 @@ build_undo :: proc(gs: ^Game_State, from, to: ^[dynamic]Edit_Record, verb: strin
         append(&changed, p)
         append(&back.changes, Voxel_Change{ch.pos, cur})
     }
-    if len(changed) > 0 { build_commit(gs, changed[:], dirty) }
+    if len(changed) > 0 { build_commit(gs, changed[:], dirty, change_olds(back.changes[:])) }
     push_record(b, to, back)
     ui_toast(gs, fmt.tprintf("%s: %s blocks", verb, thousands(len(changed))), 1)
 }

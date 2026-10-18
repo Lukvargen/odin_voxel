@@ -767,7 +767,6 @@ FOREARM_LEN   :: f32(0.29)
 
 // The elbow for reaching from the shoulder toward target, bending toward
 // pole, and where the wrist ends up (pulled in if out of reach).
-@(private="file")
 two_bone_ik :: proc(shoulder, target, pole: [3]f32, upper, lower: f32) -> (elbow, wrist: [3]f32) {
     to := target - shoulder
     dist := clamp(la.length(to), abs(upper - lower) + 0.001, upper + lower - 0.001)

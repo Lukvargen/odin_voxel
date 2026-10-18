@@ -114,6 +114,10 @@ Game_State :: struct {
     fog_density:    f32,   // base distance-fog density (options panel)
     cave_factor:    f32,   // 0 surface .. 1 deep underground, smoothed per frame
     sun_intensity:  f32,   // sun direct-light multiplier
+    survival:       bool, // the world's game mode (Msg_Rules): magic building, an inventory (magic.odin)
+    items:          [Block_Type]u32, // survival: the blocks carried
+    magic:          Magic,           // survival: the spell that breaks and places blocks (magic.odin)
+    felling:        Felling,         // trees coming down (felling.odin)
     selected_block: Block_Type, // = hotbar[hotbar_slot]
     hotbar:         [HOTBAR_SLOTS]Block_Type, // keys 1-9 / wheel; middle click and E change it
     hotbar_slot:    int,
@@ -166,6 +170,7 @@ game_main :: proc() -> (relaunch: []string) {
     }
     start_yaw: f32
     start_at: bool // at= given: start there, not where we were last
+    mode_arg: Maybe(bool) // mode=: the world's game mode set to survival (true) or creative
     start := Start.Menu
     window: [4]i32 // window=: where it was last run (x, y, w, h)
     window_given, no_focus := false, false
@@ -238,6 +243,8 @@ game_main :: proc() -> (relaunch: []string) {
             case a == "sea": bench_sea = true
             case a == "climb": bench_climb = true
             case a == "doors": bench_doors = true
+            case a == "fell": bench_fell = true
+            case a == "forest": bench_fell_forest = true // bench fell: a big forest tree instead
             case a == "plants": bench_plants = true
             case a == "hear": bench_hear = true
             case a == "gi": bench_gi = true
@@ -281,6 +288,7 @@ game_main :: proc() -> (relaunch: []string) {
         // No arguments: the main menu (main_menu.odin). [menu]: that too,
         // whatever else is given.
         // [world=<name>]: play the world saved in saves/<name>.
+        // [mode=survival|creative]: and set its game mode (magic.odin).
         // [host] [port=<n>]: let players elsewhere join (UDP port, default NET_PORT).
         // [join=<address>[:<port>]]: play on someone's server instead.
         // [at=<x>,<z>] [yaw=<degrees>]: start there, facing that way. [hour=<h>]: at that time.
@@ -320,6 +328,8 @@ game_main :: proc() -> (relaunch: []string) {
             case strings.has_prefix(a, "world="):
                 save_dir = strings.concatenate({"saves/", a[6:]})
                 if start == .Menu { start = .World }
+            case a == "mode=survival": mode_arg = true
+            case a == "mode=creative": mode_arg = false
             case a == "host":
                 net_host = true
                 if start == .Menu { start = .World }
@@ -421,6 +431,7 @@ game_main :: proc() -> (relaunch: []string) {
     } else {
         // Our own server opens the world and tells us which columns differ
         // from the generated one: we fetch those from it while loading.
+        if m, ok := mode_arg.?; ok && start == .World { world_survival_save(save_dir, m) }
         server_open(&gs.server, saves = start != .Sandbox)
         server_greet_local(&gs.server, client_name(gs), resume = !start_at && start != .Sandbox)
         client_receive(gs, 0)
@@ -636,8 +647,11 @@ game_main :: proc() -> (relaunch: []string) {
         integrate_far_tiles(gs)
         stitch_pending_columns(gs)
 
-        // Edits with the current tool (build_tools.odin).
+        // Edits with the current tool (build_tools.odin), or the spell
+        // (survival: magic.odin), and trees coming down (felling.odin).
         build_update(gs, play_dt)
+        magic_update(gs, play_dt)
+        felling_update(gs, play_dt)
 
         flush_gpu_uploads(gs)
         gpu_fit_render_size(gs) // before the entity masks, which are per screen tile
@@ -686,7 +700,8 @@ pick_block :: proc(gs: ^Game_State) {
     hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), REACH, plants = true)
     if !ok { return }
     b := Block_Type(u8(get_voxel(gs, hit.x, hit.y, hit.z)))
-    if b == .Air || b == .Water { return }
+    if block_is_door(u8(b)) { b = .Door }
+    if b == .Air || b == .Water || (gs.survival && items_shown(gs, b) == 0) { return } // in survival, only what you carry
     for h, i in gs.hotbar {
         if h == b { hotbar_select(gs, i); return }
     }
@@ -749,7 +764,7 @@ on_key_down :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods, repeat, playi
             gs.jump_pressed = true
         } else {
             press_time := SDL.GetTicks()
-            if gs.space_last_press_ms > 0 && (press_time - gs.space_last_press_ms) <= DOUBLE_TAP_MS {
+            if gs.space_last_press_ms > 0 && (press_time - gs.space_last_press_ms) <= DOUBLE_TAP_MS && !gs.survival {
                 gs.camera.fly_mode = !gs.camera.fly_mode
                 gs.camera.velocity = {}
                 gs.space_last_press_ms = 0

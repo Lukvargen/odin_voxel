@@ -41,6 +41,13 @@ Server :: struct {
     names:        [MAX_PLAYERS]Msg_Text, // what each player is called (empty: not said yet)
     started:      time.Tick, // Msg_Clock.time counts from here
     guests_build: bool,      // the other players may change blocks (the host always can)
+    survival:     bool,      // the world's game mode (world_survival_load): everyone plays it
+    // Survival: what each player carries, the server's to count (items.odin);
+    // the last edit number counted, and whether they're due to hear it.
+    items:        [MAX_PLAYERS][Block_Type]u32,
+    items_seq:    [MAX_PLAYERS]u32,
+    items_due:    [MAX_PLAYERS]bool,
+    fell_grants:  [MAX_PLAYERS][FELL_SLOTS]Fell_Grant, // trees they may take down out of reach (items.odin)
     kicked:       [MAX_PLAYERS]bool, // sent away by the host, on its way out
     // Characters, by name (player_save.odin): those seen this session, and
     // what each slot's client last said it carries.
@@ -107,6 +114,7 @@ server_simulate :: proc(srv: ^Server, dt: f32) {
 // bytes, and the network's connections, departures and packets.
 server_receive :: proc(srv: ^Server) {
     defer server_save_away(srv)
+    defer server_items_tell(srv)
     server_handle(srv, srv.local_player, srv.link.to_server[:])
     clear(&srv.link.to_server)
     if srv.host == nil { return }
@@ -125,6 +133,17 @@ server_receive :: proc(srv: ^Server) {
         case .DISCONNECT:
             if slot := peer_slot(ev.peer); slot >= 0 { server_drop(srv, slot) }
         }
+    }
+}
+
+// Each player whose edits were counted hears the count.
+@(private="file")
+server_items_tell :: proc(srv: ^Server) {
+    for slot in 0 ..< MAX_PLAYERS {
+        if !srv.items_due[slot] { continue }
+        srv.items_due[slot] = false
+        if slot != srv.local_player && srv.remotes[slot].peer == nil { continue }
+        outbox_put(server_outbox(srv, slot), .Items, Msg_Items{seq = srv.items_seq[slot], items = srv.items[slot]})
     }
 }
 
@@ -158,7 +177,7 @@ server_greet :: proc(srv: ^Server, peer: ^enet.Peer, data: []u8) {
         peer.data = rawptr(uintptr(slot + 1))
         pos, yaw := arrival_point(srv)
         outbox_put(&rem.out, .Welcome, Msg_Welcome{slot = u8(slot), pos = pos, yaw = yaw})
-        outbox_put(&rem.out, .Rules, Msg_Rules{guests_build = srv.guests_build})
+        outbox_put(&rem.out, .Rules, Msg_Rules{guests_build = srv.guests_build, survival = srv.survival})
         server_send_edited(srv, &rem.out)
         for &name, s in srv.names {
             if name.len > 0 { outbox_put(&rem.out, .Player_Name, Msg_Player_Name{slot = u8(s), name = name}) }
@@ -217,7 +236,7 @@ server_may_build :: proc(srv: ^Server, slot: int) -> bool { return slot == srv.l
 server_set_guests_build :: proc(srv: ^Server, on: bool) {
     if srv.guests_build == on { return }
     srv.guests_build = on
-    server_broadcast(srv, .Rules, Msg_Rules{guests_build = on})
+    server_broadcast(srv, .Rules, Msg_Rules{guests_build = on, survival = srv.survival})
     server_notice(srv, on ? "Visitors can build again" : "The host turned off building for visitors")
 }
 
@@ -351,11 +370,26 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
                 if back.count > 0 { outbox_put(server_outbox(srv, player), .Voxels, back) }
                 break
             }
+            // Survival: what the player doesn't have can't be put down; it
+            // goes back as it really is.
+            if srv.survival { srv.items_seq[player], srv.items_due[player] = m.seq, true }
+            kept, back: Msg_Voxels
+            kept.seq = m.seq
             for v in m.items[:m.count] {
-                server_door_swing(srv, player, u8(get_voxel(srv.sim.world, int(v.pos.x), int(v.pos.y), int(v.pos.z))), v)
-                server_write(srv, la.array_cast(v.pos, int), v.block)
+                p := la.array_cast(v.pos, int)
+                cur := u8(get_voxel(srv.sim.world, p.x, p.y, p.z))
+                if srv.survival && !server_survival_edit(srv, player, p, v.block) {
+                    back.items[back.count] = {pos = v.pos, block = cur}
+                    back.count += 1
+                    continue
+                }
+                server_door_swing(srv, player, cur, v)
+                server_write(srv, p, v.block)
+                kept.items[kept.count] = v
+                kept.count += 1
             }
-            server_forward(srv, player, .Voxels, m)
+            if kept.count > 0 { server_forward(srv, player, .Voxels, kept) }
+            if back.count > 0 { outbox_put(server_outbox(srv, player), .Voxels, back) }
         case .Chunk_Voxels:
             m := msg_get(&r, Msg_Chunk_Voxels) or_break
             if chunk_y_index(int(m.key.y)) < 0 { break }
@@ -367,10 +401,31 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
                 break
             }
             base := la.array_cast(m.key, int) * CHUNK_VOXELS
+            refused := false
+            if srv.survival { srv.items_seq[player], srv.items_due[player] = m.seq, true }
             for v, vi in m.voxels {
-                server_write(srv, base + {vi & 7, (vi >> 3) & 7, vi >> 6}, v)
+                p := base + {vi & 7, (vi >> 3) & 7, vi >> 6}
+                if srv.survival && !server_survival_edit(srv, player, p, v) {
+                    refused = true
+                    continue
+                }
+                server_write(srv, p, v)
+            }
+            if refused {
+                // Some of it was turned down: the chunk as it really is, to
+                // the sender as well as the others.
+                if c := world_chunk(srv.sim.world, la.array_cast(m.key, int)); c != nil {
+                    for &v, vi in m.voxels { v = chunk_voxel(c, vi) }
+                    outbox_put(server_outbox(srv, player), .Chunk_Voxels, m)
+                }
             }
             server_forward(srv, player, .Chunk_Voxels, m)
+        case .Fell:
+            m := msg_get(&r, Msg_Fell) or_break
+            if server_fell(srv, player, m) {
+                m.slot = u8(player)
+                server_forward(srv, player, .Fell, m)
+            }
         case .Column_Request:
             key := msg_get(&r, [2]i32) or_break
             server_send_column(srv, server_outbox(srv, player), {int(key.x), int(key.y)})
@@ -385,6 +440,7 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
                 server_notice(srv, fmt.tprintf("%s joined", server_player_name(srv, player)))
                 // Been here before: back as they were; else a fresh start.
                 rec, known := player_record_find(srv, string(name.text[:name.len]))
+                server_items_restore(srv, player, rec, known)
                 outbox_put(server_outbox(srv, player), .Restore, Msg_Restore{known = known, move = known, record = rec})
             }
         case .Keep:
@@ -393,7 +449,7 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
         case .Say:
             m := msg_get(&r, Msg_Text) or_break
             if len(text_of(&m)) > 0 { server_broadcast(srv, .Chat_Line, Msg_Chat_Line{slot = u8(player), line = m}) }
-        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line, .Restore, .Rules:
+        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line, .Restore, .Rules, .Items:
             r.at = len(r.data) // not a connected client's to send: drop the rest
         }
     }

@@ -21,6 +21,11 @@ import enet "vendor:ENet"
 
 Client_Net :: struct {
     out:      Outbox,
+    // Survival (items.odin): edits numbered as sent, the server's last count,
+    // and our guesses for the edits it hasn't answered yet.
+    edit_seq:     u32,
+    items_base:   [Block_Type]u32,
+    item_guesses: [dynamic]Item_Guess,
     remote:   bool,       // joined a server elsewhere (for good: no own server if it drops)
     host:     ^enet.Host, // our end of it, while connected
     peer:     ^enet.Peer,
@@ -155,16 +160,19 @@ client_send_kept :: proc(gs: ^Game_State, now: bool) {
 @(private="file")
 client_restore :: proc(gs: ^Game_State, m: Msg_Restore) {
     rec := m.record
-    k := m.known ? rec.kept : PLAYER_FRESH
+    k := m.known ? rec.kept : (gs.survival ? survival_fresh() : PLAYER_FRESH)
     if m.move {
         client_arrive(gs, rec.pos, rec.yaw)
         gs.camera.pitch = rec.pitch
     }
-    gs.camera.fly_mode = m.known && rec.fly_mode && !k.glider
+    gs.camera.fly_mode = m.known && rec.fly_mode && !k.glider && !gs.survival
     gs.combat.sword = m.known && rec.sword
     gs.combat.hp = k.hp
     gs.glider.equipped = k.glider
     gs.hotbar = k.hotbar
+    gs.net.items_base = k.items // the server's Items says the same, right behind
+    clear(&gs.net.item_guesses)
+    client_items_sum(gs)
     hotbar_select(gs, int(k.hotbar_slot))
     gs.net.restored, gs.net.sent_kept = true, {} // and tell the server what we carry
 }
@@ -288,6 +296,12 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
         case .Restore:
             m := msg_get(&r, Msg_Restore) or_break
             client_restore(gs, m)
+        case .Items:
+            m := msg_get(&r, Msg_Items) or_break
+            client_items_heard(gs, m)
+        case .Fell:
+            m := msg_get(&r, Msg_Fell) or_break
+            felling_heard(gs, m)
         case .Player_Name:
             m := msg_get(&r, Msg_Player_Name) or_break
             if int(m.slot) < MAX_PLAYERS {
@@ -325,6 +339,8 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
         case .Rules:
             m := msg_get(&r, Msg_Rules) or_break
             if client_joined(gs) { gs.net.no_build = !m.guests_build }
+            gs.survival = m.survival
+            if m.survival { gs.camera.fly_mode = false }
         case .Voxels:
             m := msg_get(&r, Msg_Voxels) or_break
             changed := make([dynamic][3]int, 0, VOXEL_BATCH, context.temp_allocator)
@@ -468,20 +484,20 @@ replicas_update :: proc(gs: ^Game_State, dt: f32) {
 // Blocks this client just changed (build_commit), to the server, which
 // passes them on: as they are now, a chunk at a time where an edit changed
 // much of one.
-client_send_voxels :: proc(gs: ^Game_State, changed: [][3]int) {
+client_send_voxels :: proc(gs: ^Game_State, changed: [][3]int, seq: u32) {
     per_chunk := make(map[[3]int]int, 16, context.temp_allocator)
     for p in changed {
         per_chunk[{p.x >> 3, p.y >> 3, p.z >> 3}] += 1
         gs.net.edited[{p.x >> 3, p.z >> 3}] = true // streamed out and back in, it comes from the server
     }
-    m: Msg_Voxels
+    m := Msg_Voxels{seq = seq}
     for p in changed {
         key := [3]int{p.x >> 3, p.y >> 3, p.z >> 3}
         n := per_chunk[key]
         if n < 0 { continue } // this chunk already went whole
         if n > VOXEL_BATCH {
             per_chunk[key] = -1
-            whole := Msg_Chunk_Voxels{key = {i32(key.x), i32(key.y), i32(key.z)}}
+            whole := Msg_Chunk_Voxels{seq = seq, key = {i32(key.x), i32(key.y), i32(key.z)}}
             if c := world_chunk(gs, key); c != nil {
                 for &v, vi in whole.voxels { v = chunk_voxel(c, vi) }
                 client_send(gs, .Chunk_Voxels, whole)

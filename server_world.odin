@@ -33,7 +33,10 @@ Server_Loader :: struct {
 // none (saves = false: benches), and start loading.
 server_open :: proc(srv: ^Server, saves: bool) {
     w := &srv.world
-    if saves { w.save_enabled = world_open(w) }
+    if saves {
+        w.save_enabled = world_open(w)
+        srv.survival = world_survival_load(save_dir)
+    }
     srv.last_autosave = time.tick_now()
     l := &srv.loader
     l.running, l.started = true, true
@@ -181,6 +184,8 @@ server_wants :: proc(srv: ^Server, key: [2]int, radius: int) -> bool {
 // (back where they were too if `resume`), or fresh.
 server_greet_local :: proc(srv: ^Server, name: string, resume: bool) {
     rec, known := player_record_find(srv, name)
+    server_items_restore(srv, srv.local_player, rec, known)
+    outbox_put(&srv.local_out, .Rules, Msg_Rules{guests_build = srv.guests_build, survival = srv.survival})
     outbox_put(&srv.local_out, .Restore, Msg_Restore{known = known, move = known && resume, record = rec})
     server_send_edited(srv, &srv.local_out)
     outbox_move(&srv.local_out, &srv.link.to_client)

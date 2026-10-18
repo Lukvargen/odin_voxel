@@ -171,18 +171,19 @@ door_toggle :: proc(gs: ^Game_State, p: [3]int) -> bool {
 
 // Places a door on the face the crosshair hit (hit + nrm), facing the way
 // the player looks. Needs DOOR_PARTS blocks of room on solid ground.
-door_place :: proc(gs: ^Game_State, hit, nrm: [3]int) {
+// Whether it went in.
+door_place :: proc(gs: ^Game_State, hit, nrm: [3]int) -> bool {
     if !client_may_build(gs) {
         ui_toast(gs, "The host has turned off building for visitors", 1.5)
-        return
+        return false
     }
     base := hit
     if !block_is_land_plant(u8(get_voxel(gs, hit.x, hit.y, hit.z))) { base = hit + nrm }
-    if !solid_at(gs, base.x, base.y - 1, base.z) || base.y + DOOR_PARTS > WORLD_Y_MAX { return }
+    if !solid_at(gs, base.x, base.y - 1, base.z) || base.y + DOOR_PARTS > WORLD_Y_MAX { return false }
     for k in 0 ..< DOOR_PARTS {
         v := base + {0, k, 0}
         b := u8(get_voxel(gs, v.x, v.y, v.z))
-        if !(b == 0 || block_is_land_plant(b)) || aabb_hits_voxel(gs.camera.pos, v) { return }
+        if !(b == 0 || block_is_land_plant(b)) || aabb_hits_voxel(gs.camera.pos, v) { return false }
     }
 
     fwd := camera_flat_forward(gs.camera)
@@ -193,9 +194,9 @@ door_place :: proc(gs: ^Game_State, hit, nrm: [3]int) {
     blocks: [DOOR_PARTS]u8
     n := 0
     door_parts(pos[:], blocks[:], &n, base, d)
-    if build_set(gs, pos[:], blocks[:], undo = true) > 0 {
-        audio_edit(base, .Door, .Air, 0)
-    }
+    if build_set(gs, pos[:], blocks[:], undo = true) == 0 { return false }
+    audio_edit(base, .Door, .Air, 0)
+    return true
 }
 
 // Which side a new door at base hinges on: mirrored to a door beside it (a

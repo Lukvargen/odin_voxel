@@ -26,9 +26,10 @@ Menu_Page :: enum u8 { Title, Worlds }
 
 @(private="file")
 World_Entry :: struct {
-    name:    string,
-    columns: int,       // edited columns saved
-    played:  time.Time, // the newest file in it
+    name:     string,
+    columns:  int,       // edited columns saved
+    played:   time.Time, // the newest file in it
+    survival: bool,      // its game mode (save.odin)
 }
 
 @(private="file")
@@ -39,6 +40,7 @@ Main_Menu :: struct {
     clicked:  u64, // when the picked one was last clicked (ms): a second click soon after plays it
     new_name: Text_Field,
     note:     string, // why the new name won't do
+    survival: bool,   // a new world's game mode
     choice:   Menu_Choice,
 }
 
@@ -275,6 +277,7 @@ menu_worlds :: proc(gs: ^Game_State, m: ^Main_Menu) {
     }
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 8, padding = {0, 0, 4, 0}}}) {
         submitted := text_field(gs, clay.ID("NewWorldName"), &m.new_name, "New world", height = 44)
+        if menu_button(clay.ID("NewWorldMode"), m.survival ? "Survival" : "Creative", width = 120, height = 44, lit = m.survival) { m.survival = !m.survival }
         if menu_button(clay.ID("NewWorld"), "Create", width = 120, height = 44) || submitted { menu_new_world(m) }
     }
     if m.note != "" { text(m.note, COLOR_BAD, 13) }
@@ -289,6 +292,7 @@ menu_worlds :: proc(gs: ^Game_State, m: ^Main_Menu) {
 @(private="file")
 world_info :: proc(now: time.Time, w: World_Entry) -> string {
     edits := w.columns == 0 ? "new" : fmt.tprintf("%s chunk%s edited", thousands(w.columns), w.columns == 1 ? "" : "s")
+    if w.survival { edits = fmt.tprintf("Survival  ·  %s", edits) }
     if time.time_to_unix(w.played) <= 0 { return edits }
     s := time.duration_seconds(time.diff(w.played, now))
     ago: string
@@ -425,7 +429,7 @@ menu_scan_worlds :: proc(m: ^Main_Menu) {
     if err != nil { return }
     for d in dirs {
         if d.type != .Directory || strings.has_prefix(d.name, ".") { continue }
-        w := World_Entry{name = strings.clone(d.name), played = d.modification_time}
+        w := World_Entry{name = strings.clone(d.name), played = d.modification_time, survival = world_survival_load(d.fullpath)}
         files, _ := os.read_all_directory_by_path(d.fullpath, context.temp_allocator)
         for f in files {
             if strings.has_prefix(f.name, "c.") { w.columns += 1 }
@@ -458,7 +462,8 @@ menu_new_world :: proc(m: ^Main_Menu) {
     for w, i in m.worlds {
         if strings.equal_fold(w.name, name) { m.picked = i; m.note = "There's a world by that name already: picked it."; return }
     }
-    inject_at(&m.worlds, 0, World_Entry{name = strings.clone(name)})
+    inject_at(&m.worlds, 0, World_Entry{name = strings.clone(name), survival = m.survival})
+    if m.survival { world_survival_save(fmt.tprintf("saves/%s", name), true) }
     m.picked = 0
     m.new_name.len = 0
     m.choice = .World
