@@ -37,7 +37,6 @@ move /y "%OUT%\%NAME%.pdb" "dist\symbols\%VERSION%.pdb" >nul
 copy /y SDL3.dll "%OUT%\" >nul
 copy /y SDL3_ttf.dll "%OUT%\" >nul
 xcopy /e /i /q /y resources "%OUT%\resources" >nul
-copy /y packaging\README.txt "%OUT%\README.txt" >nul
 > "%OUT%\version.txt" echo %VERSION%
 
 set ZIP=dist\%NAME%-%VERSION%.zip
