@@ -80,5 +80,20 @@ bench_players_run :: proc(gs: ^Game_State) {
     path = fmt.tprintf("%s/players_hands.bmp", bench_shot_dir)
     bench_screenshot(gs, path)
     fmt.printf("bench players: wrote %s\n", path)
+
+    // Eye to eye: another player on the same ground, 2.5 m ahead, looking
+    // back level; our view level too. Their eyes should be on the screen's
+    // middle row (the body's eyes are at the camera's height).
+    others^ = {}
+    ahead := 2.5 * world_scale
+    cam.pos = eye_at(gs, x, z)
+    them := cam.pos + {0, 0, ahead}
+    put(&others[1], {active = true, pos = them, yaw = 180, on_ground = true})
+    cam.yaw, cam.pitch = 0, 0
+    for _ in 0 ..< 10 { entities_update(gs, 1.0 / 60.0) }
+    bench_measure(gs)
+    path = fmt.tprintf("%s/players_eyes.bmp", bench_shot_dir)
+    bench_screenshot(gs, path)
+    fmt.printf("bench players: wrote %s (the middle row through their eyes)\n", path)
     others^ = {}
 }

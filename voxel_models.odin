@@ -20,7 +20,7 @@ Model_Id :: enum u32 {
     // creatures.odin
     Fox_Body, Fox_Head, Fox_Leg, Fox_Tail,
     Bird_Body, Bird_Wing,
-    Hum_Head, Hum_Torso, Hum_Hand, Hum_Foot, Hum_Cape, // the player (Cube World style: no limbs)
+    Hum_Head, Hum_Torso, Hum_Arm, Hum_Fore, Hum_Hand, Hum_Leg, Hum_Cape, // the player (creatures.odin)
     // combat.odin, slime.odin
     Sword,      // grip at the origin, blade along +z
     Slime,      // 1 m cube-ish blob standing on its origin, face toward +z
@@ -103,7 +103,7 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Feather_Dark:  return {52, 36, 26}, 0
     case .Feather_White: return {236, 232, 222}, 0
     case .Beak:          return {232, 178, 40}, 0
-    case .Skin:          return {214, 164, 128}, 0
+    case .Skin:          return {190, 138, 104}, 0
     case .Hair:          return {84, 52, 30}, 0
     case .Shirt:         return {255, 255, 255}, PAL_TINT
     case .Shirt_Trim:    return {205, 205, 205}, PAL_TINT

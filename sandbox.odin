@@ -75,6 +75,7 @@ Sandbox :: struct {
     dragging:  bool, // turning the orbit with the pointer (the panel open)
     drag:      [2]f32,
     shot_dir:  string, // contact sheets, then quit (sandbox_shots)
+    close:     bool,   // `close`: the sheets framed on the head (faces)
     saved:     [1024]u8, // the view as last written to SANDBOX_STATE
     saved_len: int,
     save_t:    f32,
@@ -86,7 +87,7 @@ EXHIBIT_YAW    :: f32(math.PI) // all face the start: toward -z
 ENEMY_REST     :: f32(0.8)     // seconds between an attack's recovery and the next windup
 SHOT_TILE      :: 480          // a contact sheet's frames are this square
 
-// What the arguments asked for: `sandbox <name> anim=<anim> shot=<dir>`.
+// What the arguments asked for: `sandbox <name> anim=<anim> shot=<dir> [close]`.
 @(private="file")
 sandbox_ask: struct {
     kind:   Exhibit_Kind,
@@ -102,6 +103,8 @@ sandbox_arg :: proc(gs: ^Game_State, a: string) -> bool {
         sandbox_ask.anim = a[5:]
     case strings.has_prefix(a, "shot="):
         gs.sandbox.shot_dir = a[5:]
+    case a == "close":
+        gs.sandbox.close = true
     case:
         k, ok := exhibit_by_name(a)
         if !ok { return false }
@@ -609,6 +612,7 @@ sandbox_place_camera :: proc(gs: ^Game_State) {
     }
     target := x.pos + {0, size.height * 0.5 * world_scale, 0}
     if is_slime(sb.picked) { target.y = x.slime.pos.y + size.height * 0.5 * world_scale }
+    if sb.close { target.y = x.pos.y + size.height * 0.88 * world_scale } // the head
     dist := sb.zoom * (size.height * 1.2 + max(size.width, 1) * 0.5 + 0.8) * world_scale
     a, p := math.to_radians(sb.yaw), math.to_radians(sb.pitch)
     dir := [3]f32{math.sin(a) * math.cos(p), math.sin(p), math.cos(a) * math.cos(p)}
@@ -837,7 +841,7 @@ sandbox_shots :: proc(gs: ^Game_State) {
     sb := &gs.sandbox
     k := sb.picked
     x := &sb.exhibits[k]
-    sb.orbit, sb.turntable, sb.paused, sb.solo, sb.zoom = true, false, true, true, 0.8
+    sb.orbit, sb.turntable, sb.paused, sb.solo, sb.zoom = true, false, true, true, sb.close ? 0.22 : 0.8
     // Everything near streamed in, the far terrain too.
     sandbox_place_camera(gs)
     bench_teleport(gs, gs.camera.pos)

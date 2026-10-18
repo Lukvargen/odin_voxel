@@ -783,15 +783,12 @@ two_bone_ik :: proc(shoulder, target, pole: [3]f32, upper, lower: f32) -> (elbow
 // The sword in a fist at the end of an arm from `shoulder`: upper arm and
 // forearm meeting at an elbow bent toward `pole`. Out of reach, hand and
 // sword come back to where the straight arm ends.
-// arm = false: the fist alone (a body seen from outside: Cube World hands).
-sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: [3]f32, scale: f32 = 1, tint := PLAYER_TINT, arm := true) {
+sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: [3]f32, scale: f32 = 1, tint := PLAYER_TINT) {
     wrist := grip - edge * 0.075 * scale - blade * 0.012 * scale
     elbow, w := two_bone_ik(shoulder, wrist, pole, UPPER_ARM_LEN * scale, FOREARM_LEN * scale)
     g := grip + (w - wrist)
-    if arm {
-        ent_segment(f, .Arm_Upper, shoulder, elbow, pole, tint)
-        ent_segment(f, .Arm_Fore, elbow, w, pole, tint)
-    }
+    ent_segment(f, .Arm_Upper, shoulder, elbow, pole, tint)
+    ent_segment(f, .Arm_Fore, elbow, w, pole, tint)
     rot := basis_from_axes(edge, flat, blade)
     ent_part(f, .Fist, g, rot, {scale, scale, scale})
     ent_part(f, .Sword, g, rot)
