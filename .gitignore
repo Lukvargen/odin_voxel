@@ -9,3 +9,6 @@ saves/
 # Verification output
 screenshots/
 tools/_verify*.png
+
+# Release packages (package.bat)
+dist/

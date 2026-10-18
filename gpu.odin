@@ -200,7 +200,7 @@ gpu_fit_render_size :: proc(gs: ^Game_State) {
 // The SDL3 GPU device (SPIR-V shaders, debug mode on), on its own: the
 // main menu draws with it before there's a world to trace (gpu_init).
 gpu_device_init :: proc(gs: ^Game_State) {
-    gs.gpu_device = SDL.CreateGPUDevice({.SPIRV}, ODIN_DEBUG, nil)
+    gs.gpu_device = SDL.CreateGPUDevice({.SPIRV}, ODIN_DEBUG && !RELEASE, nil) // validation needs the Vulkan SDK: testers have none
     assert(gs.gpu_device != nil, "Failed to create GPU device")
     fmt.println("GPU driver:", SDL.GetGPUDeviceDriver(gs.gpu_device))
 }

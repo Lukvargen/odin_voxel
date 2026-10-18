@@ -150,6 +150,7 @@ Game_State :: struct {
 Start :: enum u8 { Menu, World, Sandbox }
 
 main :: proc() {
+    release_init() // release.odin: a tester's build runs from its folder, logging to log.txt
     if args := game_main(); args != nil { main_relaunch(args) } // "Main menu" (main_menu.odin)
 }
 
@@ -669,7 +670,7 @@ game_main :: proc() -> (relaunch: []string) {
 
         gs.prof_frames += 1
         if gs.prof_frames >= 300 {
-            profile_dump("last ~300 frames")
+            if !RELEASE { profile_dump("last ~300 frames") } // a tester's log.txt: the startup one is enough
             profile_reset()
             gs.prof_frames = 0
         }

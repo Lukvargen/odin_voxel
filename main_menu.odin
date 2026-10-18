@@ -246,6 +246,10 @@ menu_frame :: proc(gs: ^Game_State, m: ^Main_Menu, dt, wheel: f32) {
             menu_worlds(gs, m)
         }
     }
+    // Which build this is, for bug reports (release.odin).
+    if clay.UI(clay.ID("Version"))({layout = {padding = {0, 14, 0, 10}}, floating = {attachTo = .Root, attachment = {.RightBottom, .RightBottom}}}) {
+        text(GAME_VERSION, COLOR_TEXT_FAINT, 12)
+    }
     menu_end(gs)
 }
 
