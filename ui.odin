@@ -121,10 +121,20 @@ COLOR_SHADE        :: clay.Color{14, 12, 10, 255} // dark backing for HUD labels
 
 UI_RADIUS :: f32(3) // corners: no rounder than this, whatever's asked
 
+// Clay's complaints, the first few: one that repeats every frame (or in a
+// loop) would otherwise fill the disk through a tester's log.txt.
+CLAY_ERRORS_SHOWN :: 20
+
+@(private="file")
+clay_errors: int
+
 ui_error_handler :: proc "c" (errorData: clay.ErrorData) {
     context = runtime.default_context()
+    clay_errors += 1
+    if clay_errors > CLAY_ERRORS_SHOWN { return }
     msg := string(errorData.errorText.chars[:errorData.errorText.length])
     fmt.println("Clay error:", errorData.errorType, msg)
+    if clay_errors == CLAY_ERRORS_SHOWN { fmt.println("Clay error: (no more of these)") }
 }
 
 ui_measure_text :: proc "c" (text: clay.StringSlice, config: ^clay.TextElementConfig, userData: rawptr) -> clay.Dimensions {

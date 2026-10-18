@@ -255,29 +255,34 @@ menu_frame :: proc(gs: ^Game_State, m: ^Main_Menu, dt, wheel: f32) {
 
 @(private="file")
 menu_worlds :: proc(gs: ^Game_State, m: ^Main_Menu) {
-    if len(m.worlds) > 0 && clay.UI(clay.ID("WorldList"))({
-        layout = {layoutDirection = .TopToBottom, childGap = 6, sizing = {clay.SizingGrow(), clay.SizingFit({max = 290})}},
-        clip = {vertical = true, childOffset = clay.GetScrollOffset()},
-    }) {
-        now := time.now()
-        for w, i in m.worlds {
-            id := clay.ID("World", u32(i))
-            hovered := clay.PointerOver(id)
-            on := i == m.picked
-            d: Ui_Deco = on ? .Menu_Item_On : (hovered ? .Menu_Item_Hover : .Menu_Item)
-            if clay.UI(id)({
-                layout = {sizing = {clay.SizingGrow(), clay.SizingFixed(52)}, padding = {22, 18, 0, 0}, childGap = 12, childAlignment = {y = .Center}},
-                custom = deco(d, radius = 8),
-            }) {
-                text(w.name, on ? COLOR_ACCENT : COLOR_TEXT, 17, FONT_ID_TITLE)
-                spacer()
-                text(world_info(now, w), COLOR_TEXT_DIM, 13)
-            }
-            if hovered && gs_ui_left_pressed() {
-                now_ms := SDL.GetTicks()
-                if on && now_ms - m.clicked < 400 { m.choice = .World } // a double click plays it
-                m.picked, m.clicked = i, now_ms
-                play(.Click, 0.4)
+    // Not `len > 0 && clay.UI(...)`: the element's close is deferred to the
+    // end of the if, and would run without the open (an empty list hung
+    // Clay in a loop of errors).
+    if len(m.worlds) > 0 {
+        if clay.UI(clay.ID("WorldList"))({
+            layout = {layoutDirection = .TopToBottom, childGap = 6, sizing = {clay.SizingGrow(), clay.SizingFit({max = 290})}},
+            clip = {vertical = true, childOffset = clay.GetScrollOffset()},
+        }) {
+            now := time.now()
+            for w, i in m.worlds {
+                id := clay.ID("World", u32(i))
+                hovered := clay.PointerOver(id)
+                on := i == m.picked
+                d: Ui_Deco = on ? .Menu_Item_On : (hovered ? .Menu_Item_Hover : .Menu_Item)
+                if clay.UI(id)({
+                    layout = {sizing = {clay.SizingGrow(), clay.SizingFixed(52)}, padding = {22, 18, 0, 0}, childGap = 12, childAlignment = {y = .Center}},
+                    custom = deco(d, radius = 8),
+                }) {
+                    text(w.name, on ? COLOR_ACCENT : COLOR_TEXT, 17, FONT_ID_TITLE)
+                    spacer()
+                    text(world_info(now, w), COLOR_TEXT_DIM, 13)
+                }
+                if hovered && gs_ui_left_pressed() {
+                    now_ms := SDL.GetTicks()
+                    if on && now_ms - m.clicked < 400 { m.choice = .World } // a double click plays it
+                    m.picked, m.clicked = i, now_ms
+                    play(.Click, 0.4)
+                }
             }
         }
     }
@@ -512,8 +517,10 @@ main_menu_bench :: proc(gs: ^Game_State, dir: string, sizes: [][2]i32) {
         free(m)
     }
     menu_scan_worlds(m)
+    none := new_clone(Main_Menu{picked = -1, page = .Worlds}) // a fresh install: no saves/ yet
+    defer free(none)
     r := gs.ui.renderer_data.renderer
-    for name in ([]string{"title", "worlds", "loading"}) {
+    for name in ([]string{"title", "worlds", "worlds_none", "loading"}) {
         for sz in sizes {
             target := SDL.CreateTexture(r, .RGBA32, .TARGET, sz.x, sz.y)
             _ = SDL.SetRenderTarget(r, target)
@@ -522,6 +529,7 @@ main_menu_bench :: proc(gs: ^Game_State, dir: string, sizes: [][2]i32) {
                 switch name {
                 case "title":   m.page = .Title; menu_frame(gs, m, 1.0 / 60, 0)
                 case "worlds":  m.page = .Worlds; menu_frame(gs, m, 1.0 / 60, 0)
+                case "worlds_none": menu_frame(gs, none, 1.0 / 60, 0)
                 case "loading": main_menu_loading(gs, "world")
                 }
             }
