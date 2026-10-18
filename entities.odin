@@ -91,7 +91,7 @@ entities_update :: proc(gs: ^Game_State, dt: f32) {
         entities_upload(gs, {}, t)
         return
     }
-    if t >= birds_next_manage {
+    if t >= birds_next_manage && !gs.sandbox.on { // the sandbox has its own (sandbox.odin)
         t0 := time.tick_now()
         birds_manage(gs)
         profile_add(.Ent_Birds, t0)
@@ -249,6 +249,7 @@ entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
     mantle_add_parts(gs, frame)
     slimes_add_parts(gs, frame)
     enemies_add_parts(gs, frame)
+    sandbox_add_parts(gs, frame)
     fx_add_parts(gs, frame)
     for c in cands {
         e := gs.entities[c.idx]

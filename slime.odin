@@ -500,15 +500,20 @@ slimes_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     for &sl in s.list {
         if !sl.alive || la.length(sl.pos - eye) > ENTITY_CULL_RADIUS { continue }
         if !ent_begin(f) { return }
-        w := SLIME_KINDS[sl.size].width * min(sl.age * 5, 1) // popping into being
-        sq := sl.squash - clamp(abs(sl.vel.y) * 0.02, 0, 0.2) // stretched moving fast up or down
-        scale := [3]f32{w * (1 + sq * 0.5), w * (1 - sq), w * (1 + sq * 0.5)}
-        tint := la.lerp(sl.color, [3]f32{2.4, 2.4, 2.4}, sl.flash * 0.8)
-        pos := sl.pos
-        if sl.freeze > 0 { // shuddering on the blade
-            pos += [3]f32{rand.float32_range(-1, 1), rand.float32_range(-0.5, 0.5), rand.float32_range(-1, 1)} * (0.045 * w)
-        }
-        ent_part(f, .Slime, pos, basis_yaw(sl.yaw), scale, tint)
+        slime_add(f, &sl)
         ent_end(f)
     }
+}
+
+// One slime's part (also the entity sandbox's: sandbox.odin).
+slime_add :: proc(f: ^Ent_Frame, sl: ^Slime) {
+    w := SLIME_KINDS[sl.size].width * min(sl.age * 5, 1) // popping into being
+    sq := sl.squash - clamp(abs(sl.vel.y) * 0.02, 0, 0.2) // stretched moving fast up or down
+    scale := [3]f32{w * (1 + sq * 0.5), w * (1 - sq), w * (1 + sq * 0.5)}
+    tint := la.lerp(sl.color, [3]f32{2.4, 2.4, 2.4}, sl.flash * 0.8)
+    pos := sl.pos
+    if sl.freeze > 0 { // shuddering on the blade
+        pos += [3]f32{rand.float32_range(-1, 1), rand.float32_range(-0.5, 0.5), rand.float32_range(-1, 1)} * (0.045 * w)
+    }
+    ent_part(f, .Slime, pos, basis_yaw(sl.yaw), scale, tint)
 }

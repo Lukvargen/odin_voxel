@@ -172,12 +172,7 @@ enemy_spawn :: proc(sim: ^Sim, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
     s := &sim.enemies
     for &e in s.list {
         if e.alive { continue }
-        tint: [3]f32 = {1, 1, 1}
-        switch kind {
-        case .Skeleton:
-        case .Goblin: tint = la.lerp([3]f32{0.42, 0.56, 0.26}, [3]f32{0.52, 0.56, 0.30}, rand.float32())
-        case .Orc:    tint = la.lerp([3]f32{0.36, 0.44, 0.32}, [3]f32{0.50, 0.46, 0.34}, rand.float32())
-        }
+        tint := enemy_skin(kind, rand.float32())
         e = {
             alive = true, kind = kind, state = .Idle, pos = pos, home = pos, target = pos,
             yaw = rand.float32_range(0, 2 * math.PI), hp = ENEMY_SPECS[kind].hp,
@@ -188,6 +183,16 @@ enemy_spawn :: proc(sim: ^Sim, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
         return &e
     }
     return nil
+}
+
+// A kind's skin colour, k (0..1) along its range.
+enemy_skin :: proc(kind: Enemy_Kind, k: f32) -> [3]f32 {
+    switch kind {
+    case .Skeleton:
+    case .Goblin: return la.lerp([3]f32{0.42, 0.56, 0.26}, [3]f32{0.52, 0.56, 0.30}, k)
+    case .Orc:    return la.lerp([3]f32{0.36, 0.44, 0.32}, [3]f32{0.50, 0.46, 0.34}, k)
+    }
+    return {1, 1, 1}
 }
 
 // ─── Update ─────────────────────────────────────────────────────────────────
@@ -729,7 +734,7 @@ enemies_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     }
 }
 
-@(private="file")
+// Also the entity sandbox's (sandbox.odin), on enemies it poses itself.
 enemy_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
     sp := ENEMY_SPECS[e.kind]
     rig := ENEMY_RIGS[e.kind]

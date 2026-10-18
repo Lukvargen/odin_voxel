@@ -2,6 +2,7 @@ package main
 
 import "core:fmt"
 import "core:os"
+import "core:slice"
 import "core:strconv"
 import "core:strings"
 import SDL "vendor:sdl3"
@@ -138,10 +139,22 @@ Game_State :: struct {
 
     // UI
     ui: UI_State,
+    sandbox: Sandbox, // the entity sandbox, when that's what's open (sandbox.odin)
 }
 
+// Where the game starts: the main menu, a world, or the entity sandbox.
+Start :: enum u8 { Menu, World, Sandbox }
+
 main :: proc() {
-    gs: Game_State
+    if args := game_main(); args != nil { main_relaunch(args) } // "Main menu" (main_menu.odin)
+}
+
+// The game, from the arguments to the end; the arguments to start it again
+// with when the player asked for the main menu (nil otherwise).
+game_main :: proc() -> (relaunch: []string) {
+    // On the heap: the UI, the server and the workers keep pointers into it.
+    gs := new(Game_State)
+    defer free(gs)
     // (the server points the simulation at its own world: server_init)
     net_host, net_port, join_to := false, NET_PORT, ""
     {
@@ -153,6 +166,9 @@ main :: proc() {
     }
     start_yaw: f32
     start_at: bool // at= given: start there, not where we were last
+    start := Start.Menu
+    window: [4]i32 // window=: where it was last run (x, y, w, h)
+    window_given, no_focus := false, false
     server_init(&gs.server, &gs.sim, &gs.loop)
     bench := len(os.args) > 1 && os.args[1] == "bench"
     if len(os.args) > 1 && os.args[1] == "caves" { // the ground cut open (cave_map.odin)
@@ -194,7 +210,7 @@ main :: proc() {
     gs.torch.floor      = 0.35
     gs.far_enabled      = true
     gs.camera.pos     = find_spawn()
-    day_init(&gs)
+    day_init(gs)
     if bench {
         // bench [quick] [at=x,z] [shot_dir]
         world_scale_apply(TERRAIN_SCALE) // the player's size (scale.odin)
@@ -230,7 +246,7 @@ main :: proc() {
             case a == "shade": bench_shade = true
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
-                day_set_hour(&gs, h, settle = true)
+                day_set_hour(gs, h, settle = true)
             case a == "gi=0": gs.gi.enabled = false // bounce light from the stand-in only (gi.odin)
             // Shots only: the Short view distance loads ~5x faster than
             // Far (voxels end at 192 blocks, the far terrain beyond).
@@ -262,11 +278,17 @@ main :: proc() {
             }
         }
     } else {
-        // [world=<name>]: play the world saved in saves/<name> (default "world").
+        // No arguments: the main menu (main_menu.odin). [menu]: that too,
+        // whatever else is given.
+        // [world=<name>]: play the world saved in saves/<name>.
         // [host] [port=<n>]: let players elsewhere join (UDP port, default NET_PORT).
         // [join=<address>[:<port>]]: play on someone's server instead.
         // [at=<x>,<z>] [yaw=<degrees>]: start there, facing that way. [hour=<h>]: at that time.
         // [name=<name>]: what other players see you called (else your user name).
+        // [sandbox] [<creature>] [anim=<anim>] [shot=<dir>]: the entity
+        // sandbox, looking at that creature (sandbox.odin).
+        // [window=<x>,<y>,<w>,<h>]: the window there. [nofocus]: the window
+        // opens without taking the keyboard (tools/sandbox_watch.ps1).
         // The player's size first: what follows (at=) places the player by it.
         for a in os.args[1:] {
             if !strings.has_prefix(a, "scale=") { continue }
@@ -277,6 +299,7 @@ main :: proc() {
             switch {
             case strings.has_prefix(a, "at="):
                 start_at = true
+                if start == .Menu { start = .World }
                 xz := strings.split(a[3:], ",", context.temp_allocator)
                 if len(xz) == 2 {
                     x, okx := strconv.parse_int(xz[0])
@@ -289,25 +312,40 @@ main :: proc() {
             case a == "f3": gs.ui.debug_open = true // the debug panel open from the start (checking things without input)
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
-                day_set_hour(&gs, clamp(h, 0, 23.99), settle = true)
+                day_set_hour(gs, clamp(h, 0, 23.99), settle = true)
             case strings.has_prefix(a, "scale="): // done first, below
             case strings.has_prefix(a, "name="):
                 t := text_set(a[5:], NAME_MAX)
                 gs.ui.name_field.len = copy(gs.ui.name_field.buf[:], t.text[:t.len])
             case strings.has_prefix(a, "world="):
                 save_dir = strings.concatenate({"saves/", a[6:]})
+                if start == .Menu { start = .World }
             case a == "host":
                 net_host = true
+                if start == .Menu { start = .World }
             case strings.has_prefix(a, "port="):
                 p, ok := strconv.parse_int(a[5:])
                 if ok && p > 0 && p < 65536 { net_port = p } else { fmt.eprintln("Bad port:", a[5:]) }
             case strings.has_prefix(a, "join="):
                 join_to = a[5:]
+                if start == .Menu { start = .World }
+            case a == "sandbox":
+                start = .Sandbox
+            case a == "menu":
+            case strings.has_prefix(a, "window="):
+                window, window_given = parse_rect(a[7:])
+            case a == "nofocus":
+                no_focus = true
+            case sandbox_arg(gs, a):
+                start = .Sandbox
             case:
                 fmt.eprintln("Unknown argument:", a)
             }
         }
+        if slice.contains(os.args[1:], "menu") { start = .Menu }
     }
+    shots := start == .Sandbox && gs.sandbox.shot_dir != "" // contact sheets, no window to see (sandbox_shots)
+    if start == .Sandbox && !window_given { window, window_given = sandbox_saved_window() }
     gs.camera.yaw     = start_yaw
     gs.camera.pitch   = -20
     gs.camera.fly_mode = false // start in walk mode
@@ -325,17 +363,21 @@ main :: proc() {
     defer SDL.Quit()
 
     // Bench runs hidden and unfocusable so it never interrupts the user.
-    window_flags: SDL.WindowFlags = bench ? {.HIDDEN, .NOT_FOCUSABLE} : {.RESIZABLE}
+    window_flags: SDL.WindowFlags = bench || shots ? {.HIDDEN, .NOT_FOCUSABLE} : {.RESIZABLE}
     // The bench keeps a fixed square view so its timings and shots compare.
     win_w, win_h := i32(WINDOW_W), i32(WINDOW_H)
     if bench { win_w, win_h = BENCH_RENDER_W, BENCH_RENDER_H }
-    gs.window = SDL.CreateWindow("Voxel Raytracer", win_w, win_h, window_flags)
+    if shots { win_w, win_h = SHOT_TILE, SHOT_TILE }
+    if window_given && !bench && !shots { win_w, win_h = window[2], window[3] }
+    if no_focus { SDL.SetHint(SDL.HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0") }
+    gs.window = SDL.CreateWindow(GAME_NAME, win_w, win_h, window_flags)
     if gs.window == nil {
         fmt.eprintln("CreateWindow failed:", SDL.GetError())
         return
     }
     defer SDL.DestroyWindow(gs.window)
-    gs.render_w, gs.render_h = render_size(&gs)
+    if window_given && !bench && !shots { _ = SDL.SetWindowPosition(gs.window, window[0], window[1]) }
+    gs.render_w, gs.render_h = render_size(gs)
 
     // GPU + world setup
     worker_pool_start(&gs.pool)
@@ -347,6 +389,27 @@ main :: proc() {
     defer delete(gs.light_starved)
     defer delete(gs.brick_starved)
     defer delete(gs.stitch_queue)
+    gpu_device_init(gs)
+    defer gpu_device_destroy(gs) // last: the UI's renderer shares it
+
+    // The UI first: the main menu draws with it, before there's a world.
+    if !bench {
+        ui_init(gs)
+        if !shots { audio_init() } // bench runs and contact sheets stay silent
+    }
+    defer if !bench { ui_shutdown(gs) } // benches that draw the HUD make their own
+    defer if !bench && !shots { audio_shutdown() }
+    if start == .Menu && !bench {
+        choice, world := main_menu_run(gs)
+        switch choice {
+        case .None, .Quit: return
+        case .World:       save_dir = strings.concatenate({"saves/", world})
+        case .Sandbox:     start = .Sandbox
+        }
+    }
+    if start == .Sandbox { sandbox_begin(gs) } // before the world is made: it's flat
+    if !bench && !shots { main_menu_loading(gs, start == .Sandbox ? "the Entity Sandbox" : save_dir[len("saves/"):]) }
+
     if bench {
         // Benches drive the simulation directly, in the world they look at:
         // the generated one, or with world= a saved one's edits (never saved).
@@ -358,40 +421,41 @@ main :: proc() {
     } else {
         // Our own server opens the world and tells us which columns differ
         // from the generated one: we fetch those from it while loading.
-        server_open(&gs.server, saves = true)
-        server_greet_local(&gs.server, client_name(&gs), resume = !start_at)
-        client_receive(&gs, 0)
+        server_open(&gs.server, saves = start != .Sandbox)
+        server_greet_local(&gs.server, client_name(gs), resume = !start_at && start != .Sandbox)
+        client_receive(gs, 0)
     }
     defer server_close(&gs.server)
-    generate_world(&gs)
-    gpu_init(&gs)
-    defer gpu_destroy(&gs)
-    entities_init(&gs)
+    generate_world(gs)
+    gpu_init(gs)
+    defer gpu_destroy(gs)
+    if !bench { ui_rewrap_out_texture(gs) } // the UI was made before there was a frame to show
+    if start != .Sandbox { entities_init(gs) } // foxes and crystals about
     defer delete(gs.entities)
 
     if bench {
-        bench_run(&gs)
+        bench_run(gs)
+        return
+    }
+    if shots {
+        sandbox_shots(gs)
         return
     }
 
-    ui_init(&gs)
-    defer ui_shutdown(&gs)
-    if world_in_use { ui_toast(&gs, "This world is open in another game: playing without saving", 6) }
-    audio_init() // after the bench return: bench runs stay silent
-    defer audio_shutdown()
+    if world_in_use { ui_toast(gs, "This world is open in another game: playing without saving", 6) }
 
     // Multiplayer from the command line: join someone's game, or open ours
     // (the pause menu's Multiplayer tab does the same). Failing, play alone.
-    defer session_shutdown(&gs)
+    defer session_shutdown(gs)
     if join_to != "" {
-        session_join(&gs, join_to)
+        session_join(gs, join_to)
     } else if net_host {
-        session_host(&gs, net_port)
+        session_host(gs, net_port)
     }
 
-    // Lock mouse at start
-    _ = SDL.SetWindowRelativeMouseMode(gs.window, true)
-    gs.mouse_locked = true
+    // Lock mouse at start (not with the sandbox's panel open)
+    gs.mouse_locked = gs.ui.screen == .None
+    _ = SDL.SetWindowRelativeMouseMode(gs.window, gs.mouse_locked)
 
     gs.last_ticks = SDL.GetTicks()
 
@@ -415,15 +479,16 @@ main :: proc() {
 
         event: SDL.Event
         for SDL.PollEvent(&event) {
+            if gs.sandbox.on && sandbox_event(gs, &event) { continue }
             #partial switch event.type {
             case .QUIT:
                 quit = true
 
             case .TEXT_INPUT:
-                ui_type_text(&gs, string(event.text.text))
+                ui_type_text(gs, string(event.text.text))
 
             case .KEY_DOWN:
-                if on_key_down(&gs, event.key.key, key_mods(event.key.mod), event.key.repeat, playing) { dodge_pressed = true }
+                if on_key_down(gs, event.key.key, key_mods(event.key.mod), event.key.repeat, playing) { dodge_pressed = true }
 
             case .MOUSE_MOTION:
                 if gs.mouse_locked {
@@ -441,7 +506,7 @@ main :: proc() {
                     switch event.button.button {
                     case 1: gs.left_held  = true; gs.left_pressed  = true
                     case 3: gs.right_held = true; gs.right_pressed = true
-                    case 2: pick_block(&gs)
+                    case 2: pick_block(gs)
                     }
                 } else {
                     gs.ui.mouse_pos = {event.button.x, event.button.y}
@@ -458,7 +523,8 @@ main :: proc() {
             }
         }
 
-        if gs.ui.quit_requested { quit = true }
+        if gs.ui.menu_requested { relaunch = main_menu_args(gs) }
+        if gs.ui.quit_requested || gs.ui.menu_requested { quit = true }
         if quit {
             break
         }
@@ -488,63 +554,67 @@ main :: proc() {
         // Light dir: hold L + look direction. The sun is the server's, so
         // everyone sees it (until the clock is set or restarted, options);
         // only the host may aim it.
-        if held(kb, keys_free, .L) && !client_joined(&gs) {
+        if held(kb, keys_free, .L) && !client_joined(gs) {
             fwd := camera_forward(gs.camera)
             gs.day.sun = fwd // ours now; the server's says the same next step
-            client_send(&gs, .Set_Sun, fwd)
+            client_send(gs, .Set_Sun, fwd)
         }
-        sky_update(&gs, dt) // the clock ticks in the server (server_simulate)
+        sky_update(gs, dt) // the clock ticks in the server (server_simulate)
 
         // The wheel walks the hotbar (down = next) or sizes the current
         // tool (up = bigger), by the modifiers held (build_tools.odin).
         if wheel_dy != 0 && gs.mouse_locked && !gs.glider.deployed {
-            if gs.combat.sword { combat_toggle_sword(&gs) }
-            build_wheel(&gs, wheel_dy > 0 ? 1 : -1, held_mods())
+            if gs.combat.sword { combat_toggle_sword(gs) }
+            build_wheel(gs, wheel_dy > 0 ? 1 : -1, held_mods())
         }
 
         // Playing alone, the pause menu stops everything; with others about
         // (hosting or joined) nothing stops, and a menu or the inventory only
         // takes the keys and mouse: the player still falls, glides, is hit.
-        play_dt := game_paused(&gs) ? 0 : dt
+        play_dt := game_paused(gs) ? 0 : dt
 
         // A solid hit freezes the world for a few frames (hit stop); the
         // mouse still looks around.
-        fx_dt := combat_fx_dt(&gs, play_dt)
+        fx_dt := combat_fx_dt(gs, play_dt)
         combat_in := Combat_Input{
             attack = gs.left_pressed, attack_held = gs.left_held, special = gs.right_pressed, dodge = dodge_pressed,
             block = held(kb, keys_free, .F),
             move = {f32(int(move_right)) - f32(int(move_left)), f32(int(move_fwd)) - f32(int(move_back))},
         }
         if !gs.mouse_locked { combat_in = {} }
-        combat_pre_update(&gs, combat_in, play_dt)
+        combat_pre_update(gs, combat_in, play_dt)
 
-        if play_dt > 0 {
+        // The sandbox's camera circling a creature, until a move key frees it.
+        orbiting := gs.sandbox.on && gs.sandbox.orbit
+        if orbiting && (move_fwd || move_back || move_left || move_right) { gs.sandbox.orbit, orbiting = false, false }
+        if play_dt > 0 && !orbiting {
             if gs.glider.deployed {
                 // W pulls the bar in (fast), S flares (brake), A/D lean, Ctrl looks around.
-                glider_update(&gs, -mouse_dx, mouse_dy, play_dt,
+                glider_update(gs, -mouse_dx, mouse_dy, play_dt,
                     move_fwd, move_back, move_left, move_right, ctrl_held && gs.mouse_locked)
             } else {
-                camera_update(&gs.camera, &gs, -mouse_dx, mouse_dy, play_dt,
+                camera_update(&gs.camera, gs, -mouse_dx, mouse_dy, play_dt,
                     move_fwd, move_back, move_left, move_right, gs.jump_pressed,
                     sprint, sneak, ultra)
             }
         }
-        combat_post_update(&gs, play_dt)
+        combat_post_update(gs, play_dt)
 
         // The world moves on: this client tells the server about its player
         // (and its sword's hits, sent above), the server steps, and the
         // client plays what happened.
-        client_send_input(&gs)
-        if !client_joined(&gs) { server_step(&gs.server, play_dt) }
-        client_receive(&gs, play_dt)
-        fx_update(&gs, fx_dt)
-        glider_view_update(&gs, play_dt)
-        combat_view_update(&gs, play_dt)
+        client_send_input(gs)
+        if !client_joined(gs) { server_step(&gs.server, play_dt) }
+        client_receive(gs, play_dt)
+        fx_update(gs, fx_dt)
+        glider_view_update(gs, play_dt)
+        combat_view_update(gs, play_dt)
+        if gs.sandbox.on { sandbox_update(gs, dt, {mouse_dx, mouse_dy}) }
 
         // Underground-ness (0 surface .. 1 deep below): drives cave darkness
         // and cave fog in the shaders. Smoothed ~0.5 s so moving through a
         // cave mouth reads as eye adaptation instead of a pop.
-        gs.cave_factor += (cave_factor_target(&gs) - gs.cave_factor) * min(1.0, play_dt * 2.0)
+        gs.cave_factor += (cave_factor_target(gs) - gs.cave_factor) * min(1.0, play_dt * 2.0)
 
         // Enqueue new chunks when crossing a chunk boundary
         new_pc := [3]int{
@@ -555,26 +625,26 @@ main :: proc() {
         if new_pc != gs.player_chunk {
             gs.player_chunk = new_pc
             worker_pool_set_player(&gs.pool, new_pc[0], new_pc[2])
-            enqueue_chunks(&gs)
+            enqueue_chunks(gs)
         }
 
         // Integrate finished chunks from worker threads
         flat := camera_flat_forward(gs.camera)
         worker_pool_set_view(&gs.pool, flat.x, flat.z)
-        integrate_ready_chunks(&gs)
-        far_enqueue(&gs)
-        integrate_far_tiles(&gs)
-        stitch_pending_columns(&gs)
+        integrate_ready_chunks(gs)
+        far_enqueue(gs)
+        integrate_far_tiles(gs)
+        stitch_pending_columns(gs)
 
         // Edits with the current tool (build_tools.odin).
-        build_update(&gs, play_dt)
+        build_update(gs, play_dt)
 
-        flush_gpu_uploads(&gs)
-        gpu_fit_render_size(&gs) // before the entity masks, which are per screen tile
-        entities_update(&gs, fx_dt)
-        audio_update(&gs, dt)
-        gpu_render_timed(&gs)
-        ui_build_and_render(&gs, dt)
+        flush_gpu_uploads(gs)
+        gpu_fit_render_size(gs) // before the entity masks, which are per screen tile
+        entities_update(gs, fx_dt)
+        audio_update(gs, dt)
+        gpu_render_timed(gs)
+        ui_build_and_render(gs, dt)
 
         free_all(context.temp_allocator)
 
@@ -585,6 +655,7 @@ main :: proc() {
             gs.prof_frames = 0
         }
     }
+    return
 }
 
 HOTBAR_SLOTS :: 9
@@ -658,6 +729,7 @@ on_key_down :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods, repeat, playi
             ui_toast(gs, audio.muted ? "Sound muted" : "Sound on")
         }
     }
+    if sandbox_key(gs, key, mods) { return }
     if !playing { return }
     // Movement keys: the modifiers are movement too (Ctrl sprints,
     // Alt flies fast, Shift sneaks or dodges), so these never care.

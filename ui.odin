@@ -10,8 +10,9 @@ package main
 // what you hit. Gliding, nothing but where you're steering while looking
 // around (the flight shows in the world). The controls card on H, the debug
 // panel on F3; F1 hides it all.
-// Screens: the pause menu (Esc) with graphics / sound / controls tabs, and the
-// block picker (E).
+// Screens: the pause menu (Esc) with graphics / sound / controls tabs, the
+// block picker (E), and in the entity sandbox its panel (Tab, sandbox.odin).
+// Before a world is open, the main menu (main_menu.odin).
 
 import "core:c"
 import "core:fmt"
@@ -31,7 +32,7 @@ BIOME_SECONDS        :: 3.5 // a biome's name shows this long on entering it
 TOAST_SECONDS        :: 1.8
 BLOCK_NAME_SECONDS   :: 1.6
 
-Ui_Screen :: enum u8 { None, Pause, Inventory }
+Ui_Screen :: enum u8 { None, Pause, Inventory, Sandbox } // Sandbox: its panel (sandbox.odin)
 Menu_Tab  :: enum u8 { Graphics, Sound, Controls, Multiplayer }
 
 // A one-line text box's contents (text_field).
@@ -50,6 +51,7 @@ UI_State :: struct {
     screen:         Ui_Screen,
     menu_tab:       Menu_Tab,
     quit_requested: bool, // "Save and quit" in the menu
+    menu_requested: bool, // "Main menu": the same, then the game starts again at the main menu (main_menu.odin)
     typing:         ^Text_Field, // the text box keys go to, nil if none
     field_hovered:  bool,        // a text box is under the pointer this frame
     join_field:     Text_Field,  // Multiplayer tab: address to join...
@@ -184,6 +186,7 @@ ui_rewrap_out_texture :: proc(gs: ^Game_State) {
         SDL.DestroyTexture(ui.out_tex)
         ui.out_tex = nil
     }
+    if gs.out_texture == nil { return } // the main menu: nothing traced yet
     props := SDL.CreateProperties()
     SDL.SetPointerProperty(props, SDL.PROP_TEXTURE_CREATE_GPU_TEXTURE_POINTER, gs.out_texture)
     SDL.SetNumberProperty(props, SDL.PROP_TEXTURE_CREATE_ACCESS_NUMBER, i64(SDL.TextureAccess.STATIC))
@@ -339,7 +342,9 @@ ui_draw :: proc(gs: ^Game_State, dt: f32) {
     case .None:
     case .Pause:     menu_layout(gs)
     case .Inventory: inventory_layout(gs)
+    case .Sandbox:   // drawn by sandbox_layout
     }
+    if gs.sandbox.on { sandbox_layout(gs, fw, fh) }
     cmds := clay.EndLayout()
 
     r := ui.renderer_data.renderer
@@ -366,6 +371,8 @@ Ui_Deco :: enum u8 {
     Slot, Slot_Hover, Slot_On,
     Tooltip,
     Shape_Icon, Shape_Icon_On, // a building shape's outline (build HUD)
+    Backdrop,                  // the main menu's sky and hills (main_menu.odin)
+    Menu_Item, Menu_Item_Hover, Menu_Item_On, // the main menu's buttons and rows
 }
 
 Ui_Custom :: struct {
@@ -376,7 +383,6 @@ Ui_Custom :: struct {
     shape:  Build_Shape,
 }
 
-@(private="file")
 deco :: proc(d: Ui_Deco, block := Block_Type.Air, radius: f32 = 8, alpha: f32 = 1, shape := Build_Shape.Sphere) -> clay.CustomElementConfig {
     p := new(Ui_Custom, context.temp_allocator)
     p^ = {deco = d, block = block, radius = radius, alpha = alpha, shape = shape}
@@ -478,6 +484,16 @@ ui_draw_custom :: proc(rd: ^Clay_SDL3RendererData, rect: SDL.FRect, data: rawptr
     case .Shape_Icon_On:
         flat(r, rect, d.radius, COLOR_BUTTON, COLOR_ACCENT, 1)
         draw_shape_icon(r, rect, d.shape, COLOR_ACCENT)
+    case .Backdrop:
+        menu_backdrop(r, rect)
+    case .Menu_Item:
+        flat(r, rect, d.radius, {24, 24, 37, 200}, COLOR_PANEL_BORDER, 1)
+    case .Menu_Item_Hover, .Menu_Item_On:
+        // Lit: brighter, an accent bar down the left edge (and a border when picked).
+        flat(r, rect, d.radius, {49, 50, 68, 235}, d.deco == .Menu_Item_On ? COLOR_ACCENT : COLOR_PANEL_BORDER, d.deco == .Menu_Item_On ? 2 : 1)
+        bar := SDL.FRect{rect.x + 7, rect.y + rect.h * 0.28, 3, rect.h * 0.44}
+        c := fcol(COLOR_ACCENT)
+        round_rect(r, bar, 1.5, c, c)
     }
 }
 
@@ -533,25 +549,21 @@ draw_shape_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, shape: Build_Shape, c
 
 // ─── Small pieces ──────────────────────────────────────────────────────────
 
-@(private="file")
 text :: proc(s: string, color := COLOR_TEXT, size: u16 = 16, font: u16 = FONT_ID_BODY) {
     clay.TextDynamic(s, clay.TextConfig({textColor = color, fontId = font, fontSize = size}))
 }
 
 // Fades a color's alpha; quantized so fading text doesn't flood the text cache.
-@(private="file")
 fade :: proc(col: clay.Color, a: f32) -> clay.Color {
     q := math.round(clamp(a, 0, 1) * 16) / 16
     return {col.r, col.g, col.b, col.a * q}
 }
 
-@(private="file")
 spacer :: proc() {
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}}}) {}
 }
 
 // A thin rule that fades out to both ends.
-@(private="file")
 divider :: proc() {
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFixed(1)}}}) {
         for a in ([3]f32{0.3, 1, 0.3}) {
@@ -562,7 +574,6 @@ divider :: proc() {
 }
 
 // Floating at an anchor of the screen, not taking the pointer.
-@(private="file")
 anchored :: proc(at: clay.FloatingAttachPointType, offset: [2]f32, z: i16 = 10) -> clay.FloatingElementConfig {
     return {
         attachTo = .Root, offset = transmute(clay.Vector2)offset, zIndex = z,
@@ -572,7 +583,6 @@ anchored :: proc(at: clay.FloatingAttachPointType, offset: [2]f32, z: i16 = 10) 
 }
 
 // A section heading: an amber tick, then the words.
-@(private="file")
 heading :: proc(s: string, a: f32 = 1) {
     if clay.UI()({layout = {childGap = 7, childAlignment = {y = .Center}}}) {
         if clay.UI()({layout = {sizing = {clay.SizingFixed(3), clay.SizingFixed(13)}},
@@ -1247,7 +1257,6 @@ thousands :: proc(n: int) -> string {
 }
 
 // A key as a small cap: "Ctrl", "Wheel", "T". Lit while it's what the wheel uses.
-@(private="file")
 keycap :: proc(label: string, hot := false) {
     if label == "" { return }
     if clay.UI()({
@@ -1291,13 +1300,11 @@ tool_tab :: proc(label: string, on: bool) {
     }
 }
 
-@(private="file")
 hint :: proc(s: string) {
     if clay.UI()({layout = {padding = {6, 0, 1, 0}}}) { text(s, COLOR_TEXT_FAINT, 11) }
 }
 
 // Key, then what it does.
-@(private="file")
 key_row :: proc(key, what: string, a: f32 = 1, key_width: f32 = 92) {
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 8, childAlignment = {y = .Center}}}) {
         if clay.UI()({layout = {sizing = {clay.SizingFixed(key_width), clay.SizingFit()}}}) {
@@ -1445,13 +1452,12 @@ glider_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
 
 // ─── Pause menu ────────────────────────────────────────────────────────────
 
-@(private="file")
-button :: proc(id: clay.ElementId, label: string, selected := false, width: f32 = 0, danger := false) -> (clicked: bool) {
+button :: proc(id: clay.ElementId, label: string, selected := false, width: f32 = 0, danger := false, height: f32 = 32) -> (clicked: bool) {
     hovered := clay.PointerOver(id)
     d: Ui_Deco = selected ? (hovered ? .Button_On_Hover : .Button_On) : (hovered ? .Button_Hover : .Button)
     if clay.UI(id)({
         layout = {
-            sizing = {width > 0 ? clay.SizingFixed(width) : clay.SizingGrow(), clay.SizingFixed(32)},
+            sizing = {width > 0 ? clay.SizingFixed(width) : clay.SizingGrow(), clay.SizingFixed(height)},
             padding = {10, 10, 0, 0},
             childAlignment = {x = .Center, y = .Center},
         },
@@ -1466,12 +1472,10 @@ button :: proc(id: clay.ElementId, label: string, selected := false, width: f32 
 }
 
 // A settings row: `if clay.UI()(setting_row()) { row_label("..."); control }`.
-@(private="file")
 setting_row :: proc() -> clay.ElementDeclaration {
     return {layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 12, childAlignment = {y = .Center}}}
 }
 
-@(private="file")
 row_label :: proc(label: string) {
     if clay.UI()({layout = {sizing = {clay.SizingFixed(130), clay.SizingFit()}}}) {
         text(label, COLOR_TEXT, 15)
@@ -1479,7 +1483,6 @@ row_label :: proc(label: string) {
 }
 
 // A row of buttons, one selected. Returns the clicked index or -1.
-@(private="file")
 segmented :: proc(id: string, labels: []string, selected: int) -> int {
     clicked := -1
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 5}}) {
@@ -1490,14 +1493,12 @@ segmented :: proc(id: string, labels: []string, selected: int) -> int {
     return clicked
 }
 
-@(private="file")
 toggle :: proc(id: string, value: ^bool) {
     if i := segmented(id, {"On", "Off"}, value^ ? 0 : 1); i >= 0 { value^ = i == 0 }
 }
 
 // A one-line text box: click it to type; true when Enter is pressed in it.
-@(private="file")
-text_field :: proc(gs: ^Game_State, id: clay.ElementId, f: ^Text_Field, placeholder: string, width: f32 = 0) -> (submitted: bool) {
+text_field :: proc(gs: ^Game_State, id: clay.ElementId, f: ^Text_Field, placeholder: string, width: f32 = 0, height: f32 = 32) -> (submitted: bool) {
     ui := &gs.ui
     hovered := clay.PointerOver(id)
     if hovered { ui.field_hovered = true }
@@ -1506,7 +1507,7 @@ text_field :: proc(gs: ^Game_State, id: clay.ElementId, f: ^Text_Field, placehol
     d: Ui_Deco = focused ? .Button_On : (hovered ? .Button_Hover : .Button)
     if clay.UI(id)({
         layout = {
-            sizing = {width > 0 ? clay.SizingFixed(width) : clay.SizingGrow(), clay.SizingFixed(32)},
+            sizing = {width > 0 ? clay.SizingFixed(width) : clay.SizingGrow(), clay.SizingFixed(height)},
             padding = {10, 10, 0, 0},
             childAlignment = {y = .Center},
         },
@@ -1526,7 +1527,6 @@ text_field :: proc(gs: ^Game_State, id: clay.ElementId, f: ^Text_Field, placehol
 }
 
 // A draggable slider; t is value's 0..1 position. Returns whether it changed.
-@(private="file")
 slider :: proc(gs: ^Game_State, id: clay.ElementId, t: ^f32, label: string) -> (changed: bool) {
     ui := &gs.ui
     knob_id := clay.ID("Knob", id.id)
@@ -1565,7 +1565,6 @@ slider :: proc(gs: ^Game_State, id: clay.ElementId, t: ^f32, label: string) -> (
 }
 
 // A full-screen layer that dims the world and takes the pointer.
-@(private="file")
 shade :: proc(id: string, a: f32 = 130) {
     if clay.UI(clay.ID(id))({
         layout = {sizing = {clay.SizingGrow(), clay.SizingGrow()}},
@@ -1607,9 +1606,9 @@ menu_layout :: proc(gs: ^Game_State) {
         divider()
         if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 8}}) {
             if button(clay.ID("Resume"), "Resume") { ui_open(gs, .None) }
-            if button(clay.ID("Quit"), "Save and quit", danger = true) { ui.quit_requested = true }
+            if button(clay.ID("MainMenu"), "Main menu") { ui.menu_requested = true }
+            if button(clay.ID("Quit"), gs.sandbox.on ? "Quit" : "Save and quit", danger = true) { ui.quit_requested = true }
         }
-        text("Esc resumes", COLOR_TEXT_FAINT, 12)
     }
 }
 
@@ -1744,7 +1743,6 @@ menu_sound :: proc(gs: ^Game_State) {
         audio.muted = !on
     }
     if !audio.ok { text("No audio device found.", COLOR_BAD, 13) }
-    text("M mutes at any time.", COLOR_TEXT_FAINT, 12)
 }
 
 // Open this game to others, or join someone else's (session.odin).
@@ -1825,8 +1823,6 @@ menu_multiplayer :: proc(gs: ^Game_State) {
                 }
             }
         }
-    } else {
-        text("Lets friends join this world.", COLOR_TEXT_FAINT, 12)
     }
 
     divider()
@@ -1846,7 +1842,6 @@ menu_multiplayer :: proc(gs: ^Game_State) {
             }
         }
     }
-    text("Plays on their world; yours stays saved as it is.", COLOR_TEXT_FAINT, 12)
 }
 
 // The menu is wider on the controls tab: its key lists sit in columns.
@@ -1884,7 +1879,6 @@ menu_controls :: proc(gs: ^Game_State) {
             }
         }
     }
-    text("Ctrl and Alt combos only do their own thing. Shift is sneak, so keys without a Shift version ignore it.", COLOR_TEXT_FAINT, 12)
 }
 
 // ─── Block picker (E) ──────────────────────────────────────────────────────
@@ -1903,8 +1897,6 @@ inventory_layout :: proc(gs: ^Game_State) {
     }) {
         if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childAlignment = {y = .Bottom}}}) {
             text("Blocks", COLOR_ACCENT, 24, FONT_ID_TITLE)
-            spacer()
-            text("E or Esc to close", COLOR_TEXT_FAINT, 12)
         }
         n := 0
         if clay.UI()({layout = {layoutDirection = .TopToBottom, childGap = 5}}) {
@@ -1938,7 +1930,6 @@ inventory_layout :: proc(gs: ^Game_State) {
         if clay.UI()({layout = {childGap = 5}}) {
             hotbar_slots(gs, true)
         }
-        text("Click a block to put it in the selected slot.", COLOR_TEXT_DIM, 13)
     }
     // Tooltip by the pointer.
     if hovered_block != .Air {

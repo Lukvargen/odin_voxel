@@ -238,7 +238,7 @@ client_send_input :: proc(gs: ^Game_State) {
         gliding = g.deployed, glide_heading = g.heading, glide_pitch = g.path_angle + g.aoa,
         glide_bank = g.bank, glide_unfold = g.deploy_t,
     }))
-    client_send(gs, .Set_Monsters, gs.entities_enabled)
+    client_send(gs, .Set_Monsters, gs.entities_enabled && !gs.sandbox.on) // the sandbox shows its own (sandbox.odin)
 
     n := &gs.net
     // Our name, when it changes (and to every new server: sent_name is

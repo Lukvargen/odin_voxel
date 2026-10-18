@@ -32,6 +32,12 @@ SNOW_LINE     :: 168 // design blocks: surface at or above this is snow-capped
 TERRAIN_MAX   :: 470 // world height cap: the highest peaks stay below WORLD_Y_MAX
 COARSE        :: 8   // coarse lattice spacing in voxels
 
+// The entity sandbox's world (sandbox.odin): flat grass at FLAT_GROUND
+// everywhere, no caves, trees, sea or landmarks. Set before anything is
+// generated; the workers read it.
+world_flat: bool
+FLAT_GROUND :: SEA_LEVEL + 8
+
 // A design height (blocks, absolute) in world blocks.
 world_height :: #force_inline proc "contextless" (h: f64) -> f64 {
     return f64(SEA_LEVEL) + (h - f64(SEA_LEVEL)) * TERRAIN_SCALE
@@ -116,6 +122,7 @@ continent_at :: proc(p: [2]f64) -> (cont: f64, wp: [2]f64) {
 }
 
 coarse_fields :: proc(lx, lz: int) -> Coarse_Fields {
+    if world_flat { return {} }
     p := [2]f64{f64(lx * COARSE), f64(lz * COARSE)} / TERRAIN_SCALE // design blocks
     c: Coarse_Fields
     wp: [2]f64
@@ -171,6 +178,7 @@ coarse_lerp :: proc(cell: ^Coarse_Cell, fx, fz: f64) -> Coarse_Fields {
 
 // Full terrain at (wx, wz), given the lattice cell that contains it.
 terrain_from_cell :: proc(cell: ^Coarse_Cell, wx, wz: int) -> Terrain_Sample {
+    if world_flat { return {height = FLAT_GROUND, biome = .Plains} }
     lx := wx >> 3; lz := wz >> 3 // COARSE == 8
     f := coarse_lerp(cell, f64(wx - lx * COARSE) / COARSE, f64(wz - lz * COARSE) / COARSE)
     p := [2]f64{f64(wx), f64(wz)} / TERRAIN_SCALE // design blocks
@@ -421,6 +429,7 @@ biome_trees :: proc(s: Terrain_Sample) -> [6]Tree_Rate {
 // The tree rooted at (wx, wz), if any, and its base y (the surface). lat
 // must cover (wx .. wx + 2, wz); tree_lattice builds one for a scan area.
 tree_at :: proc(lat: ^Terrain_Lattice, wx, wz: int) -> (kind: Tree_Kind, base_y: int) {
+    if world_flat { return .None, 0 }
     h := tree_hash(wx, wz, 42)
     if h >= TREE_MAX_DENSITY { return .None, 0 }
     s := lattice_sample(lat, wx, wz)

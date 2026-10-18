@@ -4,8 +4,9 @@ import "core:fmt"
 import "core:strings"
 import SDL "vendor:sdl3"
 
-// `bench ui [dir]`: screenshots of the HUD, the glider instruments and each
-// pause-menu tab, drawn offscreen (the window stays hidden) at two sizes.
+// `bench ui [dir]`: screenshots of the HUD, the glider instruments, each
+// pause-menu tab and the main menu (main_menu_bench), drawn offscreen (the
+// window stays hidden) at two sizes.
 bench_ui: bool
 
 bench_ui_run :: proc(gs: ^Game_State) {
@@ -45,6 +46,7 @@ bench_ui_run :: proc(gs: ^Game_State) {
         }},
     }
     sizes := [][2]i32{{1280, 720}, {800, 800}}
+    main_menu_bench(gs, dir, sizes)
 
     r := gs.ui.renderer_data.renderer
     for sh in shots {

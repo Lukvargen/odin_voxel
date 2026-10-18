@@ -197,11 +197,24 @@ gpu_fit_render_size :: proc(gs: ^Game_State) {
     ui_rewrap_out_texture(gs) // re-point the SDL texture at the new out_texture
 }
 
-gpu_init :: proc(gs: ^Game_State) {
-    // SDL3 GPU device (SPIR-V shaders, debug mode on)
+// The SDL3 GPU device (SPIR-V shaders, debug mode on), on its own: the
+// main menu draws with it before there's a world to trace (gpu_init).
+gpu_device_init :: proc(gs: ^Game_State) {
     gs.gpu_device = SDL.CreateGPUDevice({.SPIRV}, ODIN_DEBUG, nil)
     assert(gs.gpu_device != nil, "Failed to create GPU device")
     fmt.println("GPU driver:", SDL.GetGPUDeviceDriver(gs.gpu_device))
+}
+
+// After ui_shutdown: the UI's renderer shares the device.
+gpu_device_destroy :: proc(gs: ^Game_State) {
+    if gs.gpu_device == nil { return }
+    SDL.ReleaseWindowFromGPUDevice(gs.gpu_device, gs.window)
+    SDL.DestroyGPUDevice(gs.gpu_device)
+    gs.gpu_device = nil
+}
+
+gpu_init :: proc(gs: ^Game_State) {
+    if gs.gpu_device == nil { gpu_device_init(gs) }
 
     // Note: window is claimed by SDL.CreateGPURenderer in ui_init (which
     // shares this GPU device). Claiming it here would conflict.
@@ -881,6 +894,4 @@ gpu_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_pre_pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_h_pipeline)
     SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_v_pipeline)
-    SDL.ReleaseWindowFromGPUDevice(gs.gpu_device, gs.window)
-    SDL.DestroyGPUDevice(gs.gpu_device)
 }

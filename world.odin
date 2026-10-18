@@ -6,6 +6,7 @@ import la "core:math/linalg"
 import "core:slice"
 import "core:sync"
 import "core:time"
+import SDL "vendor:sdl3"
 
 CHUNK_VOXELS :: 8
 CHUNKS_W     :: 128   // ring width in chunks (MUST match shader CHUNK_COUNT_WIDTH)
@@ -385,6 +386,7 @@ generate_world :: proc(gs: ^Game_State) {
     // streams the rest of LOAD_RADIUS_XZ in afterward.
     enqueue_radius(gs, STARTUP_RADIUS_XZ)
     for {
+        SDL.PumpEvents() // the window stays responsive while it loads
         client_pump(gs) // edited columns come from the server
         integrate_ready_chunks(gs)
         stitch_pending_columns(gs)
@@ -586,11 +588,43 @@ streaming_idle :: proc(gs: ^Game_State) -> bool {
     return worker_pool_idle(&gs.pool) && len(gs.stitch_queue) == 0
 }
 
+// The entity sandbox's ground (world_flat): stone, then dirt, grass on top
+// at FLAT_GROUND - 1.
+generate_flat_column :: proc() -> ^Column {
+    column := new(Column)
+    for iy in 0 ..< CHUNKS_H {
+        chunk := &column.chunks[iy]
+        gy := (iy + WORLD_CHUNK_Y_MIN) * CHUNK_VOXELS
+        if gy >= FLAT_GROUND { continue }
+        if gy + CHUNK_VOXELS <= FLAT_GROUND - 4 {
+            chunk.fill = u8(Block_Type.Stone)
+            continue
+        }
+        chunk.voxels = new([VOXELS_PER_BRICK]u8)
+        for y in 0 ..< CHUNK_VOXELS {
+            wy := gy + y
+            b: Block_Type
+            switch {
+            case wy >= FLAT_GROUND:     b = .Air
+            case wy == FLAT_GROUND - 1: b = .Grass
+            case wy >= FLAT_GROUND - 4: b = .Dirt
+            case:                       b = .Stone
+            }
+            for i in 0 ..< CHUNK_VOXELS * CHUNK_VOXELS {
+                chunk.voxels[i % CHUNK_VOXELS + y * CHUNK_VOXELS + i / CHUNK_VOXELS * CHUNK_VOXELS * CHUNK_VOXELS] = u8(b)
+            }
+        }
+    }
+    for &c in column.chunks { chunk_compact(&c) }
+    return column
+}
+
 // Generate an entire XZ column: all CHUNKS_H Y chunks at world chunk coord
 // (wcx, *, wcz). Terrain (terrain.odin) is sampled once per voxel column, so
 // the vertical fill is table lookups plus cave noise; chunks that are all
 // air, all water or all stone skip the per-voxel fill entirely.
 generate_column_at :: proc(wcx, wcz: int) -> ^Column {
+    if world_flat { return generate_flat_column() }
     column := new(Column)
 
     gx := wcx * CHUNK_VOXELS

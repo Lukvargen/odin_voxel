@@ -185,7 +185,6 @@ wheel_target :: proc(tool: Build_Tool, mods: Mods) -> Wheel_Target {
 // Brush radii for big edits; 0 is one block.
 BRUSHES :: [6]int{0, 1, 2, 3, 5, 8}
 
-@(private="file")
 cycle :: proc(i, n, step: int) -> int { return ((i + step) % n + n) % n }
 
 // Keys for the tools; main calls this on key down while playing. True if the

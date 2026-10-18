@@ -222,11 +222,12 @@ fox_add :: proc(f: ^Ent_Frame, e: Entity, t: f32) {
 BIRD_SPEED       : f32 = f32(10.0)
 BIRD_CULL_RADIUS :: f32(420.0)
 
-// Pose an eagle: soaring with a slight dihedral, the odd burst of flaps.
-bird_add :: proc(f: ^Ent_Frame, e: Entity, t: f32) {
+// Pose an eagle: soaring with a slight dihedral, the odd burst of flaps
+// (or flapping all the while: the entity sandbox's).
+bird_add :: proc(f: ^Ent_Frame, e: Entity, t: f32, flap := false) {
     rot := basis_yaw(e.yaw) * basis_rot_z(-e.bank)
     s := e.scale
-    flapping := math.sin(t * 0.35 + e.phase * 3) > 0.8
+    flapping := flap || math.sin(t * 0.35 + e.phase * 3) > 0.8
     wing := 0.14 + (flapping ? 0.55 * math.sin(t * 12 + e.phase) : 0.03 * math.sin(t * 1.3 + e.phase))
     attach(f, .Bird_Body, e.pos, rot, s, {0, 0, 0}, IDENTITY)
     attach(f, .Bird_Wing, e.pos, rot, s, {0.07, 0.03, 0.02}, basis_rot_z(wing))

@@ -84,6 +84,7 @@ landmark_in_cell :: proc(cx, cz: int) -> Landmark {
 
 // Generate every landmark that reaches tgt's footprint.
 generate_landmarks :: proc(tgt: ^Tree_Target) {
+    if world_flat { return }
     c0x := floor_div(tgt.ox - LANDMARK_REACH, LANDMARK_CELL)
     c1x := floor_div(tgt.ox + tgt.size + LANDMARK_REACH, LANDMARK_CELL)
     c0z := floor_div(tgt.oz - LANDMARK_REACH, LANDMARK_CELL)
