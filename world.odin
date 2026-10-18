@@ -396,7 +396,6 @@ generate_world :: proc(gs: ^Game_State) {
 
     elapsed := time.duration_seconds(time.since(t0))
     fmt.printf("World gen (startup radius %d): %.3f s\n", STARTUP_RADIUS_XZ, elapsed)
-    profile_dump("startup")
 }
 
 // Radius (in chunks) loaded synchronously before the window opens. The full

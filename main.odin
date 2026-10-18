@@ -62,7 +62,6 @@ Game_State :: struct {
     brick_starved:   [dynamic]int,       // ... and a voxel brick
     stitch_queue:    [dynamic][2]int,    // integrated columns awaiting light stitching
     player_chunk:    [3]int,
-    prof_frames:     int,
 
     // GPU resources
     pipeline:           ^SDL.GPUComputePipeline,
@@ -667,13 +666,6 @@ game_main :: proc() -> (relaunch: []string) {
         ui_build_and_render(gs, dt)
 
         free_all(context.temp_allocator)
-
-        gs.prof_frames += 1
-        if gs.prof_frames >= 300 {
-            if !RELEASE { profile_dump("last ~300 frames") } // a tester's log.txt: the startup one is enough
-            profile_reset()
-            gs.prof_frames = 0
-        }
     }
     return
 }
