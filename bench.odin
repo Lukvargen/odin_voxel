@@ -930,6 +930,11 @@ bench_teleport :: proc(gs: ^Game_State, pos: [3]f32) {
         integrate_far_tiles(gs)
         stitch_pending_columns(gs)
         flush_gpu_uploads(gs)
+        // With the UI's renderer holding the window (benches that draw the
+        // HUD), SDL's GPU only lets go of what finished work used as frames
+        // are presented: a long burst of uploads without one ran the device
+        // out of memory and lost it. Present, as the game does every frame.
+        if gs.ui.renderer_data.renderer != nil { SDL.RenderPresent(gs.ui.renderer_data.renderer) }
         free_all(context.temp_allocator)
         time.sleep(time.Millisecond)
     }
