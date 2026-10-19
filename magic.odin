@@ -189,9 +189,9 @@ rand_dir :: proc() -> [3]f32 {
 // Left held unweaves the block aimed at (and the next, held on), right
 // conjures one, again every EDIT_REPEAT while held; with the spell's size
 // set, a ball about it (a disc, conjuring). With the box brush (B), holding
-// and moving drags out a box instead (build_drag.odin): conjured on letting
-// go, or unwoven by a cast that goes on by itself until done (a click calls
-// it off).
+// and moving drags out a box instead (build_drag.odin), and a click on it
+// once set right conjures it, or unweaves it by a cast that goes on by
+// itself until done (a click calls it off).
 magic_build_update :: proc(gs: ^Game_State, dt: f32) {
     m := &gs.magic
     if m.casting {
@@ -229,9 +229,15 @@ magic_build_update :: proc(gs: ^Game_State, dt: f32) {
                 if !m.channeling { drag_rearm(gs) } // done: on to the next block aimed at
             }
         case .Release:
-            m.channeling, m.starved = false, false
-            if !d.moved { break }
+            m.channeling, m.starved = false, false // a dragged box waits for a click
+        case .Confirm:
             r := drag_region(d)
+            mid := (la.array_cast(r.lo, f32) + la.array_cast(r.hi, f32) + 1) / 2
+            if la.length(mid - gs.camera.pos) > MAGIC_REACH * 1.5 {
+                ui_toast(gs, "Too far for the spell: come closer", 1.2)
+                d.pending = true // still waiting
+                break
+            }
             if region_volume(r) > drag_limit(gs) {
                 ui_toast(gs, "Too big for the spell: make it smaller", 1.2)
                 break

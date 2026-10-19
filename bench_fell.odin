@@ -326,6 +326,11 @@ bench_fell_run :: proc(gs: ^Game_State) {
             for q in cells { if Block_Type(u8(get_voxel(gs, q.x, q.y, q.z))) == gs.selected_block { n += 1 } }
             return
         }
+        // Let go, it waits; a click applies it.
+        for _ in 0 ..< 5 { step(gs, false, false) }
+        check(&ok_all, "creative: let go, the box waits", gs.build.drag.pending && count_filled(gs, empty_before[:]) == 0 && gs.magic.fill_out == 0)
+        step(gs, false, true)
+        step(gs, false, false)
         // The blocks fly out from the hands and fill it as they land.
         at_once := count_filled(gs, empty_before[:])
         flying := gs.magic.fill_out
@@ -357,6 +362,8 @@ bench_fell_run :: proc(gs: ^Game_State) {
         wall_r := drag_region(&gs.build.drag)
         shot(gs, dir, "drag_wall")
         step(gs, false, false)
+        step(gs, false, true) // applied
+        step(gs, false, false)
         for i := 0; i < 240 && gs.magic.fill_out > 0; i += 1 { step(gs, false, false) }
         e = wall_r.hi - wall_r.lo + 1
         check(&ok_all, fmt.tprintf("creative: a line raised by the wheel is a wall (%dx%dx%d)", e.x, e.y, e.z), e == {5, 3, 1})
@@ -384,6 +391,8 @@ bench_fell_run :: proc(gs: ^Game_State) {
         step(gs, true, false)
         take_r := drag_region(&gs.build.drag)
         step(gs, false, false)
+        step(gs, true, false) // a click: cast
+        step(gs, false, false)
         casting := gs.magic.casting
         frames := 0
         for gs.magic.casting && frames < 600 { step(gs, false, false); frames += 1 }
@@ -401,8 +410,9 @@ bench_fell_run :: proc(gs: ^Game_State) {
         look_at(cam, top(far))
         step(gs, true, false)
         step(gs, false, false)
+        step(gs, true, false) // cast...
         step(gs, false, false)
-        step(gs, false, true)
+        step(gs, false, true) // ...called off
         step(gs, false, false)
         check(&ok_all, "creative: a click calls a cast off", !gs.magic.casting && !gs.magic.channeling)
 
@@ -412,6 +422,26 @@ bench_fell_run :: proc(gs: ^Game_State) {
         step(gs, false, true)
         look_at(cam, top(far))
         step(gs, false, true)
+        step(gs, false, false)
+        // Waiting, it's set right: looking at its top the wheel pushes it up a
+        // layer (and back), Tab stands it up as a wall (and back).
+        look_at(cam, top(spot2 + {1, 1, 1}))
+        build_wheel(gs, 1, {})
+        pushed := drag_region(&gs.build.drag)
+        build_wheel(gs, -1, {})
+        build_key(gs, SDL.K_TAB, {})
+        turned := drag_region(&gs.build.drag)
+        turned_l, _ := drag_label(gs)
+        build_key(gs, SDL.K_TAB, {})
+        back := drag_region(&gs.build.drag)
+        te := turned.hi - turned.lo + 1
+        check(&ok_all, fmt.tprintf("creative: waiting, the wheel pushes the face looked at (y %d..%d)", pushed.lo.y - spot2.y, pushed.hi.y - spot2.y),
+            pushed.lo.y == spot2.y + 1 && pushed.hi.y == spot2.y + 2 && pushed.lo.xz == floor_r.lo.xz && pushed.hi.xz == floor_r.hi.xz)
+        check(&ok_all, fmt.tprintf("creative: ...Tab stands it up (%v, \"%s\") and lays it back", te, turned_l),
+            strings.has_prefix(turned_l, "wall") && te.y > 1 && (te.x == 1 || te.z == 1) && turned.lo.y == spot2.y + 1 &&
+            back.lo == floor_r.lo && back.hi == floor_r.hi)
+        shot(gs, dir, "box_pending") // (after: a shot frees the labels)
+        step(gs, false, true) // applied
         step(gs, false, false)
         laid := 0
         for q in empty_before { if Block_Type(u8(get_voxel(gs, q.x, q.y, q.z))) == gs.selected_block { laid += 1 } }
@@ -430,6 +460,8 @@ bench_fell_run :: proc(gs: ^Game_State) {
         step(gs, false, true)
         stand_r := drag_region(&gs.build.drag)
         label, _ := drag_label(gs)
+        step(gs, false, false)
+        step(gs, true, false) // the other button: called off
         step(gs, false, false)
         e = stand_r.hi - stand_r.lo + 1
         check(&ok_all, fmt.tprintf("creative: level, it's a wall facing you (%dx%dx%d, \"%s\")", e.x, e.y, e.z, label),

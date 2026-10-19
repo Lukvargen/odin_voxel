@@ -758,9 +758,13 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
                 text(label, too_big ? COLOR_ACCENT_2 : COLOR_TEXT, 13, FONT_ID_TITLE)
             }
             if clay.UI(clay.ID("DragHint"))({
-                floating = {attachTo = .Root, offset = {cx, cy + 56}, zIndex = 6, attachment = {.CenterTop, .LeftTop}, pointerCaptureMode = .Passthrough},
+                layout = {padding = {7, 7, 3, 4}},
+                floating = {attachTo = .Root, offset = {cx, cy + 58}, zIndex = 6, attachment = {.CenterTop, .LeftTop}, pointerCaptureMode = .Passthrough},
+                custom = deco(.Tooltip, radius = 5, alpha = 0.6),
             }) {
-                text("wheel or Ctrl + mouse: depth (back past 1: the other side)   other button: cancel", COLOR_TEXT_FAINT, 11)
+                hint := "wheel or Ctrl + mouse: depth   Tab: floor / wall   let go to set it right"
+                if gs.build.drag.pending { hint = "click: apply   other button: cancel   wheel: push the lit face   Shift+wheel: move   Tab: floor / wall" }
+                text(hint, COLOR_TEXT_DIM, 11)
             }
         } else if gs.build.box && (gs.survival || gs.build.tool == .Block || gs.build.tool == .Magic) {
             // The box brush, before a click: how a drag decides its lie.
@@ -770,7 +774,7 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
                 custom = deco(.Tooltip, radius = 5, alpha = 0.6),
             }) {
                 lie, _ := drag_view_lie(camera_forward(gs.camera))
-                text(lie == .Flat ? "box: a floor   (look more level for a wall)" : "box: a wall   (look down steeply for a floor)", COLOR_TEXT_DIM, 11)
+                text(lie == .Flat ? "box: a floor   (Tab once dragging: a wall)" : "box: a wall   (Tab once dragging: a floor)", COLOR_TEXT_DIM, 11)
             }
         }
     }
@@ -797,7 +801,8 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     if playing { combat_hud_layout(gs, w, h) }
     name_tags_layout(gs, w, h)
     chat_layout(gs, h)
-    if playing && ui.typing == nil && SDL.GetKeyboardState(nil)[SDL.Scancode.TAB] { player_list_layout(gs) }
+    box := gs.build.drag.on || gs.build.drag.pending // Tab turns a box then (build_drag.odin)
+    if playing && ui.typing == nil && !box && SDL.GetKeyboardState(nil)[SDL.Scancode.TAB] { player_list_layout(gs) }
 
     // Toast.
     if ui.toast_t > 0 {

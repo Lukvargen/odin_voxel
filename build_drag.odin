@@ -3,17 +3,20 @@ package main
 // Dragging out a box: the Block tool and the spell, with the box brush (B).
 // A click acts at once, on one block, as ever; holding the button and moving
 // the crosshair to another block makes it a drag. Which way the box lies goes
-// by how you look (shown before the click: build_preview): down (or up)
-// steeply, it's flat (a floor, a ceiling); more level, it stands up facing
+// first by how you look (shown before the click: build_preview): down (or
+// up) steeply, it's flat (a floor, a ceiling); more level, it stands up facing
 // you (a wall), through the block clicked, and runs to the block aimed at.
-// The wheel (or Ctrl held and the mouse moved up and down, the view standing
-// still) gives it depth: placing, toward you (a floor thickened upward);
-// taking, away from you, into what it's cut from (a trench, a tunnel).
-// Turned back past one layer it grows the other way instead (a wall reaching
-// down past the ground it stands on, a slab dug up out of the floor).
-// Letting go applies it, the other button calls it off. Placing only fills
-// what's empty (air, water, plants), so a floor doesn't eat the hill it runs
-// into.
+// Tab (or Q) turns it the other way. The wheel (or Ctrl held and the mouse
+// moved up and down, the view standing still) gives it depth: placing,
+// toward you (a floor thickened upward); taking, away from you, into what
+// it's cut from (a trench, a tunnel). Turned back past one layer it grows the
+// other way instead (a wall reaching down past the ground it stands on, a
+// slab dug up out of the floor).
+// Letting go leaves it waiting, to look at from anywhere and set right: the
+// wheel pushes the face you look at out or in, Shift+wheel moves the whole
+// box, Tab turns it. A click of the button that made it applies it, the other
+// button calls it off. Placing only fills what's empty (air, water, plants),
+// so a floor doesn't eat the hill it runs into.
 
 import "core:fmt"
 import "core:math"
@@ -46,16 +49,31 @@ Drag :: struct {
     end:     [3]int, // the far corner, in the start's layer
     depth:   int,    // layers along `dir` (1 is just the start's); negative: -depth layers the other way
     moved:   bool,   // the end has left the start: a drag, not a click
+    pending: bool,   // let go: waiting to be set right and applied (or called off)
     rearm:   bool,   // start again where aimed while the button's still held (the spell, digging on)
     ctrl_dy: f32,    // Ctrl + mouse: pixels toward the next layer
 }
 
-Drag_Event :: enum u8 { None, Press, Held, Release, Cancel }
+Drag_Event :: enum u8 { None, Press, Held, Release, Confirm, Cancel }
 
 // Once a frame from a tool: begins a drag on a click, follows the crosshair
-// while it's held, and says when it's let go or called off.
+// while it's held, and says when it's let go (waiting, if it was dragged),
+// applied (a click on a waiting box) or called off.
 drag_step :: proc(gs: ^Game_State, reach: f32) -> Drag_Event {
     d := &gs.build.drag
+    if d.pending {
+        mine  := d.place ? gs.right_pressed : gs.left_pressed
+        other := d.place ? gs.left_pressed : gs.right_pressed
+        if other {
+            d.pending = false
+            return .Cancel
+        }
+        if mine {
+            d.pending = false
+            return .Confirm
+        }
+        return .None
+    }
     if d.on {
         held  := d.place ? gs.right_held : gs.left_held
         other := d.place ? gs.left_pressed : gs.right_pressed
@@ -66,6 +84,7 @@ drag_step :: proc(gs: ^Game_State, reach: f32) -> Drag_Event {
         drag_aim(gs, d, reach)
         if !held {
             d.on = false
+            d.pending = d.moved
             return .Release
         }
         return .Held
@@ -81,12 +100,73 @@ drag_step :: proc(gs: ^Game_State, reach: f32) -> Drag_Event {
     d^ = {on = true, place = place, start = start, hit = hit, nrm = nrm, end = start, depth = 1}
     // Its lie, by how you look now.
     fwd := camera_forward(gs.camera)
-    d.lie, d.axis = drag_view_lie(fwd)
-    away := fwd[d.axis] > 0 ? 1 : -1
-    d.dir = place ? -away : away
-    near := f32(start[d.axis] + (away > 0 ? 0 : 1)) // the start's side toward you
-    d.plane = place ? near + f32(away) : near
+    lie, axis := drag_view_lie(fwd)
+    drag_set_lie(d, lie, axis, fwd)
     return .Press
+}
+
+// Sets how the box lies: its thin way, the way depth grows (placing: toward
+// you, taking: away), and the plane the crosshair is read on (the start's
+// side the blocks rest on placing, the side you see taking).
+@(private="file")
+drag_set_lie :: proc(d: ^Drag, lie: Drag_Lie, axis: int, fwd: [3]f32) {
+    d.lie, d.axis = lie, axis
+    away := fwd[axis] > 0 ? 1 : -1
+    d.dir = d.place ? -away : away
+    near := f32(d.start[axis] + (away > 0 ? 0 : 1)) // the start's side toward you
+    d.plane = d.place ? near + f32(away) : near
+}
+
+// Tab (or Q): a box being dragged or waiting turns the other way, about its
+// first block: a floor's reach out from you becomes a wall's height (up
+// placing, down into the ground taking), and back. True if there was one.
+drag_turn :: proc(gs: ^Game_State) -> bool {
+    d := &gs.build.drag
+    if !d.on && !d.pending { return false }
+    fwd := camera_forward(gs.camera)
+    if d.lie == .Flat {
+        face := abs(fwd.x) > abs(fwd.z) ? 0 : 2
+        span := abs(d.end[face] - d.start[face])
+        d.end[face] = d.start[face]
+        d.end.y = d.start.y + (d.place ? span : -span)
+        drag_set_lie(d, .Wall, face, fwd)
+    } else {
+        span := abs(d.end.y - d.start.y)
+        away := fwd[d.axis] > 0 ? 1 : -1
+        d.end.y = d.start.y
+        d.end[d.axis] = d.start[d.axis] + span * away
+        if fwd.y == 0 { fwd.y = -1 } // looking level: a floor, not a ceiling
+        drag_set_lie(d, .Flat, 1, fwd)
+    }
+    d.moved = true
+    return true
+}
+
+// The wheel on a waiting box: pushes the face you look at out (in when
+// negative), never past the one opposite; with move, the whole box that way.
+drag_push :: proc(gs: ^Game_State, steps: int, move: bool) {
+    d := &gs.build.drag
+    if !d.pending || steps == 0 { return }
+    r := drag_region(d)
+    lo, hi := r.lo, r.hi
+    ax, side := box_face(gs, lo, hi)
+    if move {
+        lo[ax] += side * steps
+        hi[ax] += side * steps
+    } else if side > 0 {
+        hi[ax] = clamp(hi[ax] + steps, lo[ax], lo[ax] + DRAG_MAX_SIDE - 1)
+    } else {
+        lo[ax] = clamp(lo[ax] - steps, hi[ax] - DRAG_MAX_SIDE + 1, hi[ax])
+    }
+    // Back into start, end and depth: the start at the corner nearest it was.
+    for i in 0 ..< 3 {
+        if i == d.axis { continue }
+        near_lo := abs(d.start[i] - lo[i]) <= abs(d.start[i] - hi[i])
+        d.start[i], d.end[i] = near_lo ? lo[i] : hi[i], near_lo ? hi[i] : lo[i]
+    }
+    layer := d.dir > 0 ? lo[d.axis] : hi[d.axis]
+    d.start[d.axis], d.end[d.axis] = layer, layer
+    d.depth = hi[d.axis] - lo[d.axis] + 1
 }
 
 // Ends the drag, and starts a new one where aimed next frame if the left
@@ -98,7 +178,7 @@ drag_rearm :: proc(gs: ^Game_State) {
 
 drag_cancel :: proc(gs: ^Game_State) {
     d := &gs.build.drag
-    d.on, d.rearm = false, false
+    d.on, d.rearm, d.pending = false, false, false
 }
 
 // The far corner: where the crosshair meets the box's plane (missing it,
@@ -196,10 +276,10 @@ drag_limit :: proc(gs: ^Game_State) -> int {
     return MAX_EDIT_VOXELS
 }
 
-// Whether the drag being held should show (and be applied as) a box.
+// Whether there's a box to show: being dragged out, or waiting.
 drag_showing :: proc(gs: ^Game_State) -> bool {
     d := &gs.build.drag
-    return d.on && d.moved
+    return d.on && d.moved || d.pending
 }
 
 // What the box comes to, for beside the crosshair: which way it lies, its

@@ -197,6 +197,7 @@ build_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
     // T, Q, V, B: plain cycles forward, Shift back; with Ctrl or Alt, nothing.
     step := .Shift in mods ? -1 : 1
     plain := mods & {.Ctrl, .Alt} == {}
+    if (key == SDL.K_TAB || key == SDL.K_Q) && plain && drag_turn(gs) { return true } // a box: floor <-> wall
     if gs.survival { // magic, not tools (magic.odin); no undo either: it'd make blocks
         if key != SDL.K_B || !plain { return false }
         brush_step(gs, step, wrap = true)
@@ -206,6 +207,7 @@ build_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
     case SDL.K_T:
         if !plain { return false }
         b.tool = Build_Tool(cycle(int(b.tool), len(Build_Tool), step))
+        drag_cancel(gs)
         if gs.combat.sword { combat_toggle_sword(gs) }
     case SDL.K_Q:
         if !plain || b.tool != .Shape { return false }
@@ -298,6 +300,10 @@ build_wheel :: proc(gs: ^Game_State, steps: int, mods: Mods) {
         drag_deepen(gs, steps)
         return
     }
+    if b.drag.pending && mods - {.Shift} == {} { // a box waiting: push the face looked at, or move it
+        drag_push(gs, steps, .Shift in mods)
+        return
+    }
     if gs.survival {
         if mods - {.Shift} == {} { hotbar_select(gs, cycle(gs.hotbar_slot, HOTBAR_SLOTS, -steps)) }
         return
@@ -324,7 +330,7 @@ build_update :: proc(gs: ^Game_State, dt: f32) {
     b := &gs.build
     active := gs.mouse_locked && !gs.glider.deployed && !gs.combat.sword
     if !active {
-        drag_cancel(gs)
+        if b.drag.on { drag_cancel(gs) } // a box waiting stays (a look in the inventory)
         return
     }
     gs.edit_timer -= dt
@@ -351,14 +357,15 @@ build_update :: proc(gs: ^Game_State, dt: f32) {
 
 // Left breaks, right places, a block at a click (or the round brush, its
 // radius set), holding repeating every EDIT_REPEAT seconds. With the box
-// brush, holding and moving drags out a box instead, applied on letting go
-// (build_drag.odin). A stroke is one undo; torches are always one block.
+// brush, holding and moving drags out a box instead, to set right and apply
+// with another click (build_drag.odin). A stroke is one undo; torches are
+// always one block.
 @(private="file")
 build_block_update :: proc(gs: ^Game_State) {
     if gs.build.box {
         d := &gs.build.drag
         switch drag_step(gs, REACH) {
-        case .None, .Held, .Cancel:
+        case .None, .Held, .Release, .Cancel:
         case .Press:
             if d.place && gs.selected_block == .Door {
                 door_place(gs, d.hit, d.nrm) // doors go in one at a time (door.odin)
@@ -366,8 +373,7 @@ build_block_update :: proc(gs: ^Game_State) {
                 return
             }
             build_apply(gs, sphere_region(d.start, 0), d.place ? gs.selected_block : .Air, .All)
-        case .Release:
-            if !d.moved { return }
+        case .Confirm:
             if region_volume(drag_region(d)) > drag_limit(gs) {
                 ui_toast(gs, "Too big: make it smaller", 1.2)
                 return
@@ -450,13 +456,18 @@ area_cursor :: proc(gs: ^Game_State) -> ([3]int, bool) {
     return {}, false
 }
 
-// The selection's face the crosshair is on: the one the ray goes in by (from
-// inside the box, out by); missing the box, the face toward the eye nearest
-// the crosshair. Its axis, and side (+1 the high face, -1 the low).
+// The selection's face the crosshair is on (box_face).
 area_face :: proc(gs: ^Game_State) -> (axis, side: int) {
     r := area_region(&gs.build)
-    lo := [3]f32{f32(r.lo.x), f32(r.lo.y), f32(r.lo.z)}
-    hi := [3]f32{f32(r.hi.x), f32(r.hi.y), f32(r.hi.z)} + 1
+    return box_face(gs, r.lo, r.hi)
+}
+
+// The face of the box [lo_i, hi_i] the crosshair is on: the one the ray goes
+// in by (from inside the box, out by); missing the box, the face toward the
+// eye nearest the crosshair. Its axis, and side (+1 the high face, -1 the low).
+box_face :: proc(gs: ^Game_State, lo_i, hi_i: [3]int) -> (axis, side: int) {
+    lo := la.array_cast(lo_i, f32)
+    hi := la.array_cast(hi_i, f32) + 1
     eye, fwd := camera_aim_eye(gs.camera), camera_forward(gs.camera)
     t_in, t_out := f32(-math.F32_MAX), f32(math.F32_MAX)
     ax_in, ax_out := 0, 0
@@ -922,6 +933,10 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
         wire_box(&pv.segs, (lo + hi) / 2, (hi - lo) / 2 + 0.004, 1, 0)
         pv.fill = b.drag.place
         pv.too_big = region_volume(r) > drag_limit(gs)
+        if b.drag.pending {
+            ax, side := box_face(gs, r.lo, r.hi)
+            face_marks(&pv.face, lo, hi, ax, side)
+        }
         return
     case .Area, .Shape:
     }
@@ -964,16 +979,7 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
             if inner.x > 0 && inner.y > 0 && inner.z > 0 { wire_box(&pv.segs, (lo + hi) / 2, inner, 1, 0) }
         }
         ax, side := area_face(gs)
-        u, v := (ax + 1) % 3, (ax + 2) % 3
-        inset := min(0.2, (hi[u] - lo[u]) / 4, (hi[v] - lo[v]) / 4)
-        k: [4][3]f32
-        for &q, i in k {
-            q[ax] = (side > 0 ? hi[ax] : lo[ax]) + f32(side) * 0.01
-            q[u] = (i == 1 || i == 2) ? hi[u] - inset : lo[u] + inset
-            q[v] = i >= 2 ? hi[v] - inset : lo[v] + inset
-        }
-        for i in 0 ..< 4 { append(&pv.face, [2][3]f32{k[i], k[(i + 1) % 4]}) }
-        append(&pv.face, [2][3]f32{k[0], k[2]}, [2][3]f32{k[1], k[3]})
+        face_marks(&pv.face, lo, hi, ax, side)
     case .Shape:
         // Right places: the shape sitting on the face looked at. Left
         // carves: the same shape around the voxel, faint.
@@ -990,6 +996,22 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
         }
     }
     return
+}
+
+// The face of box [lo, hi] (world, corners) the wheel pushes: a cross in an
+// inset frame on it.
+@(private="file")
+face_marks :: proc(segs: ^[dynamic][2][3]f32, lo, hi: [3]f32, ax, side: int) {
+    u, v := (ax + 1) % 3, (ax + 2) % 3
+    inset := min(0.2, (hi[u] - lo[u]) / 4, (hi[v] - lo[v]) / 4)
+    k: [4][3]f32
+    for &q, i in k {
+        q[ax] = (side > 0 ? hi[ax] : lo[ax]) + f32(side) * 0.01
+        q[u] = (i == 1 || i == 2) ? hi[u] - inset : lo[u] + inset
+        q[v] = i >= 2 ? hi[v] - inset : lo[v] + inset
+    }
+    for i in 0 ..< 4 { append(segs, [2][3]f32{k[i], k[(i + 1) % 4]}) }
+    append(segs, [2][3]f32{k[0], k[2]}, [2][3]f32{k[1], k[3]})
 }
 
 @(private="file")
