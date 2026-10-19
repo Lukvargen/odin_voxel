@@ -83,6 +83,7 @@ Sim :: struct {
     players:  [MAX_PLAYERS]Player,
     slimes:   Slimes,    // (slime.odin)
     enemies:  Enemies,   // skeletons, goblins, orcs; landmark guards (enemies.odin)
+    shots:    Shots,     // arrows and stones in flight (shots.odin)
     day:      Day_Clock, // the time of day, and how much night (daycycle.odin)
     calm:     [dynamic]Calm_Spot, // where a player's kills keep roamers away for a while
     time:     f32,       // seconds the simulation has run (calm)
@@ -105,6 +106,7 @@ Sim_Event_Kind :: enum u8 {
     Enemy_Rise,    // pos: feet: a skeleton clawing up out of the ground
     Player_Hurt,   // player was struck: result; pos: from; vec: knock; amount: damage
     Door_Swing,    // player opened (amount 1) or shut (0) the door whose bottom voxel is at pos
+    Shot_Fired,    // pos: from; vec: velocity; amount: its Shot_Kind
 }
 
 Sim_Event :: struct {

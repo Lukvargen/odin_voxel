@@ -251,6 +251,7 @@ entities_upload :: proc(gs: ^Game_State, cands: []Ent_Candidate, t: f32) {
     felling_add_parts(gs, frame)
     slimes_add_parts(gs, frame)
     enemies_add_parts(gs, frame)
+    shots_add_parts(gs, frame)
     sandbox_add_parts(gs, frame)
     fx_add_parts(gs, frame)
     for c in cands {

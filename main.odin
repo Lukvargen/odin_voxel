@@ -29,6 +29,7 @@ Game_State :: struct {
     look:        Look,        // how the player looks (player_look.odin; the Character screen)
     combat: Combat, // fists and swords, health, combos (combat.odin)
     fx: Effects, // goo, sparks, dust, damage numbers (fx.odin)
+    shot_fx: Shots, // this client's copies of the arrows and stones in flight, to draw (shots.odin)
     sky_thermals:      [MAX_SKY_THERMALS]Sky_Thermal, // strong thermals near the player, for cumulus (glider.odin)
     sky_thermal_count: int,
     sky_thermal_cell:  [2]int,
@@ -675,6 +676,7 @@ game_main :: proc() -> (relaunch: []string) {
         if !client_joined(gs) { server_step(&gs.server, play_dt) }
         client_receive(gs, play_dt)
         fx_update(gs, fx_dt)
+        shots_fx_update(gs, fx_dt)
         glider_view_update(gs, play_dt)
         character_view_update(gs, dt)
         combat_view_update(gs, play_dt)

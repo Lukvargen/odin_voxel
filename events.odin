@@ -30,6 +30,8 @@ sim_event_play :: proc(gs: ^Game_State, ev: Sim_Event) {
         case .Skeleton: play_at(.Bone_Rattle, c, ev.amount * 0.6, vary(0.08), 16)
         case .Goblin:   play_at(.Hurt, c, ev.amount * 0.45, 1.7 * vary(0.08), 16)
         case .Orc:      play_at(.Hurt, c, ev.amount * 0.7, 0.55 * vary(0.06), 22)
+        case .Archer:   play_at(.Bone_Rattle, c, ev.amount * 0.6, 1.15 * vary(0.08), 16)
+        case .Slinger:  play_at(.Hurt, c, ev.amount * 0.45, 1.85 * vary(0.08), 16)
         case .Wolf:     play_at(.Fox, c, ev.amount * 0.7, 0.55 * vary(0.08), 24) // a snarl
         case .Boar:     play_at(.Hurt, c, ev.amount * 0.6, 0.42 * vary(0.06), 18) // a grunt
         case .Deer:     play_at(.Fox, c, ev.amount * 0.4, 1.35 * vary(0.06), 16)  // a bark of alarm
@@ -37,12 +39,12 @@ sim_event_play :: proc(gs: ^Game_State, ev: Sim_Event) {
     case .Enemy_Swing:
         play_at(.Sword_Swing, c, 0.55, 0.75 / ENEMY_SPECS[ev.enemy].scale * vary(0.06), 14)
     case .Enemy_Struck:
-        play_at(ev.enemy == .Skeleton ? .Bone_Hit : .Slam, c, 0.5, 1.3 * vary(0.06), 10)
+        play_at(enemy_bony(ev.enemy) ? .Bone_Hit : .Slam, c, 0.5, 1.3 * vary(0.06), 10)
     case .Enemy_Hit:
         sp := ENEMY_SPECS[ev.enemy]
         add_number(fx, c + {0, sp.height * 0.5, 0}, ev.amount, ev.boosted)
         splat(fx, c, sp.gore, ev.vec, 5, 0.5)
-        if ev.enemy == .Skeleton {
+        if enemy_bony(ev.enemy) {
             play_at(.Bone_Hit, c, 0.9, vary(0.08), 16)
         } else {
             play_at(.Slime_Hit, c, 0.5, 0.6 * vary(0.08), 14)
@@ -50,7 +52,7 @@ sim_event_play :: proc(gs: ^Game_State, ev: Sim_Event) {
         }
     case .Enemy_Die:
         splat(fx, c, ENEMY_SPECS[ev.enemy].gore, ev.vec, 14, 1)
-        if ev.enemy == .Skeleton {
+        if enemy_bony(ev.enemy) {
             play_at(.Bone_Break, c, 1, vary(0.06), 18)
         } else {
             play_at(.Hurt, c, 0.8, (ev.enemy == .Goblin ? 1.3 : 0.45) * vary(0.05), 20)
@@ -66,9 +68,12 @@ sim_event_play :: proc(gs: ^Game_State, ev: Sim_Event) {
         // The swinger heard it already (door_toggle).
         if int(ev.player) != gs.net.slot { audio_door(la.array_cast(ev.pos, int), ev.amount > 0) }
 
+    case .Shot_Fired:
+        shot_fx_add(gs, Shot_Kind(clamp(int(ev.amount), 0, len(Shot_Kind) - 1)), ev.pos, ev.vec)
     case .Player_Hurt:
         if int(ev.player) == gs.net.slot {
             combat_take_hurt(gs, ev.result, ev.amount, ev.vec)
+            shot_fx_spent(gs) // if it was a shot: that one's done
         } else if int(ev.player) < MAX_PLAYERS && gs.net.others[ev.player].active {
             // Another player struck: their body flashes, we hear it land.
             o := &gs.net.others[ev.player]

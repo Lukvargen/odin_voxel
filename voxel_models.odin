@@ -44,7 +44,8 @@ Model_Id :: enum u32 {
     Skel_Skull, Skel_Torso, Skel_Arm, Skel_Leg,
     Gob_Head, Gob_Torso, Gob_Arm, Gob_Leg,
     Orc_Head, Orc_Torso,
-    Club, Old_Sword, Axe, // grip at the origin, along +z
+    Club, Old_Sword, Axe, Bow, Sling, // grip at the origin, along +z
+    Arrow, Pebble, // shots.odin: in flight, along +z
     // beasts.odin: bodies pivot at their middle, heads at the neck, legs at the hip
     Wolf_Body, Wolf_Head, Wolf_Leg, Wolf_Tail,
     Boar_Body, Boar_Head, Boar_Leg, Boar_Tail,
@@ -316,6 +317,7 @@ ent_models_bake :: proc() {
     combat_models_bake()
     enemy_models_bake()
     beasts_models_bake()
+    shots_models_bake()
     fish_models_bake()
     magic_models_bake()
     ent_models[.Crystal]      = model_bake({-0.3, -0.52, -0.3}, {0.3, 0.52, 0.3}, 1.0 / 16, shape_crystal)

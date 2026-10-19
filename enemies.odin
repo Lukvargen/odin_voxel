@@ -19,6 +19,10 @@ import la "core:math/linalg"
 //    most by night. They circle out of reach, each its own way round, and
 //    dart in one at a time with a leaping bite, then off again: keep them
 //    in front of you.
+//  - Skeleton archers and goblin slingers (shots.odin): among the
+//    skeletons and the goblins' packs, and on the old towers. They keep
+//    their distance, back off if you close in, and shoot after a long
+//    draw (the tell): block it, roll, or get in close.
 //  - Wildlife (beasts.odin), kept about a player apart from the hostile
 //    ones: deer bolt when they notice you; boars root about and leave you
 //    be until struck, then paw the ground and charge.
@@ -48,7 +52,13 @@ SITE_NOTICE      :: f32(80)  // a site's guards appear when the player is this c
 SITE_RESPAWN     :: f32(600) // seconds before a cleared site fills again
 GUARD_LEASH      :: f32(20)  // guards give up a chase this far from home
 
-Enemy_Kind :: enum u8 { Skeleton, Goblin, Orc, Wolf, Boar, Deer }
+Enemy_Kind :: enum u8 { Skeleton, Goblin, Orc, Wolf, Boar, Deer, Archer, Slinger }
+
+// The ones of bone (their sounds, their colour, how they come apart).
+enemy_bony :: proc(k: Enemy_Kind) -> bool { return k == .Skeleton || k == .Archer }
+
+// Ranged ones back off from a player closer than this (metres, world_scale at use).
+RANGED_TOO_CLOSE :: f32(4.5)
 
 // How it's built: a humanoid on Enemy_Rig, or a beast on four legs (beasts.odin).
 Body :: enum u8 { Humanoid, Beast }
@@ -61,6 +71,8 @@ Enemy_Spec :: struct {
     body:     Body,
     temper:   Temper,
     leaps:    bool, // a beast's strike: a leap at you (else a charge, along the ground)
+    shot_speed: f32,      // > 0: it shoots (shots.odin), at this speed (m/s), from as far as reach
+    shot:       Shot_Kind,
     scale:    f32, // of the rig (1 = the player's size)
     radius:   f32, // collision half width
     height:   f32,
@@ -97,6 +109,13 @@ ENEMY_SPECS := [Enemy_Kind]Enemy_Spec{
     .Boar     = {body = .Beast, temper = .Defensive, scale = 1, radius = 0.5, height = 1.0, hp = 70, poise = 30, damage = 16, walk = 1.1, run = 6, weight = 2.2,
                  reach = 6.5, windup = 0.75, strike = 0.9, recover = 1.0, aggro = 14, knock = {12, 5},
                  gore = {0.40, 0.08, 0.06}},
+    // Reach is the range; windup the draw (the tell), strike the release.
+    .Archer   = {scale = 1.12, radius = 0.34, height = 2.0, hp = 34, poise = 16, damage = 14, walk = 1.5, run = 3.6, weight = 1,
+                 reach = 18, windup = 1.1, strike = 0.15, recover = 1.0, aggro = 26, knock = {5, 3}, shot_speed = 30, shot = .Arrow,
+                 gore = {0.82, 0.78, 0.68}},
+    .Slinger  = {scale = 0.95, radius = 0.32, height = 1.7, hp = 24, poise = 8, damage = 9, walk = 2.0, run = 5.0, weight = 0.8,
+                 reach = 14, windup = 0.9, strike = 0.12, recover = 0.8, aggro = 22, knock = {4, 3}, shot_speed = 22, shot = .Stone,
+                 gore = {0.40, 0.08, 0.06}},
     // Never fights: aggro is how near it lets you come.
     .Deer     = {body = .Beast, temper = .Timid, scale = 1, radius = 0.4, height = 1.7, hp = 30, poise = 6, damage = 0, walk = 1.3, run = 8, weight = 1.1,
                  reach = 0, windup = 0.2, strike = 0.2, recover = 0.2, aggro = 20, knock = {0, 0},
@@ -114,6 +133,8 @@ ENEMY_RIGS := #partial [Enemy_Kind]Enemy_Rig{ // the humanoids
     .Skeleton = {head = .Skel_Skull, torso = .Skel_Torso, arm = .Skel_Arm, leg = .Skel_Leg, weapon = .Old_Sword, hips = 0.78, leg_x = 0.1, arm_x = 0.27, arm_y = 0.54, neck = 0.6, arm_len = 0.52},
     .Goblin   = {head = .Gob_Head, torso = .Gob_Torso, arm = .Gob_Arm, leg = .Gob_Leg, weapon = .Club, hips = 0.74, leg_x = 0.11, arm_x = 0.3, arm_y = 0.48, neck = 0.55, arm_len = 0.5},
     .Orc      = {head = .Orc_Head, torso = .Orc_Torso, arm = .Gob_Arm, leg = .Gob_Leg, weapon = .Axe, hips = 0.74, leg_x = 0.13, arm_x = 0.38, arm_y = 0.52, neck = 0.6, arm_len = 0.5},
+    .Archer   = {head = .Skel_Skull, torso = .Skel_Torso, arm = .Skel_Arm, leg = .Skel_Leg, weapon = .Bow, hips = 0.78, leg_x = 0.1, arm_x = 0.27, arm_y = 0.54, neck = 0.6, arm_len = 0.52},
+    .Slinger  = {head = .Gob_Head, torso = .Gob_Torso, arm = .Gob_Arm, leg = .Gob_Leg, weapon = .Sling, hips = 0.74, leg_x = 0.11, arm_x = 0.3, arm_y = 0.48, neck = 0.55, arm_len = 0.5},
 }
 
 Enemy_State :: enum u8 { Idle, Wander, Chase, Windup, Strike, Recover, Stagger, Dead }
@@ -240,7 +261,8 @@ enemy_spawn :: proc(sim: ^Sim, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
 enemy_skin :: proc(kind: Enemy_Kind, k: f32) -> [3]f32 {
     switch kind {
     case .Skeleton:
-    case .Goblin: return la.lerp([3]f32{0.42, 0.56, 0.26}, [3]f32{0.52, 0.56, 0.30}, k)
+    case .Goblin, .Slinger: return la.lerp([3]f32{0.42, 0.56, 0.26}, [3]f32{0.52, 0.56, 0.30}, k)
+    case .Archer:
     case .Orc:    return la.lerp([3]f32{0.36, 0.44, 0.32}, [3]f32{0.50, 0.46, 0.34}, k)
     case .Wolf:   return la.lerp([3]f32{0.42, 0.42, 0.44}, [3]f32{0.62, 0.58, 0.52}, k) // grey to sandy
     case .Boar:   return la.lerp([3]f32{0.20, 0.15, 0.11}, [3]f32{0.30, 0.22, 0.15}, k)
@@ -298,6 +320,7 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
         }
     }
 
+    shots_update(sim, dt)
     steps := max(1, int(math.ceil(dt * 120)))
     h := dt / f32(steps)
     for &e in s.list {
@@ -440,7 +463,11 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
             w := la.normalize0(side + dir * clamp(band * 0.5, -1, 1))
             turn_towards(&e.yaw, dir, dt * 6)
             want_speed, accel = sp.run * 0.55, w
-        } else if dist < sp.reach && abs(to_player.y) < 2 * world_scale && e.on_ground && e.sees {
+        } else if sp.shot_speed > 0 && e.sees && dist < RANGED_TOO_CLOSE * world_scale {
+            // Too close for a shot: back off, facing you.
+            turn_towards(&e.yaw, dir, dt * 7)
+            want_speed, accel = sp.walk * 1.3, la.normalize0(-dir + [2]f32{-dir.y, dir.x} * e.flank * 0.4)
+        } else if dist < sp.reach && abs(to_player.y) < (sp.shot_speed > 0 ? 10 : 2) * world_scale && e.on_ground && e.sees {
             turn_towards(&e.yaw, dir, dt * 7)
             e.state, e.timer, e.struck = .Windup, sp.windup, false
             e.swing = rand.float32() < OVERHEAD_CHANCE[e.kind] ? .Overhead : .Slash
@@ -460,7 +487,13 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
         }
     case .Windup:
         turn_towards(&e.yaw, dir, dt * 5)
-        if e.timer <= 0 {
+        if e.timer <= 0 && sp.shot_speed > 0 {
+            // The release, from about the shoulder, at the player's middle.
+            e.state, e.timer = .Strike, sp.strike
+            fwd := [3]f32{-math.sin(e.yaw), 0, math.cos(e.yaw)}
+            from := e.pos + {0, sp.height * 0.72, 0} + fwd * (sp.radius + 0.25 * world_scale)
+            shot_fire(sim, sp.shot, from, p.pos - {0, PLAYER_EYE_HEIGHT * 0.4, 0}, p.velocity, sp.shot_speed * world_scale, sp.damage * level_damage(e.level))
+        } else if e.timer <= 0 {
             e.state, e.timer = .Strike, sp.strike
             sim_emit(sim, {kind = .Enemy_Swing, enemy = e.kind, pos = enemy_center(e)})
             if sp.leaps {
@@ -477,6 +510,7 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
         want_speed, accel = sp.run * (sp.body == .Beast ? 1.4 : 0.8), fwd
         reach := sp.body == .Beast ? 1.1 * world_scale : sp.reach + 0.5 * world_scale // a bite lands at the jaws
         arc: f32 = sp.body == .Beast ? 0.3 : (e.swing == .Slash ? -0.1 : 0.45)
+        if sp.shot_speed > 0 { want_speed = 0; e.struck = true } // a shot's away: it stands
         if !e.struck && dist < reach && to_player.y > -1.2 * world_scale && to_player.y < sp.height + world_scale &&
            la.dot(dir, fwd) > arc {
             e.struck = true
@@ -748,7 +782,11 @@ enemy_try_spawn :: proc(sim: ^Sim, feet: [3]f32, night: f32) -> bool {
             px, pz := x + rand.int_max(5) - 2, z + rand.int_max(5) - 2
             py, ok2 := stand_y(sim, px, pz, y + 3)
             if !ok2 { continue }
-            e := enemy_spawn(sim, i == 0 ? kind : (kind == .Orc ? .Goblin : kind), {f32(px) + 0.5, f32(py), f32(pz) + 0.5})
+            k := i == 0 ? kind : (kind == .Orc ? .Goblin : kind)
+            if i == 1 && rand.float32() < 0.6 { // one hangs back to shoot
+                if k == .Goblin { k = .Slinger } else if k == .Skeleton { k = .Archer }
+            }
+            e := enemy_spawn(sim, k, {f32(px) + 0.5, f32(py), f32(pz) + 0.5})
             if e == nil { return true }
             if night > 0.5 { enemy_set_level(e, monster_level(e.pos, 1)) } // tougher by night
             if kind == .Skeleton && night > 0.6 {
@@ -799,14 +837,15 @@ site_spawn :: proc(sim: ^Sim, lm: Landmark, key: [2]int, night: f32) -> int {
     ring := f32(6 * TERRAIN_SCALE)
     switch lm.kind {
     case .None:
-    case .Tower:  add(&kinds, &n, .Skeleton, 3)
+    case .Tower:  add(&kinds, &n, .Skeleton, 2); add(&kinds, &n, .Archer, 2)
     case .Shrine: add(&kinds, &n, .Skeleton, 2); ring = 5 * TERRAIN_SCALE
     case .Stones: add(&kinds, &n, .Skeleton, night > 0.5 ? 4 : 2); ring = 4 * TERRAIN_SCALE
     case .Camp:
         b := terrain_at(lm.x, lm.z).biome
         orcs := (b == .Desert || b == .Badlands) ? 2 : 1
         add(&kinds, &n, .Orc, orcs)
-        add(&kinds, &n, .Goblin, 4 - orcs + 1)
+        add(&kinds, &n, .Goblin, 4 - orcs)
+        add(&kinds, &n, .Slinger, 1)
     }
     placed := 0
     for i in 0 ..< n {
@@ -878,6 +917,7 @@ enemy_debug_spawn :: proc(gs: ^Game_State) {
 
 enemies_clear :: proc(sim: ^Sim) {
     for &e in sim.enemies.list { e.alive = false }
+    for &sh in sim.shots.list { sh.alive = false }
     clear(&sim.enemies.sites)
     sim.enemies.spawn_timer = 30
 }
@@ -918,13 +958,13 @@ enemy_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
     feet.y -= e.rising * sp.height * 0.9
     tint := la.lerp(e.tint, [3]f32{2.6, 2.6, 2.6}, e.flash * 0.7)
     bone_tint := la.lerp([3]f32{1, 1, 1}, [3]f32{2.4, 2.4, 2.4}, e.flash * 0.7)
-    if e.kind == .Skeleton { tint = bone_tint }
+    if enemy_bony(e.kind) { tint = bone_tint }
     if e.freeze > 0 { feet += [3]f32{rand.float32_range(-1, 1), 0, rand.float32_range(-1, 1)} * 0.03 }
 
     // Dead: falls over backwards about its feet; skeletons fall apart.
     body := basis_yaw(e.yaw)
     if e.state == .Dead {
-        if e.kind == .Skeleton { skeleton_heap(f, e, feet, tint); return }
+        if enemy_bony(e.kind) { skeleton_heap(f, e, feet, tint); return }
         fall := ease_out(min(e.death * 2.2, 1))
         body = body * basis_rot_x(-fall * math.PI * 0.48)
         feet.y -= max(e.death - 2.5, 0) * 0.6 // sinks away
@@ -942,6 +982,16 @@ enemy_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
     key.pitch = -0.6 * sw
     lean: f32 = 0.06 * amp
     keys := SWING_KEYS[e.swing]
+    if sp.shot_speed > 0 {
+        // Drawing a bow: the arm out ahead, the bow upright in it. Winding
+        // a sling: whirled about overhead, then flung forward.
+        if sp.shot == .Arrow {
+            keys = {{0.15, -1.5, 0, -0.35}, {0.15, -1.45, 0, -0.35}}
+        } else {
+            w := e.age * 16
+            keys = {{1.2 * math.sin(w), 2.7 + 0.3 * math.cos(w), 1.5, 0}, {-0.3, -1.3, 1.5, 0.3}}
+        }
+    }
     switch e.state {
     case .Windup:
         t := ease_out(1 - max(e.timer, 0) / sp.windup)
@@ -999,7 +1049,7 @@ skeleton_heap :: proc(f: ^Ent_Frame, e: ^Enemy, feet: [3]f32, tint: [3]f32) {
     attach_part(f, .Skel_Arm, g, body, 1, {-0.3 * k - 0.23 * (1 - k), drop(1.3, k), -0.25 * k}, basis_rot_x(1.5 * k) * basis_rot_z(-0.4 * k), tint)
     attach_part(f, .Skel_Leg, g, body, 1, {0.1, drop(0.78, k), -0.3 * k}, basis_rot_x(1.5 * k), tint)
     attach_part(f, .Skel_Leg, g, body, 1, {-0.2 * k - 0.09, drop(0.78, k), 0.2 * k}, basis_rot_x(1.3 * k) * basis_rot_z(-0.5 * k), tint)
-    attach_part(f, .Old_Sword, g, body, 1, {0.5 * k, 0.05, 0.3 * k}, basis_yaw(1.2) * basis_rot_x(-math.PI / 2 * k + 0.0), {1, 1, 1})
+    attach_part(f, ENEMY_RIGS[e.kind].weapon, g, body, 1, {0.5 * k, 0.05, 0.3 * k}, basis_yaw(1.2) * basis_rot_x(-math.PI / 2 * k + 0.0), {1, 1, 1})
 }
 
 // ─── Shapes ─────────────────────────────────────────────────────────────────
