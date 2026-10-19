@@ -48,6 +48,7 @@ Enemy_Spec :: struct {
     radius:   f32, // collision half width
     height:   f32,
     hp:       f32,
+    poise:    f32, // how much a run of blows takes to stagger it (Attack_Info.poise); light ones shrug off light hits
     damage:   f32,
     walk:     f32,
     run:      f32,
@@ -62,13 +63,13 @@ Enemy_Spec :: struct {
 }
 
 ENEMY_SPECS := [Enemy_Kind]Enemy_Spec{
-    .Skeleton = {scale = 1.12, radius = 0.34, height = 2.0, hp = 45, damage = 13, walk = 1.5, run = 4.2, weight = 1,
+    .Skeleton = {scale = 1.12, radius = 0.34, height = 2.0, hp = 45, poise = 22, damage = 13, walk = 1.5, run = 4.2, weight = 1,
                  reach = 2.1, windup = 0.5,  strike = 0.16, recover = 0.55, aggro = 20, knock = {7, 4},
                  gore = {0.82, 0.78, 0.68}},
-    .Goblin   = {scale = 0.95, radius = 0.32, height = 1.7, hp = 32, damage = 9,  walk = 2.0, run = 5.2, weight = 0.8,
+    .Goblin   = {scale = 0.95, radius = 0.32, height = 1.7, hp = 32, poise = 10, damage = 9,  walk = 2.0, run = 5.2, weight = 0.8,
                  reach = 1.9, windup = 0.38, strike = 0.13, recover = 0.45, aggro = 18, knock = {6, 4},
                  gore = {0.40, 0.08, 0.06}},
-    .Orc      = {scale = 1.4,  radius = 0.5,  height = 2.55, hp = 130, damage = 28, walk = 1.4, run = 3.7, weight = 2.6,
+    .Orc      = {scale = 1.4,  radius = 0.5,  height = 2.55, hp = 130, poise = 55, damage = 28, walk = 1.4, run = 3.7, weight = 2.6,
                  reach = 2.7, windup = 0.8,  strike = 0.2,  recover = 0.85, aggro = 22, knock = {13, 6},
                  gore = {0.40, 0.08, 0.06}},
 }
@@ -123,6 +124,9 @@ Enemy :: struct {
     freeze:     f32,    // stuck on the sword (hit stop)
     bar:        f32,    // health bar shows while > 0
     level:      u8,     // levels.odin: its health and blows scale with it
+    poise:      f32,    // left before it staggers (back to full a while after the last blow)
+    poise_t:    f32,    // since the last blow
+    open:       f32,    // parried: reeling this much longer, and a blow now is a riposte (server_hit)
     age:        f32,
     walk_phase: f32,
     speed:      f32,    // smoothed ground speed (drives the gait)
@@ -186,6 +190,7 @@ enemy_spawn :: proc(sim: ^Sim, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
             timer = rand.float32_range(0.5, 3), tint = tint, walk_phase = rand.float32_range(0, 6),
         }
         enemy_set_level(&e, monster_level(pos))
+        e.poise = ENEMY_SPECS[kind].poise
         s.last_uid += 1
         e.uid = s.last_uid
         return &e
@@ -254,6 +259,9 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
         e.flash = max(e.flash - dt * 7, 0)
         e.bar = max(e.bar - dt, 0)
         if e.freeze > 0 { e.freeze -= dt; continue }
+        e.open = max(e.open - dt, 0)
+        e.poise_t += dt
+        if e.poise_t > POISE_RESET { e.poise = ENEMY_SPECS[e.kind].poise }
         e.age += dt
         e.timer -= dt
         e.rising = max(e.rising - dt * 0.9, 0)
@@ -396,8 +404,10 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
                 e.vel.xz -= dir * (3 * world_scale / sp.weight)
                 e.timer = sp.strike * 0.5 // the swing's spent
             case .Parried:
-                // Thrown off balance: reeling, wide open.
+                // Thrown off balance: reeling, wide open (a riposte lands
+                // three times as hard: server_hit).
                 e.state, e.timer = .Stagger, 1.3
+                e.open = 1.3
                 e.vel = {-dir.x * 5 / sp.weight, 3, -dir.y * 5 / sp.weight} * world_scale
                 e.on_ground = false
                 e.flash = 1
@@ -501,29 +511,35 @@ enemy_move :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     }
 }
 
-// Damage and knock it about; player `by` struck it, and has its attention.
-// True if it died.
-enemy_damage :: proc(sim: ^Sim, e: ^Enemy, damage: f32, knock: [3]f32, boosted: bool, by := LOCAL_PLAYER) -> bool {
+// Damage it; player `by` struck it, and has its attention. The blow wears
+// its poise down by `poise`: broken, it staggers and is knocked about;
+// until then it stands its ground and carries on with what it was doing
+// (a swing still comes). True if it died; staggered: it was.
+enemy_damage :: proc(sim: ^Sim, e: ^Enemy, damage: f32, knock: [3]f32, boosted: bool, by := LOCAL_PLAYER, poise: f32 = 1000) -> (died, staggered: bool) {
     sp := ENEMY_SPECS[e.kind]
-    if e.state == .Dead { return false }
+    if e.state == .Dead { return }
     e.hp -= damage
     e.flash = 1
     e.bar = 4
-    e.vel = knock / sp.weight
-    e.vel.y = knock.y / math.sqrt(sp.weight)
-    e.on_ground = false
+    e.poise -= poise
+    e.poise_t = 0
+    staggered = e.poise <= 0 || e.state == .Stagger
+    k: f32 = staggered ? 1 : 0.15 // holding its ground: only a shove
+    e.vel = knock * k / sp.weight
+    e.vel.y = knock.y * k / math.sqrt(sp.weight)
+    if staggered { e.on_ground = false }
     e.rising = 0
     e.prey = by
     e.last_seen, e.seen_ago = player_feet(&sim.players[by]), 0
     c := enemy_center(e)
     sim_emit(sim, {kind = .Enemy_Hit, enemy = e.kind, pos = c, vec = knock, amount = damage, boosted = boosted})
-    // Heavy ones shrug off the light hits mid-swing.
-    if e.kind != .Orc || damage >= 20 || (e.state != .Windup && e.state != .Strike) {
-        e.state, e.timer = .Stagger, 0.45 / math.sqrt(sp.weight)
+    if staggered && e.state != .Stagger {
+        e.state, e.timer = .Stagger, 0.7 / math.sqrt(sp.weight)
+        e.poise = sp.poise
     }
-    if e.hp > 0 { return false }
+    if e.hp > 0 { return }
     enemy_die(sim, e, knock)
-    return true
+    return true, staggered
 }
 
 @(private="file")

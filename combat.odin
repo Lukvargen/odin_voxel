@@ -3,37 +3,41 @@ package main
 import "core:math"
 import la "core:math/linalg"
 
-// Melee, Cube World style: fast combos, a dodge roll, and hits that feel
-// heavy. R swaps the hotbar for the weapon bar and back (crafting.odin):
-// what's in its slot (1-4, the wheel) is in your hand, a sword, or with
-// nothing there your fists, which punch instead (FIST_ATTACKS: quicker,
-// lighter, closer). A sword hits as hard and reaches as far as it's made
-// (WEAPONS). While fighting:
+// Melee in the spirit of Dark Souls: every swing a commitment, paid for in
+// stamina, read and answered. R swaps the hotbar for the weapon bar and back
+// (crafting.odin): what's in its slot (1-4, the wheel) is in your hand, a
+// sword, or with nothing there your fists (FIST_ATTACKS: quicker, lighter,
+// closer). A sword hits as hard and reaches as far as it's made (WEAPONS).
 //
-// - Left click: a three hit combo on the ground (slash, backhand slash,
-//   overhead finisher); click per swing or hold. A click during a swing is
-//   remembered and the next starts as soon as this one has struck and
-//   followed through a little. After the finisher, a short breath
-//   (COMBO_COOLDOWN) before the next combo. In the air: up to AIR_ATTACKS_MAX alternating air slashes,
-//   each hit holding you up a little (juggling a slime), then you come down.
-//   Looking down steeply from high enough: a plunge, slamming down with a
-//   shockwave, or bouncing off a slime hit on the way down.
-// - Right click: a rising slash that launches what it hits, and you with it
-//   (once per jump).
-// - Shift: a dodge roll the way you're moving (backwards standing still),
-//   briefly untouchable; cancels a swing; once per jump in the air.
-// - F (hold): guard. Hits from in front land as a fraction of themselves
-//   with little knockback; raised just before a hit lands (PARRY_WINDOW) it
-//   is a parry: nothing gets through and the attacker is left reeling. You
-//   move slowly and can't swing while guarding.
+// Stamina (STAMINA_MAX) pays for it all: swings, rolls, sprinting while
+// fighting, and the blows a guard takes. It comes back quickly once you stop
+// (slowly behind a guard); with none left you can't swing or roll.
 //
-// A hit stops the sword in what it hit for a few hundredths of a second
-// while the slime shudders in place (hit stop), and the rest of the world
-// carries on, so it reads as weight, not lag; kills and heavy hits also slow
-// the world a moment, easing back (combat_dt). Hits shake
-// the view, knock slimes about, flash and squash them, splatter goo and pop a
-// damage number. Every hit adds to a counter that raises damage, as does
-// hitting while moving fast.
+// - Left click: a light swing, one per click; the next alternates
+//   (slash, backhand). A click while one swings is kept only once it has
+//   struck (buffer_point), and the next starts as it winds down
+//   (chain_point): spamming does nothing. While swinging you're rooted to a
+//   shuffle, and can't roll out until the follow-through is done.
+// - Right click: a heavy swing, a long wind-up to a blow twice as hard that
+//   breaks a guard's poise.
+// - In the air: one jump attack; looking down steeply from high enough, a
+//   plunge, slamming down with a shockwave (and a long landing).
+// - Shift: a roll the way you're moving (backwards standing still),
+//   untouchable for a moment (DODGE_INVULN), on the ground only.
+// - F (hold): guard. Blows from in front cost stamina instead of health,
+//   bar a little that gets through; out of stamina the guard breaks and you
+//   stagger. Raised just before a blow lands (PARRY_WINDOW) it's a parry:
+//   the attacker reels, open, and a blow now is a riposte (RIPOSTE times as
+//   hard: server_hit).
+//
+// Hit, you stagger (STAGGER_HIT) and whatever you were swinging is lost.
+// Monsters have poise (enemies.odin, slime.odin): light blows only stagger
+// the light ones; the big ones swing on through until enough lands, or a
+// heavy blow does.
+//
+// A hit stops the blade in what it hit for a few hundredths of a second
+// while it shudders in place (hit stop) and the view shakes; a riposte and
+// a plunge's landing slow the world a moment too, easing back (combat_fx_dt).
 //
 // The sword is drawn as voxel-model parts (combat_add_parts, and in the
 // chase view on the body: player_add_parts). Swings are arcs in view space:
@@ -42,28 +46,39 @@ import la "core:math/linalg"
 // fist or the other (FIST_MOVES).
 
 SLOWMO_SCALE       :: f32(0.3) // the world's speed at the start of a slow-down...
-SLOWMO_HEAVY       :: f32(0.14) // ...lasting this long after a heavy hit...
-SLOWMO_KILL        :: f32(0.22) // ...or a kill
+SLOWMO_HEAVY       :: f32(0.14) // ...lasting this long after a heavy blow (a riposte)...
+SLOWMO_KILL        :: f32(0.22) // ...or a parry
 
 PLAYER_MAX_HP      :: f32(70)
 REGEN_DELAY        :: f32(6)    // seconds after being hurt before health comes back...
 REGEN_RATE         :: f32(4)    // ...at this many points a second
 HURT_INVULN        :: f32(0.5)
 
-COMBO_TIMEOUT      :: f32(2.5)  // the counter resets this long after the last hit
-COMBO_DAMAGE_STEP  :: f32(0.02) // damage bonus per hit in the counter...
-COMBO_DAMAGE_MAX   :: f32(1.0)  // ...up to double at 50
-SPEED_DAMAGE_FROM  := f32(5.0 * SPRINT_FACTOR) // = WALK_SPEED * SPRINT_FACTOR (world_scale_apply) // horizontal speed where the speed bonus starts...
-SPEED_DAMAGE_MAX   :: f32(0.6)  // ...reaching this at twice that
-CHAIN_WINDOW       :: f32(0.35) // after a swing ends, a press this soon still continues the chain
+STAMINA_MAX        :: f32(100)
+STAMINA_REGEN      :: f32(48)   // a second, once STAMINA_DELAY has passed since it was last spent...
+STAMINA_DELAY      :: f32(0.6)
+STAMINA_GUARDING   :: f32(0.35) // ...this much of it behind a guard
+STAMINA_SPRINT     :: f32(14)   // a second, sprinting while fighting
+STAMINA_WINDED     :: f32(25)   // run dry sprinting: no sprint again until it's back to this
+DODGE_STAMINA      :: f32(24)
+GUARD_STAMINA      :: f32(1.4)  // per point of a blow the guard takes (fists: FIST_GUARD_COST times as much)
+FIST_GUARD_COST    :: f32(1.8)
+RIPOSTE            :: f32(3)    // a blow at a parried monster, while it reels
 
-LUNGE_SPEED        : f32 = f32(6)    // voxels/s toward the slime in front when a ground swing starts...
-LUNGE_RANGE        : f32 = f32(5)    // ...if one is this close...
+STAGGER_HIT        :: f32(0.35) // hit, you can't act this long...
+STAGGER_HEAVY      :: f32(0.6)  // ...a heavy blow (HEAVY_HIT or more)
+GUARD_BREAK        :: f32(0.9)  // the guard broken by a blow it couldn't pay for
+ATTACK_MOVE        :: f32(0.3)  // of walking speed, swinging (but for the strike's step in)
+
+COMBO_TIMEOUT      :: f32(2.5)  // the hit counter resets this long after the last hit
+SPEED_DAMAGE_FROM  := f32(5.0 * SPRINT_FACTOR) // (world_scale_apply sets it; no speed bonus any more)
+CHAIN_WINDOW       :: f32(0.4)  // after a light swing ends, a click this soon swings the other way
+
+LUNGE_SPEED        : f32 = f32(3.5)  // voxels/s toward what's in front as a ground swing starts...
+LUNGE_RANGE        : f32 = f32(4)    // ...if it's this close...
 LUNGE_STOP         : f32 = f32(1.3)  // ...to end up about this far from its side
-AIR_HIT_HOVER      : f32 = f32(3.5)  // a hit in the air: upward speed, at least
-AIR_ATTACKS_MAX    :: 3         // air slashes per jump: then you have to come down
-COMBO_COOLDOWN     :: f32(0.15) // a breath after a finisher or an air string (clicks wait it out)
-RISE_SPEED         : f32 = f32(13)   // the rising slash takes you up with what it launches
+AIR_HIT_HOVER      : f32 = f32(3.5)  // (world_scale_apply scales it; no hovering on air hits any more)
+RISE_SPEED         : f32 = f32(13)   // (likewise: the rising slash is gone)
 
 PLUNGE_MIN_PITCH   :: f32(-40)  // degrees: looking down further than this...
 PLUNGE_MIN_HEIGHT  : f32 = f32(2.5)  // ...this high up, an air attack is a plunge
@@ -71,18 +86,18 @@ PLUNGE_SPEED       : f32 = f32(42)
 PLUNGE_RADIUS      :: f32(5)    // the landing's shockwave
 PLUNGE_BOUNCE      : f32 = f32(14)   // bouncing off a slime hit on the way down
 
-DODGE_SPEED        : f32 = f32(16)   // at least this fast the dodge's way...
-DODGE_TIME         :: f32(0.24) // ...for this long
-DODGE_INVULN       :: f32(0.32)
-DODGE_COOLDOWN     :: f32(0.45)
+DODGE_SPEED        : f32 = f32(12)   // at least this fast the roll's way...
+DODGE_TIME         :: f32(0.38) // ...for this long
+DODGE_INVULN       :: f32(0.26) // untouchable from its start this long
+DODGE_RECOVER      :: f32(0.15) // after it, getting up: no swing or roll yet
 
-BLOCK_CHIP         :: f32(0.2)  // share of a blocked hit that gets through...
-BLOCK_CHIP_HEAVY   :: f32(0.35) // ...of a heavy one (HEAVY_HIT or more)
+BLOCK_CHIP         :: f32(0.12) // share of a blocked hit that gets through...
+BLOCK_CHIP_HEAVY   :: f32(0.25) // ...of a heavy one (HEAVY_HIT or more)
 HEAVY_HIT          :: f32(20)
 BLOCK_KNOCK        :: f32(0.35) // knockback kept when blocked
 BLOCK_ARC          :: f32(0.3)  // cos of the half angle in front a guard covers (~73 deg)
-BLOCK_SPEED        :: f32(0.5)  // of walking speed, guarding
-PARRY_WINDOW       :: f32(0.22) // a guard this fresh parries
+BLOCK_SPEED        :: f32(0.5)  // of walking speed, guarding (and staggering)
+PARRY_WINDOW       :: f32(0.18) // a guard this fresh parries
 PARRY_INVULN       :: f32(0.2)  // a parried blow's follow-up can't land this long
 
 SWING_PIVOT        :: [3]f32{0.06, -0.24, 0.45} // view space: swings circle around it...
@@ -98,12 +113,14 @@ Attack_Kind :: enum u8 {
 }
 
 // One swing. Times in seconds: winding up, the strike (when it hits),
-// following through, then recovering (a chained swing starts in it).
+// following through, then recovering (the next swing starts in it).
 // The blade points along u*cos(a) + v*sin(a) (view space: x right, y up,
 // z ahead), a0 to a1 during the strike, the grip on a circle around pivot.
 Attack_Info :: struct {
     windup, strike, follow, recover: f32,
     damage:   f32,
+    poise:    f32,    // of the poise of what it hits it takes (enemies.odin)
+    stamina:  f32,    // what it costs to swing
     knock:    [2]f32, // away and up, voxels/s
     arc:      f32,    // half angle in front it hits in, radians
     reach:    f32,    // from the eye, voxels
@@ -119,50 +136,51 @@ DEG :: math.RAD_PER_DEG
 
 ATTACKS := [Attack_Kind]Attack_Info{
     .None = {},
-    // Upper right to lower left.
-    .Slash_1 = {windup = 0.1, strike = 0.1, follow = 0.13, recover = 0.17, damage = 10, knock = {6, 4}, arc = 75 * DEG, reach = 3.2,
-        hitstop = 0.06, shake = 0.35, u = {0, 0.25, 1}, v = {1, 0.4, 0}, a0 = 115 * DEG, a1 = -100 * DEG},
-    // Lower left to upper right, backhand.
-    .Slash_2 = {windup = 0.09, strike = 0.1, follow = 0.13, recover = 0.17, damage = 12, knock = {6, 4.5}, arc = 75 * DEG, reach = 3.2,
-        hitstop = 0.06, shake = 0.35, u = {0, 0.25, 1}, v = {-1, -0.3, 0}, a0 = 105 * DEG, a1 = -110 * DEG, backhand = true},
-    // Overhead, straight down.
-    .Finisher = {windup = 0.18, strike = 0.11, follow = 0.18, recover = 0.26, damage = 26, knock = {15, 7}, arc = 45 * DEG, reach = 3.5,
-        hitstop = 0.1, shake = 0.9, u = {0, 0, 1}, v = {0.3, 1, 0}, a0 = 110 * DEG, a1 = -75 * DEG, pivot = {0.16, -0.14, 0.55}},
-    .Air_Slash_1 = {windup = 0.07, strike = 0.09, follow = 0.1, recover = 0.13, damage = 9, knock = {3, 8}, arc = 75 * DEG, reach = 3.3,
-        hitstop = 0.05, shake = 0.3, u = {0, 0.2, 1}, v = {1, 0.15, 0}, a0 = 110 * DEG, a1 = -100 * DEG},
-    .Air_Slash_2 = {windup = 0.07, strike = 0.09, follow = 0.1, recover = 0.13, damage = 9, knock = {3, 8}, arc = 75 * DEG, reach = 3.3,
-        hitstop = 0.05, shake = 0.3, u = {0, 0.2, 1}, v = {-1, 0.1, 0}, a0 = 105 * DEG, a1 = -105 * DEG, backhand = true},
-    // From low in front up over the head.
-    .Rise = {windup = 0.1, strike = 0.1, follow = 0.14, recover = 0.18, damage = 14, knock = {2, 15}, arc = 50 * DEG, reach = 3.3,
+    // Light: upper right to lower left...
+    .Slash_1 = {windup = 0.22, strike = 0.11, follow = 0.14, recover = 0.34, damage = 12, poise = 14, stamina = 18, knock = {5, 3},
+        arc = 70 * DEG, reach = 3.2, hitstop = 0.06, shake = 0.35, u = {0, 0.25, 1}, v = {1, 0.4, 0}, a0 = 115 * DEG, a1 = -100 * DEG},
+    // ...and back, lower left to upper right, backhand.
+    .Slash_2 = {windup = 0.2, strike = 0.11, follow = 0.14, recover = 0.36, damage = 13, poise = 14, stamina = 18, knock = {5, 3.5},
+        arc = 70 * DEG, reach = 3.2, hitstop = 0.06, shake = 0.35, u = {0, 0.25, 1}, v = {-1, -0.3, 0}, a0 = 105 * DEG, a1 = -110 * DEG, backhand = true},
+    // Heavy (right click): overhead, straight down, from a long wind-up.
+    .Finisher = {windup = 0.52, strike = 0.13, follow = 0.2, recover = 0.45, damage = 30, poise = 45, stamina = 32, knock = {12, 5},
+        arc = 45 * DEG, reach = 3.5, hitstop = 0.1, shake = 0.9, u = {0, 0, 1}, v = {0.3, 1, 0}, a0 = 110 * DEG, a1 = -75 * DEG, pivot = {0.16, -0.14, 0.55}},
+    // The jump attack (one a jump).
+    .Air_Slash_1 = {windup = 0.12, strike = 0.12, follow = 0.12, recover = 0.28, damage = 14, poise = 20, stamina = 18, knock = {4, 5},
+        arc = 70 * DEG, reach = 3.3, hitstop = 0.06, shake = 0.4, u = {0, 0.2, 1}, v = {1, 0.15, 0}, a0 = 110 * DEG, a1 = -100 * DEG},
+    .Air_Slash_2 = {windup = 0.12, strike = 0.12, follow = 0.12, recover = 0.28, damage = 14, poise = 20, stamina = 18, knock = {4, 5},
+        arc = 70 * DEG, reach = 3.3, hitstop = 0.06, shake = 0.4, u = {0, 0.2, 1}, v = {-1, 0.1, 0}, a0 = 105 * DEG, a1 = -105 * DEG, backhand = true},
+    // (No longer swung: kept for the pose table.)
+    .Rise = {windup = 0.1, strike = 0.1, follow = 0.14, recover = 0.18, damage = 14, poise = 20, stamina = 20, knock = {2, 15}, arc = 50 * DEG, reach = 3.3,
         hitstop = 0.08, shake = 0.7, u = {0, 0, 1}, v = {-0.15, -1, 0}, a0 = 75 * DEG, a1 = -110 * DEG, pivot = {0.08, -0.2, 0.5}, backhand = true},
     // Held point down until landing or hitting something: the strike is the fall.
-    .Plunge = {windup = 0.06, strike = 10, damage = 30, knock = {8, 10}, arc = math.PI, hitstop = 0.1, shake = 1,
+    .Plunge = {windup = 0.1, strike = 10, damage = 30, poise = 50, stamina = 22, knock = {8, 10}, arc = math.PI, hitstop = 0.1, shake = 1,
         u = {0, 0, 1}, v = {0, -1, 0}, a0 = 55 * DEG, a1 = 70 * DEG},
-    // The landing's shockwave.
-    .Plunge_Land = {strike = 0.02, follow = 0.1, recover = 0.18, damage = 20, knock = {13, 9}, arc = math.PI, reach = PLUNGE_RADIUS,
+    // The landing's shockwave, and a long getting up.
+    .Plunge_Land = {strike = 0.02, follow = 0.1, recover = 0.4, damage = 20, poise = 35, knock = {13, 9}, arc = math.PI, reach = PLUNGE_RADIUS,
         hitstop = 0.11, shake = 1.2, u = {0, 0, 1}, v = {0, -1, 0}, a0 = 70 * DEG, a1 = 75 * DEG},
 }
 
-// Punches: quicker and lighter than the sword's swings, and closer. On the
-// ground a jab (left), a cross (right) and a hook to finish; in the air the
-// jab and the cross; the uppercut (right click) launches; from up high, the
-// fists come down. No u, v, a0, a1: the fists go by FIST_MOVES.
+// Punches: quicker and lighter than the sword's swings, and closer. Light:
+// a jab (left), then a cross (right); heavy, a hook; a jab in the air; from
+// up high, the fists come down. No u, v, a0, a1: the fists go by FIST_MOVES.
 FIST_ATTACKS := [Attack_Kind]Attack_Info{
     .None = {},
-    .Slash_1 = {windup = 0.05, strike = 0.07, follow = 0.06, recover = 0.12, damage = 4, knock = {3, 2.5}, arc = 40 * DEG, reach = 2.6,
-        hitstop = 0.04, shake = 0.2},
-    .Slash_2 = {windup = 0.06, strike = 0.08, follow = 0.07, recover = 0.13, damage = 5, knock = {4, 3}, arc = 40 * DEG, reach = 2.7,
-        hitstop = 0.05, shake = 0.25},
-    .Finisher = {windup = 0.13, strike = 0.1, follow = 0.1, recover = 0.2, damage = 9, knock = {10, 5}, arc = 55 * DEG, reach = 2.7,
-        hitstop = 0.08, shake = 0.6},
-    .Air_Slash_1 = {windup = 0.05, strike = 0.07, follow = 0.06, recover = 0.1, damage = 4, knock = {2, 6}, arc = 45 * DEG, reach = 2.7,
-        hitstop = 0.04, shake = 0.2},
-    .Air_Slash_2 = {windup = 0.05, strike = 0.07, follow = 0.06, recover = 0.1, damage = 4, knock = {2, 6}, arc = 45 * DEG, reach = 2.7,
-        hitstop = 0.04, shake = 0.2},
-    .Rise = {windup = 0.1, strike = 0.09, follow = 0.12, recover = 0.16, damage = 7, knock = {2, 12}, arc = 40 * DEG, reach = 2.7,
-        hitstop = 0.07, shake = 0.55},
-    .Plunge = {windup = 0.06, strike = 10, damage = 12, knock = {6, 8}, arc = math.PI, hitstop = 0.08, shake = 0.8},
-    .Plunge_Land = {strike = 0.02, follow = 0.1, recover = 0.18, damage = 8, knock = {10, 7}, arc = math.PI, reach = PLUNGE_RADIUS * 0.7,
+    .Slash_1 = {windup = 0.14, strike = 0.08, follow = 0.1, recover = 0.26, damage = 4, poise = 6, stamina = 11, knock = {3, 2},
+        arc = 40 * DEG, reach = 2.6, hitstop = 0.04, shake = 0.2},
+    .Slash_2 = {windup = 0.15, strike = 0.08, follow = 0.1, recover = 0.27, damage = 5, poise = 6, stamina = 11, knock = {3.5, 2.5},
+        arc = 40 * DEG, reach = 2.7, hitstop = 0.05, shake = 0.25},
+    // Heavy: the hook.
+    .Finisher = {windup = 0.34, strike = 0.1, follow = 0.12, recover = 0.36, damage = 11, poise = 26, stamina = 22, knock = {9, 4},
+        arc = 55 * DEG, reach = 2.7, hitstop = 0.08, shake = 0.6},
+    .Air_Slash_1 = {windup = 0.1, strike = 0.08, follow = 0.1, recover = 0.24, damage = 5, poise = 8, stamina = 11, knock = {2, 4},
+        arc = 45 * DEG, reach = 2.7, hitstop = 0.04, shake = 0.2},
+    .Air_Slash_2 = {windup = 0.1, strike = 0.08, follow = 0.1, recover = 0.24, damage = 5, poise = 8, stamina = 11, knock = {2, 4},
+        arc = 45 * DEG, reach = 2.7, hitstop = 0.04, shake = 0.2},
+    .Rise = {windup = 0.1, strike = 0.09, follow = 0.12, recover = 0.16, damage = 7, poise = 10, stamina = 14, knock = {2, 12},
+        arc = 40 * DEG, reach = 2.7, hitstop = 0.07, shake = 0.55},
+    .Plunge = {windup = 0.1, strike = 10, damage = 12, poise = 30, stamina = 16, knock = {6, 8}, arc = math.PI, hitstop = 0.08, shake = 0.8},
+    .Plunge_Land = {strike = 0.02, follow = 0.1, recover = 0.36, damage = 8, poise = 20, knock = {10, 7}, arc = math.PI, reach = PLUNGE_RADIUS * 0.7,
         hitstop = 0.09, shake = 1},
 }
 
@@ -198,6 +216,7 @@ attack_info :: proc(c: ^Combat, kind: Attack_Kind) -> Attack_Info {
     a := ATTACKS[kind]
     w := WEAPONS[c.weapon]
     a.damage *= w.damage
+    a.poise *= w.damage // a better blade bites deeper into a guard too
     if kind != .Plunge_Land { a.reach *= w.reach }
     return a
 }
@@ -208,7 +227,7 @@ attack_info :: proc(c: ^Combat, kind: Attack_Kind) -> Attack_Info {
 Sword_Pose :: struct { grip, blade, back: [3]f32 }
 
 Combat_Input :: struct {
-    attack, attack_held, special, dodge: bool,
+    attack, attack_held, special, dodge: bool, // special: the heavy swing (right click)
     block: bool, // held
     move: [2]f32, // x right, y forward: the dodge's direction
 }
@@ -220,6 +239,11 @@ Combat :: struct {
     since_hurt:  f32,
     invuln:      f32,
     hurt_flash:  f32, // 1 when hurt, fading
+    stamina:     f32,
+    stamina_rest: f32, // since stamina was last spent
+    stamina_flash: f32, // > 0: wanted more than there was; the bar flashes
+    winded:      bool, // ran dry sprinting: no sprinting until it's back to STAMINA_WINDED
+    stagger:     f32,  // hit (or the guard broken): no swinging, rolling or guarding this much longer
 
     attack:      Attack_Kind,
     attack_time: f32,
@@ -262,7 +286,7 @@ Combat :: struct {
 
 // A sword in hand until the weapon bar says otherwise (weapon_select).
 combat_init :: proc(c: ^Combat) {
-    c^ = {hp = PLAYER_MAX_HP, dodge_time = 10, weapon = .Steel_Sword, pose = sword_carry(0, 0, 0)}
+    c^ = {hp = PLAYER_MAX_HP, stamina = STAMINA_MAX, dodge_time = 10, weapon = .Steel_Sword, pose = sword_carry(0, 0, 0)}
 }
 
 // R: to fighting, or back to building.
@@ -310,10 +334,55 @@ attack_duration :: proc(c: ^Combat, kind: Attack_Kind) -> f32 {
     return a.windup + a.strike + a.follow + a.recover
 }
 
+// Where in a swing the next one clicked for starts: as it winds down.
 @(private="file")
 chain_point :: proc(c: ^Combat, kind: Attack_Kind) -> f32 {
     a := attack_info(c, kind)
-    return a.windup + a.strike + a.follow * 0.6
+    return a.windup + a.strike + a.follow + a.recover * 0.4
+}
+
+// From where in a swing a click is kept for the next: once it has struck.
+// Before that it's lost: no swinging faster by clicking faster.
+@(private="file")
+buffer_point :: proc(c: ^Combat, kind: Attack_Kind) -> f32 {
+    a := attack_info(c, kind)
+    return a.windup + a.strike
+}
+
+// From where in a swing a roll may cut it short: its follow-through done.
+@(private="file")
+roll_point :: proc(c: ^Combat, kind: Attack_Kind) -> f32 {
+    a := attack_info(c, kind)
+    return a.windup + a.strike + a.follow
+}
+
+// Spends stamina for an action, if there's any left (an action takes what
+// it costs even from a little: the bar just goes empty). False, and the bar
+// flashes, if it's empty.
+@(private="file")
+stamina_spend :: proc(c: ^Combat, amount: f32) -> bool {
+    if c.stamina <= 0 {
+        c.stamina_flash = 0.5
+        return false
+    }
+    c.stamina = max(c.stamina - amount, 0)
+    c.stamina_rest = 0
+    return true
+}
+
+// Whether the sprint key sprints: fighting, only with the breath for it.
+combat_can_sprint :: proc(gs: ^Game_State) -> bool {
+    c := &gs.combat
+    return !c.fighting || (c.stamina > 0 && !c.winded && c.attack == .None && !c.blocking && c.stagger <= 0)
+}
+
+// Held to a shuffle (on the ground): `k` of walking speed at most.
+@(private="file")
+hold_speed :: proc(gs: ^Game_State, k: f32) {
+    cam := &gs.camera
+    if !grounded(gs) { return }
+    limit := WALK_SPEED * k
+    if sp := la.length(cam.velocity.xz); sp > limit { cam.velocity.xz *= limit / sp }
 }
 
 @(private="file")
@@ -323,35 +392,37 @@ grounded :: proc(gs: ^Game_State) -> bool { return gs.camera.on_ground || gs.cam
 combat_pre_update :: proc(gs: ^Game_State, in_: Combat_Input, dt: f32) {
     c := &gs.combat
     cam := &gs.camera
-    if grounded(gs) {
-        c.air_dodge_used = false
-        c.rise_used = false
-        c.air_attacks = 0
-    }
+    if grounded(gs) { c.air_attacks = 0 }
     if dt <= 0 { return }
-    c.dodge_cooldown = max(c.dodge_cooldown - dt, 0)
-    c.cooldown = max(c.cooldown - dt, 0)
     c.chain_timer = max(c.chain_timer - dt, 0)
-    if !c.fighting || gs.glider.deployed { c.attack, c.blocking = .None, false; return }
+    c.stamina_flash = max(c.stamina_flash - dt, 0)
+    c.stagger = max(c.stagger - dt, 0)
+    if !c.fighting || gs.glider.deployed { c.attack, c.queued, c.blocking = .None, .None, false; return }
 
-    // Dodge: cancels the swing.
-    if in_.dodge && c.dodge_cooldown == 0 && (grounded(gs) || !c.air_dodge_used) {
+    // Staggered: nothing but stumbling.
+    if c.stagger > 0 {
+        c.blocking, c.queued = false, .None
+        hold_speed(gs, BLOCK_SPEED)
+        return
+    }
+
+    // Roll: on the ground, with stamina, not mid-swing (only once its
+    // follow-through is done), not right after another.
+    rolling := c.dodge_time < DODGE_TIME + DODGE_RECOVER
+    swing_done := c.attack == .None || (c.attack != .Plunge && c.attack_time >= roll_point(c, c.attack))
+    if in_.dodge && grounded(gs) && !rolling && swing_done && stamina_spend(c, DODGE_STAMINA) {
         fwd, right := camera_flat_forward(cam^), camera_flat_right(cam^)
         dir := la.normalize0(fwd * in_.move.y + right * in_.move.x)
         if dir == 0 { dir = -fwd }
         c.dodge_dir = dir
         c.dodge_time = 0
-        c.dodge_cooldown = DODGE_COOLDOWN
         c.invuln = max(c.invuln, DODGE_INVULN)
-        if !grounded(gs) {
-            c.air_dodge_used = true
-            cam.velocity.y = max(cam.velocity.y, 3) // a little lift, so it carries
-        }
-        if c.attack != .Plunge { c.attack, c.queued = .None, .None }
+        c.attack, c.queued, c.blocking = .None, .None, false
+        rolling = true
         play(.Dodge, 0.6, vary(0.08))
     }
     if combat_dodging(c) {
-        // At least the dodge's speed its way, easing off at the end; speed
+        // At least the roll's speed its way, easing off at the end; speed
         // beyond that and sideways is kept, so it never slows you down.
         t := c.dodge_time / DODGE_TIME
         target := DODGE_SPEED * (1 - t * t * 0.5)
@@ -362,10 +433,11 @@ combat_pre_update :: proc(gs: ^Game_State, in_: Combat_Input, dt: f32) {
         }
     }
     c.dodge_time = min(c.dodge_time + dt, 10)
+    if rolling { return }
 
     // Guard: up when asked for, unless mid-swing past the wind-up (it comes
-    // up as soon as the swing is done) or rolling.
-    if in_.block && !combat_dodging(c) {
+    // up as soon as the swing is done).
+    if in_.block {
         can := c.attack == .None || (c.attack != .Plunge && c.attack_time < attack_info(c, c.attack).windup)
         if !c.blocking && can {
             c.blocking, c.block_time = true, 0
@@ -376,33 +448,30 @@ combat_pre_update :: proc(gs: ^Game_State, in_: Combat_Input, dt: f32) {
     }
     if c.blocking {
         c.block_time += dt
-        // Slow, braced steps.
-        if grounded(gs) {
-            limit := WALK_SPEED * BLOCK_SPEED
-            if sp := la.length(cam.velocity.xz); sp > limit { cam.velocity.xz *= limit / sp }
-        }
+        hold_speed(gs, BLOCK_SPEED) // slow, braced steps
         return
     }
 
-    // Queue or start swings, on a click or while held. No click is lost: one
-    // made during a swing (or the breath after a combo) is remembered and the
-    // swing starts the moment it can.
+    // Swings: one a click. A click mid-swing is kept only once that one has
+    // struck; it starts as that one winds down (combat_post_update).
     want := Attack_Kind.None
-    if in_.special && !(c.rise_used && !grounded(gs)) {
-        want = .Rise
-    } else if in_.attack || in_.attack_held {
+    if in_.special {
+        want = grounded(gs) ? .Finisher : next_in_chain(gs)
+    } else if in_.attack {
         want = next_in_chain(gs)
     }
-    busy := c.attack == .Plunge || c.attack == .Plunge_Land
-    if want != .None && !busy {
-        if (c.attack == .None || c.attack_time >= chain_point(c, c.attack)) && c.cooldown == 0 {
+    if want != .None {
+        if c.attack == .None {
             start_attack(gs, want)
-        } else if c.queued == .None || in_.special {
+        } else if c.attack != .Plunge && c.attack != .Plunge_Land && c.attack_time >= buffer_point(c, c.attack) {
             c.queued = want
         }
     }
-    if c.attack == .None && c.queued != .None && c.cooldown == 0 {
-        start_attack(gs, c.queued)
+
+    // Swinging: rooted to a shuffle, but for the strike's step in.
+    if c.attack != .None && c.attack != .Plunge {
+        a := attack_info(c, c.attack)
+        if c.attack_time < a.windup * 0.5 || c.attack_time > a.windup + a.strike { hold_speed(gs, ATTACK_MOVE) }
     }
 
     // Plunging: a hang at the top, then straight down, fast.
@@ -425,6 +494,16 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
     c.invuln = max(c.invuln - dt, 0)
     c.since_hurt += dt
     if c.since_hurt > REGEN_DELAY { c.hp = min(c.hp + REGEN_RATE * dt, PLAYER_MAX_HP) }
+    // Stamina: spent sprinting while fighting; back once you stop.
+    c.stamina_rest += dt
+    if c.fighting && cam.sprinting && grounded(gs) && la.length(cam.velocity.xz) > WALK_SPEED * 0.5 {
+        c.stamina = max(c.stamina - STAMINA_SPRINT * dt, 0)
+        c.stamina_rest = 0
+        if c.stamina == 0 { c.winded = true }
+    } else if c.stamina_rest > STAMINA_DELAY && c.attack == .None && !combat_dodging(c) {
+        c.stamina = min(c.stamina + STAMINA_REGEN * (c.blocking ? STAMINA_GUARDING : 1) * dt, STAMINA_MAX)
+    }
+    if c.stamina >= STAMINA_WINDED { c.winded = false }
     c.combo_timer = max(c.combo_timer - dt, 0)
     if c.combo_timer == 0 { c.combo = 0 }
     if c.attack == .None { return }
@@ -452,7 +531,7 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
             }
         }
         if grounded(gs) || c.attack_time > 4 {
-            start_attack(gs, .Plunge_Land)
+            start_plunge_land(gs)
             fx_shockwave(&gs.fx, feet)
             play(.Slam, 1, vary(0.06))
             for t in combat_targets(gs) {
@@ -475,14 +554,14 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
         }
     }
 
-    if c.attack_time >= chain_point(c, c.attack) && c.queued != .None && c.attack != .Finisher && c.cooldown == 0 {
-        start_attack(gs, c.queued)
-    } else if c.attack_time >= attack_duration(c, c.attack) {
-        // The end of a string: a breath before the next.
-        if c.attack == .Finisher || (c.attack == .Air_Slash_2 || c.air_attacks >= AIR_ATTACKS_MAX) && !grounded(gs) {
-            c.cooldown = COMBO_COOLDOWN
-        }
-        c.attack = .None // a queued swing starts after the breath (combat_pre_update)
+    // The next, clicked for in time, as this one winds down.
+    if c.queued != .None && c.attack_time >= chain_point(c, c.attack) {
+        q := c.queued
+        c.queued = .None
+        if start_attack(gs, q) { return }
+    }
+    if c.attack_time >= attack_duration(c, c.attack) {
+        c.attack = .None
         c.chain_timer = CHAIN_WINDOW
     }
 }
@@ -490,22 +569,19 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
 @(private="file")
 next_in_chain :: proc(gs: ^Game_State) -> Attack_Kind {
     c := &gs.combat
-    last := c.attack != .None ? c.attack : (c.chain_timer > 0 ? c.chain : .None)
     if !grounded(gs) {
         if gs.camera.pitch < PLUNGE_MIN_PITCH && height_above_ground(gs) > PLUNGE_MIN_HEIGHT { return .Plunge }
-        if c.air_attacks >= AIR_ATTACKS_MAX { return .None } // land first
-        return last == .Air_Slash_1 ? .Air_Slash_2 : .Air_Slash_1
+        if c.air_attacks >= 1 { return .None } // one a jump: land first
+        return .Air_Slash_1
     }
-    #partial switch last {
-    case .Slash_1: return .Slash_2
-    case .Slash_2: return .Finisher
-    }
-    return .Slash_1
+    last := c.attack != .None ? c.attack : (c.chain_timer > 0 ? c.chain : .None)
+    return last == .Slash_1 ? .Slash_2 : .Slash_1
 }
 
 @(private="file")
-start_attack :: proc(gs: ^Game_State, kind: Attack_Kind) {
+start_attack :: proc(gs: ^Game_State, kind: Attack_Kind) -> bool {
     c := &gs.combat
+    if !stamina_spend(c, attack_info(c, kind).stamina) { return false }
     c.attack = kind
     c.attack_time = 0
     c.attack_id += 1
@@ -513,12 +589,12 @@ start_attack :: proc(gs: ^Game_State, kind: Attack_Kind) {
     c.queued = .None
     c.chain = kind
     c.swing_from = c.pose
-    if kind == .Rise && !grounded(gs) { c.rise_used = true }
     if kind == .Air_Slash_1 || kind == .Air_Slash_2 { c.air_attacks += 1 }
     #partial switch kind {
-    case .Slash_1, .Slash_2, .Finisher, .Rise:
+    case .Slash_1, .Slash_2, .Finisher:
         lunge(gs)
     }
+    return true
 }
 
 @(private="file")
@@ -527,6 +603,17 @@ height_above_ground :: proc(gs: ^Game_State) -> f32 {
     hit, _, ok := raycast_voxel(gs, feet, {0, -1, 0}, 60 * world_scale)
     if !ok { return 60 * world_scale }
     return feet.y - f32(hit.y + 1)
+}
+
+// The plunge lands: its shockwave, free (the plunge paid for it).
+@(private="file")
+start_plunge_land :: proc(gs: ^Game_State) {
+    c := &gs.combat
+    c.attack, c.attack_time = .Plunge_Land, 0
+    c.attack_id += 1
+    c.attack_hit = false
+    c.queued = .None
+    c.swing_from = c.pose
 }
 
 // A ground swing starting with something just ahead steps toward it,
@@ -573,51 +660,30 @@ hit_amount :: proc(gs: ^Game_State, kind: Attack_Kind, at: [3]f32) -> (damage: f
     c := &gs.combat
     cam := &gs.camera
     a := attack_info(c, kind)
-    speed := la.length(cam.velocity.xz)
-    speed_bonus := clamp((speed - SPEED_DAMAGE_FROM) / SPEED_DAMAGE_FROM, 0, 1) * SPEED_DAMAGE_MAX
-    combo_bonus := min(f32(c.combo) * COMBO_DAMAGE_STEP, COMBO_DAMAGE_MAX)
-    damage = a.damage * (1 + combo_bonus + speed_bonus)
-
     away := at - cam.pos
     away.y = 0
     away = la.normalize0(away)
     if away == 0 { away = camera_flat_forward(cam^) }
     knock = away * a.knock[0] + {0, a.knock[1], 0}
-    knock.xz += cam.velocity.xz * 0.35 // moving fast carries into the hit
-    return damage, knock, speed_bonus > 0.2
+    knock.xz += cam.velocity.xz * 0.2 // moving carries a little into the hit
+    return a.damage, knock, false
 }
 
 // What a landed hit does to the swing and the view: combo, hit stop,
 // slow-down, shake, and the lift of an air or rising slash.
 @(private="file")
-hit_feedback :: proc(gs: ^Game_State, kind: Attack_Kind, killed: bool) {
+hit_feedback :: proc(gs: ^Game_State, kind: Attack_Kind, killed, riposte: bool) {
     c := &gs.combat
-    cam := &gs.camera
     a := attack_info(c, kind)
     c.combo += 1
     c.best_combo = max(c.best_combo, c.combo)
     c.combo_timer = COMBO_TIMEOUT
     c.combo_pop = 1
-    c.hitstop = max(c.hitstop, a.hitstop)
-    if killed {
-        slow_down(c, SLOWMO_KILL)
-    } else if a.hitstop >= 0.08 {
-        slow_down(c, SLOWMO_HEAVY)
-    }
-    gs.glider.shake = min(gs.glider.shake + a.shake + (killed ? 0.3 : 0), 1.5)
+    c.hitstop = max(c.hitstop, riposte ? 0.16 : a.hitstop)
+    if riposte { slow_down(c, SLOWMO_HEAVY) }
+    gs.glider.shake = min(gs.glider.shake + a.shake + (killed ? 0.3 : 0) + (riposte ? 0.6 : 0), 1.5)
     if killed { c.kills += 1 }
-
-    if !c.attack_hit {
-        c.attack_hit = true
-        #partial switch kind {
-        case .Air_Slash_1, .Air_Slash_2:
-            cam.velocity.y = max(cam.velocity.y, AIR_HIT_HOVER)
-        case .Rise:
-            cam.velocity.y = max(cam.velocity.y, cam.on_ground ? RISE_SPEED : RISE_SPEED * 0.7)
-            cam.on_ground = false
-            c.rise_used = true
-        }
-    }
+    c.attack_hit = true
 }
 
 // Anything a swing can hit: where it is, how big, which swing last hit it
@@ -649,20 +715,24 @@ combat_targets :: proc(gs: ^Game_State) -> []Target {
 hit_target :: proc(gs: ^Game_State, t: Target, kind: Attack_Kind) {
     t.hit_id^ = gs.combat.attack_id
     damage, knock, boosted := hit_amount(gs, kind, t.center)
-    // The server deals the blow (server_hit); whether it kills, this client
-    // judges for itself, since the swing's feel can't wait for the answer.
-    msg := Msg_Hit{damage = damage, knock = knock, boosted = boosted, index = u16(t.index)}
-    killed: bool
+    a := attack_info(&gs.combat, kind)
+    // The server deals the blow (server_hit: a riposte's three times as
+    // hard there); whether it kills, this client judges for itself, since
+    // the swing's feel can't wait for the answer.
+    msg := Msg_Hit{damage = damage, knock = knock, boosted = boosted, index = u16(t.index), poise = a.poise}
+    killed, riposte: bool
     if t.slime != nil {
         msg.target, msg.uid = .Slime, t.slime.uid
-        killed = t.slime.hp - damage <= 0
+        riposte = t.slime.open > 0
+        killed = t.slime.hp - damage * (riposte ? RIPOSTE : 1) <= 0
     } else {
         msg.target, msg.uid = .Enemy, t.enemy.uid
-        killed = t.enemy.hp - damage <= 0
+        riposte = t.enemy.open > 0
+        killed = t.enemy.hp - damage * (riposte ? RIPOSTE : 1) <= 0
     }
-    if !killed { msg.freeze = attack_info(&gs.combat, kind).hitstop + 0.02 } // shudders on the blade, then flies
+    if !killed { msg.freeze = a.hitstop + 0.02 } // shudders on the blade if it staggers, then flies
     client_send(gs, .Hit, msg)
-    hit_feedback(gs, kind, killed)
+    hit_feedback(gs, kind, killed, riposte)
 }
 
 Hurt_Result :: enum u8 { Missed, Hit, Blocked, Parried }
@@ -684,14 +754,33 @@ combat_take_hurt :: proc(gs: ^Game_State, result: Hurt_Result, damage: f32, knoc
         c.invuln = PARRY_INVULN
         return
     case .Blocked:
-        chip := damage >= HEAVY_HIT ? BLOCK_CHIP_HEAVY : BLOCK_CHIP
-        c.hp = max(c.hp - damage * chip, 1)
+        // The guard takes it in stamina; what it can't pay for breaks it.
+        cost := damage * GUARD_STAMINA * (c.weapon == .None ? FIST_GUARD_COST : 1)
         c.since_hurt = 0
         c.invuln = HURT_INVULN * 0.6
-        cam.velocity += knock * BLOCK_KNOCK
-        splat(&gs.fx, contact, {1.6, 1.3, 0.8}, -knock, 6, 0.6)
-        play(.Clang, 0.8, (damage >= HEAVY_HIT ? 0.8 : 1) * vary(0.06))
-        gs.glider.shake = min(gs.glider.shake + (damage >= HEAVY_HIT ? 0.6 : 0.3), 1.5)
+        c.stamina_rest = 0
+        if c.stamina >= cost {
+            c.stamina -= cost
+            chip := damage >= HEAVY_HIT ? BLOCK_CHIP_HEAVY : BLOCK_CHIP
+            c.hp = max(c.hp - damage * chip, 1)
+            cam.velocity += knock * BLOCK_KNOCK
+            splat(&gs.fx, contact, {1.6, 1.3, 0.8}, -knock, 6, 0.6)
+            play(.Clang, 0.8, (damage >= HEAVY_HIT ? 0.8 : 1) * vary(0.06))
+            gs.glider.shake = min(gs.glider.shake + (damage >= HEAVY_HIT ? 0.6 : 0.3), 1.5)
+            return
+        }
+        // Broken: knocked off balance, half the blow through.
+        c.stamina, c.stamina_flash = 0, 0.6
+        c.blocking = false
+        c.stagger = GUARD_BREAK
+        c.attack, c.queued = .None, .None
+        c.hp -= damage * 0.5
+        c.hurt_flash = 0.6
+        cam.velocity += knock
+        splat(&gs.fx, contact, {1.6, 1.3, 0.8}, -knock, 12, 0.8)
+        play(.Clang, 1, 0.7 * vary(0.05))
+        gs.glider.shake = min(gs.glider.shake + 0.9, 1.5)
+        if c.hp <= 0 { knocked_out(gs) }
         return
     case .Hit:
     }
@@ -700,19 +789,28 @@ combat_take_hurt :: proc(gs: ^Game_State, result: Hurt_Result, damage: f32, knoc
     c.invuln = HURT_INVULN
     c.hurt_flash = 1
     c.combo = 0
+    // Staggered: what you were swinging is lost.
+    if c.fighting {
+        c.stagger = damage >= HEAVY_HIT ? STAGGER_HEAVY : STAGGER_HIT
+        c.attack, c.queued, c.blocking = .None, .None, false
+    }
     gs.glider.shake = min(gs.glider.shake + 0.8, 1.5)
     cam.velocity += knock
     if knock.y > 0 { cam.on_ground = false }
     if c.attack == .Plunge { c.attack = .None }
     play(.Hurt, 0.9, vary(0.06))
-    if c.hp <= 0 {
-        // Knocked out: back on your feet at full health, everything about
-        // scattered and calmed down.
-        c.hp = PLAYER_MAX_HP
-        c.invuln = 2
-        client_send(gs, .Scatter, cam.pos)
-        ui_toast(gs, "Knocked out! Back on your feet...", 2.5)
-    }
+    if c.hp <= 0 { knocked_out(gs) }
+}
+
+// Knocked out: back on your feet at full health, everything about
+// scattered and calmed down.
+@(private="file")
+knocked_out :: proc(gs: ^Game_State) {
+    c := &gs.combat
+    c.hp, c.stamina, c.stagger = PLAYER_MAX_HP, STAMINA_MAX, 0
+    c.invuln = 2
+    client_send(gs, .Scatter, gs.camera.pos)
+    ui_toast(gs, "Knocked out! Back on your feet...", 2.5)
 }
 
 // Per frame in real time: feedback that keeps fading during hit stop, the

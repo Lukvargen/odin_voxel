@@ -489,12 +489,16 @@ server_hit :: proc(srv: ^Server, by: int, h: Msg_Hit) {
         if int(h.index) >= MAX_SLIMES { return }
         sl := &sim.slimes.list[h.index]
         if !sl.alive || sl.uid != h.uid { return }
-        if !slime_damage(sim, sl, h.damage, h.knock, h.boosted) { sl.freeze = h.freeze }
+        damage, boosted := h.damage, h.boosted
+        if sl.open > 0 { damage, boosted, sl.open = damage * RIPOSTE, true, 0 } // parried and open: a riposte
+        if died, staggered := slime_damage(sim, sl, damage, h.knock, boosted, h.poise); !died && staggered { sl.freeze = h.freeze }
     case .Enemy:
         if int(h.index) >= MAX_ENEMIES { return }
         e := &sim.enemies.list[h.index]
         if !e.alive || e.uid != h.uid || e.state == .Dead { return }
-        if !enemy_damage(sim, e, h.damage, h.knock, h.boosted, by) { e.freeze = h.freeze }
+        damage, boosted := h.damage, h.boosted
+        if e.open > 0 { damage, boosted, e.open = damage * RIPOSTE, true, 0 } // parried and open: a riposte
+        if died, staggered := enemy_damage(sim, e, damage, h.knock, boosted, by, h.poise); !died && staggered { e.freeze = h.freeze }
     }
 }
 

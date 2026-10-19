@@ -41,6 +41,7 @@ Slime_Kind :: struct {
     hp:         f32,
     weight:     f32,    // knockback is divided by this
     damage:     f32,
+    poise:      f32,    // blows it takes before it's knocked off its hop (Attack_Info.poise)
     hop_speed:  f32,    // horizontal, chasing
     hop_up:     f32,
     hop_every:  [2]f32, // seconds between hops, random in this range
@@ -49,9 +50,9 @@ Slime_Kind :: struct {
 }
 
 SLIME_KINDS := [Slime_Size]Slime_Kind{
-    .Small  = {width = 0.7, hp = 24, weight = 1,   damage = 8,  hop_speed = 6,   hop_up = 7.5, hop_every = {0.3, 0.55}, leap_range = 5,   windup = 0.38},
-    .Medium = {width = 1.2, hp = 60, weight = 1.4, damage = 14, hop_speed = 5.5, hop_up = 8,   hop_every = {0.45, 0.75}, leap_range = 6,  windup = 0.5},
-    .Big    = {width = 2.0, hp = 140, weight = 2.4, damage = 24, hop_speed = 5,   hop_up = 8.5, hop_every = {0.7, 1.0},  leap_range = 7.5, windup = 0.65},
+    .Small  = {width = 0.7, hp = 24, poise = 0,  weight = 1,   damage = 8,  hop_speed = 6,   hop_up = 7.5, hop_every = {0.3, 0.55}, leap_range = 5,   windup = 0.38},
+    .Medium = {width = 1.2, hp = 60, poise = 14, weight = 1.4, damage = 14, hop_speed = 5.5, hop_up = 8,   hop_every = {0.45, 0.75}, leap_range = 6,  windup = 0.5},
+    .Big    = {width = 2.0, hp = 140, poise = 32, weight = 2.4, damage = 24, hop_speed = 5,   hop_up = 8.5, hop_every = {0.7, 1.0},  leap_range = 7.5, windup = 0.65},
 }
 
 // The old Cube World hues, a touch softer.
@@ -93,6 +94,9 @@ Slime :: struct {
     squash_vel: f32,
     bar:        f32,    // the health bar shows for a while after a hit
     level:      u8,     // levels.odin: its health and blows scale with it
+    poise:      f32,    // left before a blow stuns it (full again a while after the last)
+    poise_t:    f32,
+    open:       f32,    // parried: stunned, and a blow now is a riposte (server_hit)
     freeze:     f32,    // stuck on the sword: held still, shuddering, then knocked away
     age:        f32,
     prey:       int,    // the player it hops after (sim.odin)
@@ -128,6 +132,7 @@ slime_spawn :: proc(s: ^Slimes, size: Slime_Size, pos, vel: [3]f32, color: [3]f3
             color = color,
         }
         slime_set_level(&sl, monster_level(pos)) // (a split's children take their parent's)
+        sl.poise = SLIME_KINDS[size].poise
         s.last_uid += 1
         sl.uid = s.last_uid
         return &sl
@@ -172,6 +177,9 @@ slimes_update :: proc(sim: ^Sim, dt: f32) {
             continue
         }
         sl.age += dt
+        sl.open = max(sl.open - dt, 0)
+        sl.poise_t += dt
+        if sl.poise_t > POISE_RESET { sl.poise = SLIME_KINDS[sl.size].poise }
         sl.flash = max(sl.flash - dt * 7, 0)
         sl.bar = max(sl.bar - dt, 0)
         sl.timer -= dt
@@ -292,7 +300,7 @@ slime_think :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
         } else if slime_touches_player(sl, p) {
             knock := [3]f32{dir.x * 9, 5, dir.y * 9} * world_scale
             if r := player_hurt(sim, sl.prey, kind.damage * level_damage(sl.level), knock, slime_center(sl)); r != .Missed {
-                if r == .Parried { sl.state, sl.timer = .Stunned, 1.2; sl.vel = [3]f32{-dir.x * 7, 6, -dir.y * 7} * world_scale; sl.flash = 1; return }
+                if r == .Parried { sl.state, sl.timer, sl.open = .Stunned, 1.2, 1.2; sl.vel = [3]f32{-dir.x * 7, 6, -dir.y * 7} * world_scale; sl.flash = 1; return }
                 sl.vel = [3]f32{-dir.x * 3, 4, -dir.y * 3} * world_scale
                 sl.state, sl.timer = .Chase, 1
             }
@@ -388,25 +396,35 @@ slime_touches_player :: proc(sl: ^Slime, p: ^Player) -> bool {
     return la.length(c - la.clamp(c, lo, hi)) < r
 }
 
-// Damage a slime and knock it with velocity `knock` (divided by its
-// weight). At no health left it pops, splitting into two of the next size
-// down. Returns true if it died.
-slime_damage :: proc(sim: ^Sim, sl: ^Slime, damage: f32, knock: [3]f32, boosted: bool) -> bool {
+// Damage a slime. The blow wears its poise down by `poise`: broken, it's
+// stunned and knocked with velocity `knock` (divided by its weight); until
+// then it only wobbles and keeps coming. At no health left it pops,
+// splitting into two of the next size down. True if it died; staggered:
+// it was stunned.
+slime_damage :: proc(sim: ^Sim, sl: ^Slime, damage: f32, knock: [3]f32, boosted: bool, poise: f32 = 1000) -> (died, staggered: bool) {
     s := &sim.slimes
     kind := SLIME_KINDS[sl.size]
     sl.hp -= damage
     sl.flash = 1
     sl.bar = 3
     sl.squash_vel += 9
-    sl.vel = knock / kind.weight
-    sl.vel.y = knock.y / math.sqrt(kind.weight)
-    sl.on_ground = false
-    sl.state, sl.timer = .Stunned, 0.45
+    sl.poise -= poise
+    sl.poise_t = 0
+    staggered = sl.poise <= 0 || sl.state == .Stunned
+    if staggered {
+        sl.vel = knock / kind.weight
+        sl.vel.y = knock.y / math.sqrt(kind.weight)
+        sl.on_ground = false
+        sl.state, sl.timer = .Stunned, 0.6
+        sl.poise = kind.poise
+    } else {
+        sl.vel.xz += knock.xz * 0.15 / kind.weight
+    }
 
     c := slime_center(sl)
     sim_emit(sim, {kind = .Slime_Hit, slime = sl.size, pos = c, vec = knock, color = sl.color, amount = damage, boosted = boosted})
 
-    if sl.hp > 0 { return false }
+    if sl.hp > 0 { return }
     sl.alive = false
     calm_mark(sim, sl.pos)
     sim_emit(sim, {kind = .Slime_Pop, slime = sl.size, pos = c, vec = knock, color = sl.color})
@@ -425,7 +443,7 @@ slime_damage :: proc(sim: ^Sim, sl: ^Slime, damage: f32, knock: [3]f32, boosted:
             }
         }
     }
-    return true
+    return true, staggered
 }
 
 // Debug (F6): a slime a few steps in front, dropping in; each press the

@@ -13,6 +13,7 @@ import "core:math/rand"
 // you go further. All of it goes through monster_level, to be tuned there.
 
 MONSTER_LEVEL_MAX :: 40
+POISE_RESET       :: f32(2.5) // seconds without a blow and a monster's poise is whole again
 LEVEL_DISTANCE    :: f32(600) // voxels (400 m) out from the middle per level
 
 // What a biome adds to the level of what lives there.

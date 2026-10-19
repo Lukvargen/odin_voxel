@@ -319,7 +319,8 @@ Msg_Hit :: struct {
     uid:     u32,    // ...if it is still the one that was struck
     damage:  f32,
     knock:   [3]f32,
-    freeze:  f32,    // stuck on the blade this long, unless it died
+    freeze:  f32,    // stuck on the blade this long, if it staggers (and didn't die)
+    poise:   f32,    // how much of its poise the blow takes (combat.odin Attack_Info.poise)
 }
 
 Msg_Spawn :: struct {

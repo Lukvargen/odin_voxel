@@ -587,7 +587,7 @@ game_main :: proc() -> (relaunch: []string) {
         move_right := held(kb, keys_free, .D)
         ctrl_held  := held(kb, keys_free, .LCTRL)
         if !move_fwd { gs.sprint_latched = false }
-        sprint := ctrl_held || gs.sprint_latched
+        sprint := (ctrl_held || gs.sprint_latched) && combat_can_sprint(gs) // fighting, it takes stamina
         sneak  := held(kb, keys_free, .LSHIFT) && !gs.combat.fighting // drawn, Shift dodges
         ultra  := held(kb, keys_free, .LALT)
 

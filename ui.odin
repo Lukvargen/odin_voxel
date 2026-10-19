@@ -1086,6 +1086,28 @@ health_bar :: proc(gs: ^Game_State, w, h: f32) {
     }
 }
 
+// Stamina, while fighting or while it isn't full: a thin bar between health
+// and mana, flashing when an action wanted more than there was.
+@(private="file")
+stamina_bar :: proc(gs: ^Game_State) {
+    c := &gs.combat
+    W :: f32(220)
+    a := clamp((STAMINA_MAX - c.stamina) / 6, 0, 1) // fades out as it fills up...
+    if c.fighting { a = max(a, 0.55) }                 // ...but for a faint one while fighting
+    if c.stamina_flash > 0 { a = 1 }
+    if a <= 0 { return }
+    if clay.UI(clay.ID("Stamina"))({
+        layout = {sizing = {clay.SizingFixed(W), clay.SizingFixed(4)}},
+        floating = anchored(.CenterBottom, {0, -97}),
+        backgroundColor = fade(COLOR_BAR_BG, a), cornerRadius = clay.CornerRadiusAll(2),
+    }) {
+        fill := clamp(c.stamina / STAMINA_MAX, 0, 1)
+        col := c.winded ? clay.Color{170, 150, 80, 255} : COLOR_GOOD
+        if c.stamina_flash > 0 && int(c.stamina_flash * 10) % 2 == 0 { col = {240, 248, 230, 255} }
+        if clay.UI()({layout = {sizing = {clay.SizingFixed(W * fill), clay.SizingGrow()}}, backgroundColor = fade(col, a), cornerRadius = clay.CornerRadiusAll(2)}) {}
+    }
+}
+
 // Survival: mana while it isn't full, over where health shows; it flashes
 // when a spell wants more than there is.
 @(private="file")
@@ -1118,6 +1140,7 @@ combat_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     eye := camera_view_eye(cam)
 
     health_bar(gs, w, h)
+    stamina_bar(gs)
     if gs.survival { mana_bar(gs) }
 
     // Over a monster near enough to size up, its level; once it's hit, a
@@ -2176,7 +2199,7 @@ menu_controls :: proc(gs: ^Game_State) {
     moving   := Group{"Moving", {"WASD", "move", "Ctrl  or  W W", "sprint", "Shift", "sneak: quiet, hard to spot, won't fall off", "Space", "jump; hold to swim up", "Space twice", "fly: Shift down, Alt fast"}}
     building := Group{"Building", {"L / R click", "break / place; hold repeats", "Middle click", "pick the block you look at", "1-9, wheel", "hotbar", "E", gs.survival ? "inventory, crafting" : "all blocks", "B, Ctrl+wheel", "brush: one block, box (drag), size", "T", "tool: block / area / shape", "Ctrl Z / Ctrl Y", "undo / redo"}}
     tools    := Group{"Area and shape", {"Area: L / R", "the box's two corners", "Area: F / X", "fill / clear the box", "C", "area cursor: block / face / air", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "push lit face; shape size", "Shift+wheel", "move box; shape height", "Alt+wheel", "air reach; turn shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V, C", "cycle back"}}
-    fighting := Group{"Fighting", {"R", "weapon bar / back to building", "1-4, wheel", "weapon (empty: fists)", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash, uppercut", "Shift", "dodge roll", "F (hold)", "guard; parry just in time"}}
+    fighting := Group{"Fighting", {"R", "weapon bar / back to building", "1-4, wheel", "weapon (empty: fists)", "L click", "light attack (one a click)", "R click", "heavy attack", "Look down + L", "plunge, from up high", "Shift", "roll (stamina)", "F (hold)", "guard; parry just in time"}}
     gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
     other    := Group{"Other", {"Enter", "chat", "Tab (hold)", "players", "F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)", "F4", "sound board (debug)"}}
     cols := controls_columns(gs) == 3 ? [][]Group{{moving, building}, {tools, gliding}, {fighting, other}} : [][]Group{{moving, building, fighting}, {tools, gliding, other}}
