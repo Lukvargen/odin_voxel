@@ -50,6 +50,7 @@ Model_Id :: enum u32 {
     Wolf_Body, Wolf_Head, Wolf_Leg, Wolf_Tail,
     Boar_Body, Boar_Head, Boar_Leg, Boar_Tail,
     Deer_Body, Deer_Head, Deer_Leg, Deer_Tail,
+    Spider_Body, Spider_Leg, // the leg out along +x from its hip
     // sea.odin
     Fish_Body, Fish_Body_Striped, Fish_Tail,
     // magic.odin, felling.odin

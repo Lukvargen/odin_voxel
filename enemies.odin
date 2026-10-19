@@ -23,6 +23,8 @@ import la "core:math/linalg"
 //    skeletons and the goblins' packs, and on the old towers. They keep
 //    their distance, back off if you close in, and shoot after a long
 //    draw (the tell): block it, roll, or get in close.
+//  - Cave spiders (beasts.odin): only underground, where they are all
+//    that comes for you; quick, low, leaping out of the dark, eyes aglow.
 //  - Wildlife (beasts.odin), kept about a player apart from the hostile
 //    ones: deer bolt when they notice you; boars root about and leave you
 //    be until struck, then paw the ground and charge.
@@ -52,7 +54,7 @@ SITE_NOTICE      :: f32(80)  // a site's guards appear when the player is this c
 SITE_RESPAWN     :: f32(600) // seconds before a cleared site fills again
 GUARD_LEASH      :: f32(20)  // guards give up a chase this far from home
 
-Enemy_Kind :: enum u8 { Skeleton, Goblin, Orc, Wolf, Boar, Deer, Archer, Slinger }
+Enemy_Kind :: enum u8 { Skeleton, Goblin, Orc, Wolf, Boar, Deer, Archer, Slinger, Spider }
 
 // The ones of bone (their sounds, their colour, how they come apart).
 enemy_bony :: proc(k: Enemy_Kind) -> bool { return k == .Skeleton || k == .Archer }
@@ -60,8 +62,9 @@ enemy_bony :: proc(k: Enemy_Kind) -> bool { return k == .Skeleton || k == .Arche
 // Ranged ones back off from a player closer than this (metres, world_scale at use).
 RANGED_TOO_CLOSE :: f32(4.5)
 
-// How it's built: a humanoid on Enemy_Rig, or a beast on four legs (beasts.odin).
-Body :: enum u8 { Humanoid, Beast }
+// How it's built: a humanoid on Enemy_Rig, a beast on four legs, a spider
+// on eight (beasts.odin).
+Body :: enum u8 { Humanoid, Beast, Spider }
 
 // How it takes to a player: hunts them; leaves them be until struck (then
 // for a while it's out for them: Enemy.angry); or runs from them.
@@ -116,6 +119,9 @@ ENEMY_SPECS := [Enemy_Kind]Enemy_Spec{
     .Slinger  = {scale = 0.95, radius = 0.32, height = 1.7, hp = 24, poise = 8, damage = 9, walk = 2.0, run = 5.0, weight = 0.8,
                  reach = 14, windup = 0.9, strike = 0.12, recover = 0.8, aggro = 22, knock = {4, 3}, shot_speed = 22, shot = .Stone,
                  gore = {0.40, 0.08, 0.06}},
+    .Spider   = {body = .Spider, leaps = true, scale = 1, radius = 0.55, height = 0.7, hp = 34, poise = 12, damage = 12, walk = 2.2, run = 6.5, weight = 0.9,
+                 reach = 3.0, windup = 0.45, strike = 0.35, recover = 0.7, aggro = 18, knock = {6, 4},
+                 gore = {0.35, 0.50, 0.15}},
     // Never fights: aggro is how near it lets you come.
     .Deer     = {body = .Beast, temper = .Timid, scale = 1, radius = 0.4, height = 1.7, hp = 30, poise = 6, damage = 0, walk = 1.3, run = 8, weight = 1.1,
                  reach = 0, windup = 0.2, strike = 0.2, recover = 0.2, aggro = 20, knock = {0, 0},
@@ -267,6 +273,7 @@ enemy_skin :: proc(kind: Enemy_Kind, k: f32) -> [3]f32 {
     case .Wolf:   return la.lerp([3]f32{0.42, 0.42, 0.44}, [3]f32{0.62, 0.58, 0.52}, k) // grey to sandy
     case .Boar:   return la.lerp([3]f32{0.20, 0.15, 0.11}, [3]f32{0.30, 0.22, 0.15}, k)
     case .Deer:   return la.lerp([3]f32{0.58, 0.38, 0.22}, [3]f32{0.70, 0.50, 0.30}, k)
+    case .Spider: return la.lerp([3]f32{0.16, 0.13, 0.12}, [3]f32{0.30, 0.24, 0.18}, k)
     }
     return {1, 1, 1}
 }
@@ -304,6 +311,12 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
         for &p in sim.players {
             if !player_hunted(&p) || p.fly_mode { continue }
             feet := player_feet(&p)
+            if player_underground(feet) {
+                // Down in the caves: only spiders, out of the dark.
+                if spawn && cave_try_spawn(sim, feet) { s.spawn_timer = rand.float32_range(ROAM_GAP_MIN, ROAM_GAP_MAX) * 0.5 }
+                if sites { sites_update(sim, feet) }
+                continue
+            }
             if spawn {
                 roaming := 0
                 for &e in s.list {
@@ -718,6 +731,40 @@ roamer_for :: proc(b: Biome, night: f32) -> (kind: Enemy_Kind, pack: int, ok: bo
     return .Goblin, 0, false
 }
 
+// Spiders kept about a player down in the caves.
+CAVE_SPIDERS :: 4
+
+// Whether feet at this spot are well under the ground (in a cave).
+player_underground :: proc(feet: [3]f32) -> bool {
+    return feet.y < f32(surface_height_at(int(math.floor(feet.x)), int(math.floor(feet.z)))) - 8 * world_scale
+}
+
+// A spider or two somewhere in the caves about the player, if it's short
+// of them; whether any came.
+@(private="file")
+cave_try_spawn :: proc(sim: ^Sim, feet: [3]f32) -> bool {
+    have := 0
+    for &e in sim.enemies.list {
+        if e.alive && e.kind == .Spider && la.length(e.pos - feet) < ENEMY_DESPAWN * 0.5 { have += 1 }
+    }
+    if have >= CAVE_SPIDERS { return false }
+    for _ in 0 ..< 16 {
+        a := rand.float32_range(0, 2 * math.PI)
+        r := rand.float32_range(12, 28) * world_scale
+        x := int(math.floor(feet.x + math.cos(a) * r))
+        z := int(math.floor(feet.z + math.sin(a) * r))
+        y, ok := stand_y(sim, x, z, int(feet.y) + 8)
+        if !ok || abs(f32(y) - feet.y) > 12 * world_scale { continue }
+        if !player_underground({f32(x), f32(y), f32(z)}) { continue } // in a cave, not out on a hillside
+        n := 1 + rand.int_max(2)
+        for i in 0 ..< n {
+            if enemy_spawn(sim, .Spider, {f32(x) + 0.5 + f32(i), f32(y), f32(z) + 0.5}) == nil { return true }
+        }
+        return true
+    }
+    return false
+}
+
 // Wildlife kept about a player, by day and (fewer) by night.
 WILD_DAY   :: 5
 WILD_NIGHT :: 2
@@ -952,6 +999,7 @@ enemies_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
 enemy_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
     sp := ENEMY_SPECS[e.kind]
     if sp.body == .Beast { beast_pose(f, e); return }
+    if sp.body == .Spider { spider_pose(f, e); return }
     rig := ENEMY_RIGS[e.kind]
     s := sp.scale
     feet := e.pos

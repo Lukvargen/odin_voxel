@@ -102,6 +102,74 @@ ease_out :: proc(t: f32) -> f32 { return 1 - (1 - t) * (1 - t) }
 @(private="file")
 rand_jitter :: proc(t: f32) -> f32 { return math.sin(t) * 0.7 + math.sin(t * 2.3) * 0.3 }
 
+// ─── Spider ─────────────────────────────────────────────────────────────────
+// A body and eight legs about it, four a side, each walking a step behind
+// the next; low and coiled before a leap; over on its back, legs curled,
+// when dead.
+
+@(private="file")
+SPIDER_LEGS :: [4]f32{0.95, 0.35, -0.2, -0.8} // the right side's, yaw from straight out (front first)
+
+spider_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
+    sp := ENEMY_SPECS[e.kind]
+    s := sp.scale
+    feet := e.pos
+    tint := la.lerp(e.tint, [3]f32{2.6, 2.6, 2.6}, e.flash * 0.7)
+    if e.freeze > 0 { feet += [3]f32{rand_jitter(e.age * 91), 0, rand_jitter(e.age * 57)} * 0.03 }
+    amp := clamp(e.speed / sp.run, 0, 1.2)
+    ph := e.walk_phase * 1.6
+    crouch, roll, curl, raise: f32
+    #partial switch e.state {
+    case .Windup:
+        k := 1 - max(e.timer, 0) / max(sp.windup, 0.01)
+        crouch, raise = k, k // the front legs up: the tell
+    case .Strike:
+        raise = 1
+    case .Dead:
+        k := ease_out(min(e.death * 2.5, 1))
+        roll, curl, amp = k * math.PI * 0.95, k, 0
+        feet.y -= max(e.death - 2.5, 0) * 0.4
+    }
+    yaw := basis_yaw(e.yaw)
+    body := yaw * basis_rot_z(roll)
+    center := feet + yaw * ([3]f32{0, 0.36 - 0.14 * crouch + (roll > 0 ? 0.1 : 0), 0} * s)
+    ent_part(f, .Spider_Body, center, body, {s, s, s}, tint)
+    for side in ([2]f32{1, -1}) {
+        for a, i in SPIDER_LEGS {
+            step := math.sin(ph + f32(i) * math.PI * 0.5 + (side > 0 ? 0 : math.PI))
+            swing := step * 0.22 * min(amp, 1)
+            lift := max(step, 0) * 0.35 * min(amp, 1) + (i == 0 ? 0.9 * raise : 0) + 1.2 * curl
+            // Out to its side (+x the right), turned to its place, lifted.
+            hip := [3]f32{side * 0.1, 0.02, 0.1 - 0.07 * f32(i)} * s
+            rot := body * basis_yaw(side * (a + swing)) * basis_rot_z(side * lift)
+            ent_part(f, .Spider_Leg, center + body * hip, rot, {side * s, s, s}, tint)
+        }
+    }
+}
+
+@(private="file")
+shape_spider_body :: proc(p: [3]f32, voxel: f32) -> Pal {
+    q := [3]f32{abs(p.x), p.y, p.z}
+    // Eyes: a cluster on the front, glowing.
+    if (la.length(q - {0.05, 0.08, 0.27}) < 0.03) || (la.length(q - {0.09, 0.05, 0.25}) < 0.022) { return .Eye_Glow }
+    // Fangs.
+    if vm_capsule(q, {0.04, -0.02, 0.28}, {0.035, -0.09, 0.31}, 0.018) < 0 { return .Bone_Shadow }
+    head := la.length((p - {0, 0.02, 0.15}) / [3]f32{1, 0.75, 1}) - 0.15
+    abdomen := la.length((p - {0, 0.08, -0.2}) / [3]f32{1, 0.8, 1.15}) - 0.24
+    if min(head, abdomen) > 0 { return .Empty }
+    // A mark down the abdomen's back, faintly aglow.
+    if abdomen < 0 && p.y > 0.2 && q.x < 0.035 && p.z < -0.12 && p.z > -0.32 { return .Eye_Red }
+    return abdomen < 0 && p.y < -0.02 ? .Hide_Dark : .Hide
+}
+
+// Out along +x from the hip: up to the knee, then down to the foot.
+@(private="file")
+shape_spider_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
+    if vm_capsule(p, {0, 0, 0}, {0.3, 0.2, 0}, 0.028) < 0 { return .Hide }
+    if vm_capsule(p, {0.3, 0.2, 0}, {0.5, -0.34, 0}, 0.022) < 0 { return p.y < -0.25 ? .Hide_Dark : .Hide }
+    return .Empty
+}
+
 // ─── Wolf ───────────────────────────────────────────────────────────────────
 // Grey (the tint) with a pale chest and belly, a dark saddle down the back.
 
@@ -254,6 +322,8 @@ shape_deer_tail :: proc(p: [3]f32, voxel: f32) -> Pal {
 
 beasts_models_bake :: proc() {
     V :: 1.0 / 32
+    ent_models[.Spider_Body] = model_bake({-0.3, -0.16, -0.5}, {0.3, 0.3, 0.36}, V, shape_spider_body)
+    ent_models[.Spider_Leg]  = model_bake({-0.04, -0.4, -0.04}, {0.55, 0.25, 0.04}, V, shape_spider_leg)
     ent_models[.Wolf_Body] = model_bake({-0.24, -0.26, -0.5}, {0.24, 0.26, 0.5}, V, shape_wolf_body)
     ent_models[.Wolf_Head] = model_bake({-0.16, -0.1, -0.1}, {0.16, 0.28, 0.36}, V, shape_wolf_head)
     ent_models[.Wolf_Leg]  = model_bake({-0.07, -0.57, -0.06}, {0.07, 0.05, 0.12}, V, shape_wolf_leg)
