@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:math"
 import "core:os"
+import "core:strings"
 import la "core:math/linalg"
 import "core:time"
 import SDL "vendor:sdl3"
@@ -253,7 +254,7 @@ bench_fell_run :: proc(gs: ^Game_State) {
         cam.pos = block_center(spot) + {-7, 6, -2}
         look_at(cam, block_center(spot))
         aim, _, _ := raycast_voxel(gs, camera_aim_eye(cam^), camera_forward(cam^), MAGIC_REACH, plants = true)
-        ball := len(spell_take_targets(gs, aim, 2))
+        ball := len(spell_take_targets(gs, sphere_region(aim, 2)))
         solid_near :: proc(gs: ^Game_State, c: [3]int) -> (n: int) {
             for dz in -4 ..= 4 { for dy in -4 ..= 4 { for dx in -4 ..= 4 {
                 v := u8(get_voxel(gs, c.x + dx, c.y + dy, c.z + dz))
@@ -284,8 +285,164 @@ bench_fell_run :: proc(gs: ^Game_State) {
         check(&ok_all, fmt.tprintf("creative: right conjures a disc (%d blocks)", placed), placed >= 8)
         for _ in 0 ..< 10 { step(gs, false, false) }
         shot(gs, dir, "spell_disc")
-        gs.build.tool, gs.brush_radius = .Block, 0
+
+        // The box brush: holding and moving drags out a box (build_drag.odin).
+        gs.brush_radius, gs.build.box = 0, true
+        for _ in 0 ..< 10 { step(gs, false, false) }
+        spot2 := [3]int{trunk.x - 9, 0, trunk.z - 12}
+        spot2.y = ground_top(gs, spot2.x, spot2.z)
+        // Flat, bare ground to work on: dirt, and air over it.
+        {
+            ground_cells := make([dynamic][3]int, context.temp_allocator)
+            air_cells := make([dynamic][3]int, context.temp_allocator)
+            for dz in -2 ..= 5 { for dx in -2 ..= 7 {
+                append(&ground_cells, spot2 + {dx, 0, dz})
+                for dy in 1 ..= 6 { append(&air_cells, spot2 + {dx, dy, dz}) }
+            } }
+            dirt_blocks := make([]u8, len(ground_cells), context.temp_allocator)
+            for &x in dirt_blocks { x = u8(Block_Type.Dirt) }
+            build_set(gs, ground_cells[:], dirt_blocks, undo = false)
+            world_clear(gs, air_cells[:])
+        }
+        cam.pos = block_center(spot2) + {-2, 5.2, -2} // over the cleared patch's corner, looking down steeply
+        top :: proc(p: [3]int) -> [3]f32 { return block_center(p) + {0, 0.49, 0} } // a block's top face
+        // A floor: press on the ground, drag to a block 3 along and 2 across, let go.
+        look_at(cam, top(spot2))
+        step(gs, false, true)
+        far := spot2 + {3, 0, 2}
+        far.y = spot2.y
+        look_at(cam, top(far))
+        step(gs, false, true)
+        floor_r := drag_region(&gs.build.drag)
+        empty_before := make([dynamic][3]int) // not temp: a shot frees that (bench_hud_shot)
+        defer delete(empty_before)
+        for z in floor_r.lo.z ..= floor_r.hi.z { for x in floor_r.lo.x ..= floor_r.hi.x {
+            q := [3]int{x, floor_r.lo.y, z}
+            v := u8(get_voxel(gs, q.x, q.y, q.z))
+            if v == 0 || block_is_watery(v) || block_is_land_plant(v) { append(&empty_before, q) }
+        } }
+        step(gs, false, false)
+        count_filled :: proc(gs: ^Game_State, cells: [][3]int) -> (n: int) {
+            for q in cells { if Block_Type(u8(get_voxel(gs, q.x, q.y, q.z))) == gs.selected_block { n += 1 } }
+            return
+        }
+        // The blocks fly out from the hands and fill it as they land.
+        at_once := count_filled(gs, empty_before[:])
+        flying := gs.magic.fill_out
+        for i := 0; i < 8; i += 1 { step(gs, false, false) }
+        shot(gs, dir, "send")
+        send_frames := 8
+        for ; send_frames < 240 && gs.magic.fill_out > 0; send_frames += 1 { step(gs, false, false) }
+        filled := count_filled(gs, empty_before[:])
+        e := floor_r.hi - floor_r.lo + 1
+        check(&ok_all, fmt.tprintf("creative: a drag lays a floor (%dx%dx%d, %d of %d empty filled)", e.x, e.y, e.z, filled, len(empty_before)),
+            e == {4, 1, 3} && filled == len(empty_before) && filled > 0)
+        check(&ok_all, fmt.tprintf("creative: ...its blocks flown out (%d motes, %d at once, all in by %.2f s)", flying, at_once, f32(send_frames) * DT),
+            flying > 0 && at_once == 0 && send_frames < 240)
+        build_key(gs, SDL.K_Z, {.Ctrl})
+        undone := 0
+        for q in empty_before { if Block_Type(u8(get_voxel(gs, q.x, q.y, q.z))) != gs.selected_block { undone += 1 } }
+        click := spot2 + {0, 1, 0} // the click's own block goes with it
+        check(&ok_all, "creative: ...and one Ctrl+Z takes it all up", undone == len(empty_before) && get_voxel(gs, click.x, click.y, click.z) == 0)
+
+        // A wall: a line along the ground, the wheel raising it 3 high.
+        look_at(cam, top(spot2))
+        step(gs, false, true)
+        line_end := spot2 + {4, 0, 0}
+        line_end.y = spot2.y
+        look_at(cam, top(line_end))
+        step(gs, false, true)
+        build_wheel(gs, 1, {})
+        build_wheel(gs, 1, {})
+        wall_r := drag_region(&gs.build.drag)
+        shot(gs, dir, "drag_wall")
+        step(gs, false, false)
+        for i := 0; i < 240 && gs.magic.fill_out > 0; i += 1 { step(gs, false, false) }
+        e = wall_r.hi - wall_r.lo + 1
+        check(&ok_all, fmt.tprintf("creative: a line raised by the wheel is a wall (%dx%dx%d)", e.x, e.y, e.z), e == {5, 3, 1})
+        build_key(gs, SDL.K_Z, {.Ctrl})
+
+        // Scrolled back past one layer, the box grows the other way: taking
+        // a floor, up out of it instead of down into it; and back again.
+        look_at(cam, top(spot2))
+        step(gs, true, false)
+        look_at(cam, top(far))
+        step(gs, true, false)
+        build_wheel(gs, -1, {})
+        flip_r := drag_region(&gs.build.drag)
+        build_wheel(gs, 1, {})
+        back_r := drag_region(&gs.build.drag)
+        step(gs, true, true) // the other button: called off
+        step(gs, false, false)
+        check(&ok_all, fmt.tprintf("creative: scrolled past 1 it flips (y %d..%d, then %d..%d)", flip_r.lo.y - spot2.y, flip_r.hi.y - spot2.y, back_r.lo.y - spot2.y, back_r.hi.y - spot2.y),
+            flip_r.lo.y == spot2.y && flip_r.hi.y == spot2.y + 1 && back_r.lo.y == spot2.y && back_r.hi.y == spot2.y && !gs.magic.channeling)
+
+        // Unweaving a box: let go and the cast goes on by itself.
+        look_at(cam, top(spot2))
+        step(gs, true, false)
+        look_at(cam, top(far))
+        step(gs, true, false)
+        take_r := drag_region(&gs.build.drag)
+        step(gs, false, false)
+        casting := gs.magic.casting
+        frames := 0
+        for gs.magic.casting && frames < 600 { step(gs, false, false); frames += 1 }
+        left_solid := 0
+        for z in take_r.lo.z ..= take_r.hi.z { for x in take_r.lo.x ..= take_r.hi.x {
+            v := u8(get_voxel(gs, x, take_r.lo.y, z))
+            if v != 0 && !block_is_watery(v) { left_solid += 1 }
+        } }
+        check(&ok_all, fmt.tprintf("creative: a dragged box is unwoven, hands off (%.2f s, %d left)", f32(frames) * DT, left_solid),
+            casting && !gs.magic.casting && left_solid == 0 && take_r.lo.y == spot2.y)
+        build_key(gs, SDL.K_Z, {.Ctrl})
+        // ...and a click calls such a cast off.
+        look_at(cam, top(spot2))
+        step(gs, true, false)
+        look_at(cam, top(far))
+        step(gs, true, false)
+        step(gs, false, false)
+        step(gs, false, false)
+        step(gs, false, true)
+        step(gs, false, false)
+        check(&ok_all, "creative: a click calls a cast off", !gs.magic.casting && !gs.magic.channeling)
+
+        // The Block tool drags out the same box.
+        gs.build.tool = .Block
+        look_at(cam, top(spot2))
+        step(gs, false, true)
+        look_at(cam, top(far))
+        step(gs, false, true)
+        step(gs, false, false)
+        laid := 0
+        for q in empty_before { if Block_Type(u8(get_voxel(gs, q.x, q.y, q.z))) == gs.selected_block { laid += 1 } }
+        check(&ok_all, fmt.tprintf("creative: the Block tool drags a floor too (%d)", laid), laid == len(empty_before))
+        build_key(gs, SDL.K_Z, {.Ctrl})
+        check(&ok_all, "creative: ...one undo", get_voxel(gs, click.x, click.y, click.z) == 0)
+
+
+        // Looking more level, a click on the ground starts a wall standing
+        // there, facing you: drag 2 across and 2 up.
+        cam.pos = block_center(spot2) + {2, 2.2, -2}
+        look_at(cam, top(spot2 + {2, 0, 4}))
+        shot(gs, dir, "box_hover")
+        step(gs, false, true)
+        look_at(cam, la.array_cast(spot2, f32) + {4.5, 3.5, 5})
+        step(gs, false, true)
+        stand_r := drag_region(&gs.build.drag)
+        label, _ := drag_label(gs)
+        step(gs, false, false)
+        e = stand_r.hi - stand_r.lo + 1
+        check(&ok_all, fmt.tprintf("creative: level, it's a wall facing you (%dx%dx%d, \"%s\")", e.x, e.y, e.z, label),
+            e == {3, 3, 1} && stand_r.lo.y == spot2.y + 1 && strings.has_prefix(label, "wall"))
+        build_key(gs, SDL.K_Z, {.Ctrl})
+
+        gs.build.tool, gs.brush_radius, gs.build.box = .Block, 0, false
         gs.survival = true
+        // In survival B toggles the box and back (the spell's size isn't up to more yet).
+        build_key(gs, SDL.K_B, {})
+        on := gs.build.box
+        build_key(gs, SDL.K_B, {})
+        check(&ok_all, "survival: B toggles the box brush", on && !gs.build.box && gs.brush_radius == 0)
     }
 
     bench_fell_server(&ok_all, trunk)

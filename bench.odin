@@ -231,6 +231,7 @@ bench_run :: proc(gs: ^Game_State) {
             if hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), MAGIC_REACH * 4); ok {
                 m := &gs.magic
                 m.channeling, m.target, m.stage, m.size = true, hit, min(bench_view_crack.x, CRACK_STAGES), bench_view_crack.y
+                m.region = sphere_region(hit, m.size)
                 fmt.println("view: cracked", hit, "stage", m.stage, "size", m.size)
             }
         }

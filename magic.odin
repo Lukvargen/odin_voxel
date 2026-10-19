@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import la "core:math/linalg"
+import "core:slice"
 
 // Survival building is magic (gs.survival; a creative world keeps the build
 // tools). Hold left on a block and a beam of sparks reaches out from the
@@ -53,8 +54,19 @@ Mote :: struct {
     tint:     [3]f32,
     size:     f32, // 0: a free slot
     home:     u8,  // who it flies to: 0 you, else that player's slot + 1 (their tree: no count)
-    tex:      [3]f32, // the world voxel it came from: its texture (mote_add)
+    tex:      [3]f32, // the world voxel it came from: its texture (mote_add); sent out, the middle of where it goes
+    // Sent out (magic_send): flies from your hands to fill Magic.fill[first:][:n].
+    out:      bool,
+    first, n: i32,
 }
+
+// A cell a sent mote fills when it lands.
+Fill :: struct {
+    pos:   [3]int,
+    block: Block_Type,
+}
+MAX_FILL   :: 16 * 16 * 16 // cells in flight at once (a creative box, at most)
+SEND_MOTES :: 96           // motes a box is sent as, at most: past that each fills a few cells
 
 // A spark of the spell: flies, slows, goes out.
 Spark :: struct {
@@ -70,7 +82,11 @@ Magic :: struct {
     block:      Block_Type,
     progress:   f32, // seconds on this block
     need:       f32, // seconds it takes
-    size:       int, // the spell's radius when it started
+    size:       int, // how big it sounds and shows (the brush's radius; a box, by its size)
+    region:     Edit_Region, // the blocks it takes: a ball about the target, or a dragged box
+    center:     [3]f32,      // their middle, where the beam goes
+    ring:       f32,         // the beam's ring round them
+    casting:    bool,        // a dragged box: the spell goes on without the button held
     count:      int, // blocks it takes
     mana_total: f32, // mana it takes, all told
     tree_logs:  int, // > 0: a tree's trunk; this many logs come down with it
@@ -89,6 +105,12 @@ Magic :: struct {
     next_spark: int,
     pickup_gap: f32, // since a mote last arrived: a quick run of them rises in pitch
     pickup_run: int,
+    // Blocks sent out to a box (magic_send): the cells, and the motes still flying.
+    fill:       [MAX_FILL]Fill,
+    fill_len:   int,
+    fill_out:   int, // motes in flight
+    fill_done:  int, // cells of this send landed (the knocks rise as it fills)
+    fill_gap:   f32, // since the last knock
     // Mana (zero: full).
     mana_spent: f32,
     mana_rest:  f32, // since mana was last drawn
@@ -163,38 +185,72 @@ rand_dir :: proc() -> [3]f32 {
 
 // ─── Casting ───────────────────────────────────────────────────────────────
 
-// The clicks, in survival (build_update: the mouse locked, no sword out, not
-// gliding). Left held unweaves the block aimed at; right conjures, again
-// every EDIT_REPEAT while held.
+// The clicks (build_update: the mouse locked, no sword out, not gliding).
+// Left held unweaves the block aimed at (and the next, held on), right
+// conjures one, again every EDIT_REPEAT while held; with the spell's size
+// set, a ball about it (a disc, conjuring). With the box brush (B), holding
+// and moving drags out a box instead (build_drag.odin): conjured on letting
+// go, or unwoven by a cast that goes on by itself until done (a click calls
+// it off).
 magic_build_update :: proc(gs: ^Game_State, dt: f32) {
     m := &gs.magic
+    if m.casting {
+        if gs.left_pressed || gs.right_pressed { // called off; the click does only that
+            m.casting, m.channeling = false, false
+            drag_cancel(gs)
+            return
+        }
+        if la.length(m.center - gs.camera.pos) > MAGIC_REACH * 1.5 { // walked away from it
+            m.casting, m.channeling = false, false
+            return
+        }
+        magic_channel(gs, dt)
+        return
+    }
+    size := magic_spell_size(gs)
+    if gs.build.box {
+        d := &gs.build.drag
+        switch drag_step(gs, MAGIC_REACH) {
+        case .None:
+        case .Press:
+            if d.place {
+                gs.build.stroke = false // the box's undo joins this block's, not an older edit
+                magic_conjure(gs, d.hit, d.nrm)
+                if gs.selected_block == .Door { drag_cancel(gs) } // doors go in one at a time
+            } else {
+                magic_begin(gs, d.hit, sphere_region(d.hit, 0), 0)
+            }
+        case .Held:
+            if d.place { break }
+            if d.moved {
+                m.channeling = false // a box being dragged out: the cast waits for letting go
+            } else if m.channeling {
+                magic_channel(gs, dt)
+                if !m.channeling { drag_rearm(gs) } // done: on to the next block aimed at
+            }
+        case .Release:
+            m.channeling, m.starved = false, false
+            if !d.moved { break }
+            r := drag_region(d)
+            if region_volume(r) > drag_limit(gs) {
+                ui_toast(gs, "Too big for the spell: make it smaller", 1.2)
+                break
+            }
+            if d.place {
+                magic_conjure_box(gs, r, d.start)
+            } else {
+                magic_begin(gs, d.hit, r, 0)
+                m.casting = m.channeling
+            }
+        case .Cancel:
+            m.channeling, m.starved = false, false
+        }
+        return
+    }
     hit, nrm, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), MAGIC_REACH, plants = true)
     if gs.left_held && ok {
-        b := Block_Type(u8(get_voxel(gs, hit.x, hit.y, hit.z)))
-        size := magic_spell_size(gs)
-        if !m.channeling || hit != m.target || b != m.block || size != m.size {
-            m.channeling, m.target, m.block, m.progress, m.size, m.stage = true, hit, b, 0, size, 0
-            m.tree_logs = block_is_log(u8(b)) ? felling_trunk_logs(gs, hit) : 0
-            if m.tree_logs > 0 {
-                m.need, m.mana_total, m.count = fell_time(m.tree_logs), fell_mana(m.tree_logs), m.tree_logs
-            } else {
-                // The hardest block sets the pace; more of them, longer.
-                hardest: f32
-                m.count, m.mana_total = 0, 0
-                for q in spell_take_targets(gs, hit, size) {
-                    t := unweave_time(Block_Type(u8(get_voxel(gs, q.x, q.y, q.z))))
-                    hardest = max(hardest, t)
-                    m.count += 1
-                    m.mana_total += t * UNWEAVE_MANA
-                }
-                m.need = hardest * (1 + 0.45 * math.sqrt(f32(max(m.count - 1, 0))))
-            }
-        }
-        if !gs.survival || mana_draw(m, m.mana_total / max(m.need, 0.01) * dt) { m.progress += dt } // creative: no mana
-        if m.progress >= m.need {
-            magic_unweave(gs, hit)
-            m.channeling = false
-        }
+        magic_begin(gs, hit, sphere_region(hit, size), size)
+        magic_channel(gs, dt)
     } else {
         m.channeling = false
         m.starved = false
@@ -206,14 +262,63 @@ magic_build_update :: proc(gs: ^Game_State, dt: f32) {
     }
 }
 
-// The blocks a spell of radius `size` about p takes: what's solid or a plant
-// in the sphere (not air, not water). Temp.
-spell_take_targets :: proc(gs: ^Game_State, p: [3]int, size: int) -> [dynamic][3]int {
+// Sets the spell on the blocks of `r` (at: the block aimed at), unless
+// that's what it's on already.
+@(private="file")
+magic_begin :: proc(gs: ^Game_State, at: [3]int, r: Edit_Region, size: int) {
+    m := &gs.magic
+    b := Block_Type(u8(get_voxel(gs, at.x, at.y, at.z)))
+    if m.channeling && at == m.target && b == m.block && r.lo == m.region.lo && r.hi == m.region.hi && r.is_shape == m.region.is_shape { return }
+    m.channeling, m.target, m.block, m.progress, m.size, m.stage, m.region = true, at, b, 0, size, 0, r
+    lo, hi := la.array_cast(r.lo, f32), la.array_cast(r.hi, f32) + 1
+    m.center = (lo + hi) / 2
+    m.ring = 0.85 + f32(size)
+    if !r.is_shape { m.ring = 0.35 + 0.5 * la.length((hi - lo).xz) } // a box: round its corners
+    single := r.lo == r.hi
+    m.tree_logs = single && block_is_log(u8(b)) ? felling_trunk_logs(gs, at) : 0
+    if m.tree_logs > 0 {
+        m.need, m.mana_total, m.count = fell_time(m.tree_logs), fell_mana(m.tree_logs), m.tree_logs
+        m.ring = 1.6
+        return
+    }
+    // The hardest block sets the pace; more of them, longer.
+    hardest: f32
+    m.count, m.mana_total = 0, 0
+    for q in spell_take_targets(gs, r) {
+        t := unweave_time(Block_Type(u8(get_voxel(gs, q.x, q.y, q.z))))
+        hardest = max(hardest, t)
+        m.count += 1
+        m.mana_total += t * UNWEAVE_MANA
+    }
+    if m.count == 0 {
+        m.channeling = false
+        return
+    }
+    m.need = hardest * (1 + 0.45 * math.sqrt(f32(m.count - 1)))
+    if !single { m.size = clamp(int(math.cbrt(f32(m.count))) - 1, 0, 4) } // a box sounds by how much it takes
+}
+
+// A frame of the spell at work (paying for it in survival); unweaves the
+// blocks when it's done.
+@(private="file")
+magic_channel :: proc(gs: ^Game_State, dt: f32) {
+    m := &gs.magic
+    if !m.channeling { return }
+    if !gs.survival || mana_draw(m, m.mana_total / max(m.need, 0.01) * dt) { m.progress += dt } // creative: no mana
+    if m.progress >= m.need {
+        magic_unweave(gs)
+        m.channeling, m.casting = false, false
+    }
+}
+
+// The blocks of `r` a spell takes: what's solid or a plant (not air, not
+// water). Temp.
+spell_take_targets :: proc(gs: ^Game_State, r: Edit_Region) -> [dynamic][3]int {
     out := make([dynamic][3]int, context.temp_allocator)
-    ball := sphere_region(p, size) // the brush's ball, as build_apply takes it
-    for dz in -size ..= size { for dy in -size ..= size { for dx in -size ..= size {
-        q := p + {dx, dy, dz}
-        if !region_contains(&ball, q) { continue }
+    r := r
+    for z in r.lo.z ..= r.hi.z { for y in r.lo.y ..= r.hi.y { for x in r.lo.x ..= r.hi.x {
+        q := [3]int{x, y, z}
+        if !region_contains(&r, q) { continue }
         v := u8(get_voxel(gs, q.x, q.y, q.z))
         if v == 0 || block_is_watery(v) { continue }
         append(&out, q)
@@ -221,23 +326,21 @@ spell_take_targets :: proc(gs: ^Game_State, p: [3]int, size: int) -> [dynamic][3
     return out
 }
 
-// The blocks at p (and round it, by the spell's size) come apart (or, a
-// tree's trunk, the tree comes down).
+// The spell's blocks come apart (or, a tree's trunk, the tree comes down).
 @(private="file")
-magic_unweave :: proc(gs: ^Game_State, p: [3]int) {
+magic_unweave :: proc(gs: ^Game_State) {
     m := &gs.magic
-    if m.tree_logs > 0 && felling_start(gs, p) { return }
+    if m.tree_logs > 0 && felling_start(gs, m.target) { return }
     // What they'll give, by kind, and where each kind is: for the motes.
-    targets := spell_take_targets(gs, p, m.size)
+    targets := spell_take_targets(gs, m.region)
     drops: [Block_Type]u32
     for q in targets { drops[voxel_item(u8(get_voxel(gs, q.x, q.y, q.z)))] += 1 }
     kinds := make([]Block_Type, len(targets), context.temp_allocator)
     for q, i in targets { kinds[i] = voxel_item(u8(get_voxel(gs, q.x, q.y, q.z))) }
-    if build_apply(gs, sphere_region(p, m.size), .Air, .All, merge = false) == 0 { return }
-    c := block_center(p)
-    sparks_burst(gs, c, MAGIC_TINT, 10 + 4 * m.size, 5 + f32(m.size))
+    if build_apply(gs, m.region, .Air, .All, merge = false) == 0 { return }
+    sparks_burst(gs, m.center, MAGIC_TINT, 10 + 4 * m.size, 5 + f32(m.size))
     motes_burst(gs, targets[:], kinds, drops)
-    spell_break_sound(c, m.size)
+    spell_break_sound(m.center, m.size)
 }
 
 // The spell's work done (with the material's dig: audio_edit). Also the sound board's.
@@ -301,31 +404,147 @@ magic_conjure :: proc(gs: ^Game_State, hit, nrm: [3]int) {
             for j in -size ..= size { for i in -size ..= size {
                 if i * i + j * j != ring { continue }
                 q := target + u * i + v * j
-                cur := u8(get_voxel(gs, q.x, q.y, q.z))
-                if !(cur == 0 || block_is_watery(cur) || block_is_land_plant(cur)) { continue }
-                if block_solid(u8(b)) && aabb_hits_voxel(gs.camera.pos, q) { continue }
-                if b == .Sapling && !sapling_ground(Block_Type(u8(get_voxel(gs, q.x, q.y - 1, q.z)))) { continue }
-                append(&cells, q)
+                if conjure_fits(gs, b, q) { append(&cells, q) }
             } }
         }
-        if len(cells) == 0 {
-            if b == .Sapling { ui_toast(gs, "Saplings take root in grass or dirt", 1.5) }
-            return
-        }
-        n := len(cells)
-        if gs.survival {
-            n = min(n, int(items_shown(gs, b)), int(magic_mana(m) / CONJURE_MANA))
-            if n == 0 { m.starved_t = 0.6; return }
-        }
-        blocks := make([]u8, n, context.temp_allocator)
-        for &x in blocks { x = u8(b) }
-        if build_set(gs, cells[:n], blocks, undo = !gs.survival) == 0 { return } // (spent as the edit is counted: items.odin)
-        audio_edit(target, b, .Air, min(size * 2, 8))
-        if gs.survival { mana_draw(m, CONJURE_MANA * f32(n)) }
+        magic_conjure_cells(gs, cells[:], target, size)
+        return
     }
     m.conjure, m.conjure_at = 0.2, block_center(target)
     sparks_burst(gs, m.conjure_at, mote_tint(b), 8, 3)
     play_at(.Magic_Place, m.conjure_at, 0.35, vary(0.02) * spell_pitch(magic_spell_size(gs)))
+}
+
+// The block in hand into the empty cells of a dragged-out box, nearest
+// where the drag began first (so what you can't pay for is the far end).
+@(private="file")
+magic_conjure_box :: proc(gs: ^Game_State, r: Edit_Region, from: [3]int) {
+    b := gs.selected_block
+    if b == .Air || b == .Door { return }
+    if gs.survival && items_shown(gs, b) == 0 {
+        ui_toast(gs, fmt.tprintf("No %s left", block_name(b)), 1.2)
+        return
+    }
+    cells := make([dynamic][3]int, context.temp_allocator)
+    for z in r.lo.z ..= r.hi.z { for y in r.lo.y ..= r.hi.y { for x in r.lo.x ..= r.hi.x {
+        q := [3]int{x, y, z}
+        if conjure_fits(gs, b, q) { append(&cells, q) }
+    } } }
+    if len(cells) == 0 { return }
+    Near :: struct { p: [3]int, d: int }
+    near := make([]Near, len(cells), context.temp_allocator)
+    for q, i in cells { e := q - from; near[i] = {q, e.x * e.x + e.y * e.y + e.z * e.z} }
+    slice.sort_by(near, proc(a, b: Near) -> bool { return a.d < b.d })
+    for n, i in near { cells[i] = n.p }
+    // As many as you have and can pay for, paid now; they fly out to land.
+    m := &gs.magic
+    n := len(cells)
+    if gs.survival {
+        n = min(n, int(items_shown(gs, b)), int(magic_mana(m) / CONJURE_MANA))
+        if n == 0 { m.starved_t = 0.6; return }
+        mana_draw(m, CONJURE_MANA * f32(n))
+    }
+    magic_send(gs, cells[:n], b)
+}
+
+// The block in hand sent out to `cells` (nearest first): motes leave your
+// hands in a stream, each filling its cells as it lands (mote_land), the
+// box building up in front of you. Unweaving the other way round.
+@(private="file")
+magic_send :: proc(gs: ^Game_State, cells: [][3]int, b: Block_Type) {
+    m := &gs.magic
+    if m.fill_out == 0 { m.fill_len = 0 }
+    room := MAX_FILL - m.fill_len
+    cells := cells[:min(len(cells), room)]
+    if len(cells) == 0 { return }
+    per := max(1, (len(cells) + SEND_MOTES - 1) / SEND_MOTES)
+    groups := (len(cells) + per - 1) / per
+    spread := clamp(f32(groups) * 0.03, 0.1, 1.0) // seconds from the first to leave to the last
+    lo, hi := cells[0], cells[0]
+    for c in cells { lo, hi = la.min(lo, c), la.max(hi, c) }
+    for g in 0 ..< groups {
+        first := m.fill_len
+        for c in cells[g * per:min((g + 1) * per, len(cells))] {
+            m.fill[m.fill_len] = {c, b}
+            m.fill_len += 1
+        }
+        mote_add(gs, {pos = gs.camera.pos, age = -spread * f32(g) / f32(max(groups - 1, 1)) - 0.08, block = b, tint = mote_tint(b),
+            size = 0.85, out = true, first = i32(first), n = i32(m.fill_len - first), tex = block_center(cells[g * per])})
+        m.fill_out += 1
+    }
+    m.fill_done = 0
+    m.conjure = spread + 0.5 // the hands stay up, the beam on the box, while they go
+    m.conjure_at = (la.array_cast(lo, f32) + la.array_cast(hi, f32) + 1) / 2
+    play(.Magic_Place, 0.3, vary(0.02) * 0.84) // a breath in as they go: a fourth under the landing's chime
+}
+
+// A sent mote reaching its box: its cells filled, if they're still empty
+// and (in survival) you still have the block; a knock that climbs as the
+// box fills, and the chime when the last lands.
+@(private="file")
+mote_land :: proc(gs: ^Game_State, mo: ^Mote) {
+    m := &gs.magic
+    mo.size = 0
+    m.fill_out = max(m.fill_out - 1, 0)
+    pos := make([dynamic][3]int, context.temp_allocator)
+    blocks := make([dynamic]u8, context.temp_allocator)
+    b := mo.block
+    for f in m.fill[mo.first:][:mo.n] {
+        if !conjure_fits(gs, f.block, f.pos) { continue }
+        if gs.survival && int(items_shown(gs, f.block)) <= len(pos) { break }
+        append(&pos, f.pos)
+        append(&blocks, u8(f.block))
+    }
+    m.fill_done += int(mo.n)
+    if len(pos) == 0 { return }
+    build_set(gs, pos[:], blocks[:], undo = !gs.survival, merge = true) // one undo with the click's block (counted as spent: items.odin)
+    c := block_center(pos[0])
+    sparks_burst(gs, c, mote_tint(b), 3, 2)
+    if m.fill_gap > 0.045 {
+        m.fill_gap = 0
+        k := clamp(f32(m.fill_done) / f32(max(m.fill_len, 1)), 0, 1)
+        play_at(.Place, c, 0.3, vary(0.04) * (0.9 + 0.25 * k), 10)
+        play_at(step_sound(block_material(b)), c, 0.22, vary(0.06) * (1 + 0.2 * k), 10)
+    }
+    if m.fill_out == 0 { play_at(.Magic_Place, c, 0.4, vary(0.015)) } // the last: the chime
+}
+
+// Whether block b may be conjured into q: it's empty (air, water, a plant),
+// not where you stand, and a sapling has ground to root in.
+@(private="file")
+conjure_fits :: proc(gs: ^Game_State, b: Block_Type, q: [3]int) -> bool {
+    cur := u8(get_voxel(gs, q.x, q.y, q.z))
+    if !(cur == 0 || block_is_watery(cur) || block_is_land_plant(cur)) { return false }
+    if block_solid(u8(b)) && aabb_hits_voxel(gs.camera.pos, q) { return false }
+    if b == .Sapling && !sapling_ground(Block_Type(u8(get_voxel(gs, q.x, q.y - 1, q.z)))) { return false }
+    return true
+}
+
+// Conjures the block in hand into `cells` (in order), in survival as many
+// as you have and can pay for; the beam and sparks at `at`. size: how big
+// it sounds. False if none went in.
+@(private="file")
+magic_conjure_cells :: proc(gs: ^Game_State, cells: [][3]int, at: [3]int, size: int) -> bool {
+    m := &gs.magic
+    b := gs.selected_block
+    if len(cells) == 0 {
+        if b == .Sapling { ui_toast(gs, "Saplings take root in grass or dirt", 1.5) }
+        return false
+    }
+    n := len(cells)
+    if gs.survival {
+        n = min(n, int(items_shown(gs, b)), int(magic_mana(m) / CONJURE_MANA))
+        if n == 0 { m.starved_t = 0.6; return false }
+    }
+    blocks := make([]u8, n, context.temp_allocator)
+    for &x in blocks { x = u8(b) }
+    if build_set(gs, cells[:n], blocks, undo = !gs.survival) == 0 { return false } // (spent as the edit is counted: items.odin)
+    audio_edit(at, b, .Air, min(size * 2, 8))
+    if gs.survival { mana_draw(m, CONJURE_MANA * f32(n)) }
+    m.conjure, m.conjure_at = 0.2, block_center(at)
+    sparks_burst(gs, m.conjure_at, mote_tint(b), 8 + 2 * size, 3 + f32(size))
+    play_at(.Magic_Place, m.conjure_at, 0.35 + 0.05 * f32(size), vary(0.02) * spell_pitch(size))
+    return true
 }
 
 // A mote brought blocks home (they were counted when the edit was made:
@@ -344,9 +563,11 @@ magic_collect :: proc(gs: ^Game_State, b: Block_Type, n: u32) {
 mote_add :: proc(gs: ^Game_State, mo: Mote) {
     m := &gs.magic
     old := &m.motes[m.next_mote]
-    if old.size > 0 { magic_collect(gs, old.block, old.count) } // all slots busy: that one's here already
+    if old.size > 0 { // all slots busy: that one's there already
+        if old.out { mote_land(gs, old) } else { magic_collect(gs, old.block, old.count) }
+    }
     old^ = mo
-    old.tex = {math.floor(mo.pos.x), math.floor(mo.pos.y), math.floor(mo.pos.z)}
+    if !mo.out { old.tex = {math.floor(mo.pos.x), math.floor(mo.pos.y), math.floor(mo.pos.z)} }
     m.next_mote = (m.next_mote + 1) % MAX_MOTES
 }
 
@@ -371,13 +592,13 @@ magic_update :: proc(gs: ^Game_State, dt: f32) {
     m.starved_t -= dt
     m.mana_rest += dt
     if m.mana_rest > MANA_REST { m.mana_spent = max(m.mana_spent - MANA_REGEN * dt, 0) }
-    if !magic_active(gs) || !gs.mouse_locked || gs.combat.sword || gs.glider.deployed { m.channeling = false }
+    if !magic_active(gs) || !gs.mouse_locked || gs.combat.sword || gs.glider.deployed { m.channeling, m.casting = false, false }
     up := m.channeling || m.conjure > 0
     m.raise = clamp(m.raise + (up ? dt * 6 : -dt * 2.5), 0, 1)
-    if m.channeling { m.aim = block_center(m.target) } else if m.conjure > 0 { m.aim = m.conjure_at }
+    if m.channeling { m.aim = m.center } else if m.conjure > 0 { m.aim = m.conjure_at }
 
     if m.channeling {
-        c := block_center(m.target)
+        c := m.center
         frac := clamp(m.progress / m.need, 0, 1)
         // Bits of the block flake off toward you as it unravels.
         m.chip_timer -= dt
@@ -414,10 +635,34 @@ magic_update :: proc(gs: ^Game_State, dt: f32) {
 
     // Motes: thrown out, then drawn in ever faster.
     m.pickup_gap += dt
+    m.fill_gap += dt
+    palms: [2][3]f32
+    if m.fill_out > 0 { for h, i in cast_hands(gs) { palms[i] = h.palm } }
     for &mo in m.motes {
         if mo.size == 0 { continue }
+        was := mo.age
         mo.age += dt
         if mo.age < 0 { continue }
+        if mo.out {
+            // Sent out: off a palm (as it goes, wherever you are by then),
+            // flung a little wide, then homing in ever harder.
+            if was < 0 {
+                mo.pos = palms[mo.first & 1]
+                to := mo.tex - mo.pos
+                mo.vel = la.normalize0(to) * (5 + la.length(to) * 0.8) + rand_dir() * 2.5 + {0, 1.5, 0}
+            }
+            to := mo.tex - mo.pos
+            d := la.length(to)
+            want := to / max(d, 0.001) * (8 + 50 * mo.age)
+            mo.vel += (want - mo.vel) * min(1, dt * (3 + 16 * mo.age))
+            step := mo.vel * dt
+            if d < 0.3 || la.length(step) >= d || mo.age > 4 {
+                mote_land(gs, &mo)
+                continue
+            }
+            mo.pos += step
+            continue
+        }
         eye := gs.camera.pos
         if mo.home > 0 {
             o := &gs.net.others[mo.home - 1]
@@ -488,12 +733,16 @@ spell_crack_open :: proc(c: [3]f32, b: Block_Type, stage: int) {
     play_at(dig_sound(block_material(b)), c, 0.15 + 0.25 * k, vary(0.05) * (1.25 - 0.2 * k), 10)
 }
 
-// For the tracer: the block being unwoven and how far it has cracked.
-magic_crack_uniform :: proc(gs: ^Game_State) -> [4]i32 {
+// For the tracer: the blocks being unwoven (a box, and within it a ball's
+// radius if a ball) and how far they've cracked.
+magic_crack_uniform :: proc(gs: ^Game_State) -> (lo, hi: [4]i32) {
     m := &gs.magic
-    if !m.channeling || m.stage == 0 { return {} }
-    size := m.tree_logs > 0 ? 0 : min(m.size, 7)
-    return {i32(m.target.x), i32(m.target.y), i32(m.target.z), i32(m.stage * 8 + size)}
+    if !m.channeling || m.stage == 0 { return }
+    r := m.region
+    if m.tree_logs > 0 { r = sphere_region(m.target, 0) }
+    lo = {i32(r.lo.x), i32(r.lo.y), i32(r.lo.z), i32(m.stage)}
+    hi = {i32(r.hi.x), i32(r.hi.y), i32(r.hi.z), i32(r.is_shape ? r.size : 0)}
+    return
 }
 
 // ─── Drawing ───────────────────────────────────────────────────────────────
@@ -570,8 +819,8 @@ magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
 
     if !ent_begin(f, false) { return }
     if first && m.raise > 0.5 && (m.channeling || m.conjure > 0) {
-        c := m.channeling ? block_center(m.target) : m.conjure_at
-        ring := m.tree_logs > 0 ? f32(1.6) : 0.85 + f32(m.size)
+        c := m.channeling ? m.center : m.conjure_at
+        ring := m.ring
         spell_beam_parts(f, {hands[0].palm, hands[1].palm}, c, m.channeling, frac, m.t, ring, m.size, mote_tint(m.block))
     }
     for s in m.sparks {

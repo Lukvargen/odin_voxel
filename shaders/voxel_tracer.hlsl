@@ -874,11 +874,11 @@ float crack_mask(int3 vkey, float3 nrm, float3 hit_pos, float k) {
 
 float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm, float dist) {
     float3 c = voxel_surface_texture(block_id, vkey, hit_pos, nrm, dist);
-    int stage = u_crack.w >> 3;
-    if (stage > 0) {
-        int size = u_crack.w & 7;
-        int3 d = vkey - u_crack.xyz;
-        if (dot(d, d) <= size * size && crack_mask(vkey, nrm, hit_pos, stage / 5.0) > 0.5)
+    int stage = u_crack.w;
+    if (stage > 0 && all(vkey >= u_crack.xyz) && all(vkey <= u_crack_hi.xyz)) {
+        int r = u_crack_hi.w;
+        int3 d = vkey - (u_crack.xyz + u_crack_hi.xyz) / 2;
+        if ((r == 0 || dot(d, d) <= r * r) && crack_mask(vkey, nrm, hit_pos, stage / 5.0) > 0.5)
             c *= 0.22; // dark in the crack
     }
     return c;

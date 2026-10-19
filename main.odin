@@ -609,6 +609,10 @@ game_main :: proc() -> (relaunch: []string) {
             build_wheel(gs, wheel_dy > 0 ? 1 : -1, held_mods())
         }
 
+        // Ctrl held while dragging out a box: the mouse gives it depth and the
+        // view stands still (build_drag.odin).
+        if gs.mouse_locked && drag_mouse(gs, ctrl_held, mouse_dy) { mouse_dx, mouse_dy = 0, 0 }
+
         // Playing alone, the pause menu stops everything; with others about
         // (hosting or joined) nothing stops, and a menu or the inventory only
         // takes the keys and mouse: the player still falls, glides, is hit.

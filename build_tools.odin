@@ -55,6 +55,8 @@ Build :: struct {
     stroke:      bool, // the last undo record is the held stroke's: repeats join it
 
     door_click:  bool, // right went down on a door: holding it doesn't build
+    box:         bool, // the brush is a box: hold and drag one out (build_drag.odin); B or Ctrl+wheel
+    drag:        Drag, // a box being dragged out
 }
 
 // Old values of the voxels one edit changed; undoing writes them back.
@@ -192,10 +194,14 @@ cycle :: proc(i, n, step: int) -> int { return ((i + step) % n + n) % n }
 // key was used (main then does nothing else with it).
 build_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
     b := &gs.build
-    if gs.survival { return false } // magic, not tools (magic.odin); no undo either: it'd make blocks
     // T, Q, V, B: plain cycles forward, Shift back; with Ctrl or Alt, nothing.
     step := .Shift in mods ? -1 : 1
     plain := mods & {.Ctrl, .Alt} == {}
+    if gs.survival { // magic, not tools (magic.odin); no undo either: it'd make blocks
+        if key != SDL.K_B || !plain { return false }
+        brush_step(gs, step, wrap = true)
+        return true
+    }
     switch key {
     case SDL.K_T:
         if !plain { return false }
@@ -209,7 +215,7 @@ build_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
         b.mask = Build_Mask(cycle(int(b.mask), len(Build_Mask), step))
     case SDL.K_B:
         if !plain { return false }
-        brush_step(gs, step)
+        brush_step(gs, step, wrap = true)
     case SDL.K_Z:
         switch mods {
         case {.Ctrl}:         build_undo(gs, &b.undo, &b.redo, "Undo")
@@ -258,12 +264,29 @@ area_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
     return true
 }
 
+// B / Ctrl+wheel: one block, a box (dragged out: build_drag.odin), then the
+// round brushes, BRUSHES[1:]. In survival only as big as the spell allows.
+// wrap: past the last, back to the first (B; the wheel stops at the ends).
 @(private="file")
-brush_step :: proc(gs: ^Game_State, step: int) {
+brush_step :: proc(gs: ^Game_State, step: int, wrap := false) {
+    b := &gs.build
     brushes := BRUSHES
-    at := 0
-    for r, i in brushes { if r <= gs.brush_radius { at = i } }
-    gs.brush_radius = brushes[clamp(at + step, 0, len(brushes) - 1)]
+    // Step k: 0 one block, 1 the box, k >= 2 a radius of brushes[k - 1].
+    at := b.box ? 1 : 0
+    for r, i in brushes { if i > 0 && r <= gs.brush_radius { at = i + 1 } }
+    top := len(brushes)
+    if gs.survival {
+        top = 1
+        for r, i in brushes { if i > 0 && r <= survival_spell_size { top = i + 1 } }
+    }
+    at = wrap ? cycle(at, top + 1, step) : clamp(at + step, 0, top)
+    was_box := b.box
+    b.box = at == 1
+    gs.brush_radius = at <= 1 ? 0 : brushes[at - 1]
+    if b.box != was_box { drag_cancel(gs) }
+    if gs.survival { // creative shows it in the tool panel
+        ui_toast(gs, b.box ? "Box: hold and drag to place or take many (B: one block)" : gs.brush_radius > 0 ? fmt.tprintf("Spell: radius %d", gs.brush_radius) : "One block at a time (B: box)", 1.6)
+    }
 }
 
 // The mouse wheel while playing (up = +1): the hotbar, or sizes the current
@@ -271,6 +294,10 @@ brush_step :: proc(gs: ^Game_State, step: int) {
 build_wheel :: proc(gs: ^Game_State, steps: int, mods: Mods) {
     b := &gs.build
     if steps == 0 { return }
+    if b.drag.on { // a box being dragged out: its depth, whatever's held
+        drag_deepen(gs, steps)
+        return
+    }
     if gs.survival {
         if mods - {.Shift} == {} { hotbar_select(gs, cycle(gs.hotbar_slot, HOTBAR_SLOTS, -steps)) }
         return
@@ -296,7 +323,10 @@ build_wheel :: proc(gs: ^Game_State, steps: int, mods: Mods) {
 build_update :: proc(gs: ^Game_State, dt: f32) {
     b := &gs.build
     active := gs.mouse_locked && !gs.glider.deployed && !gs.combat.sword
-    if !active { return }
+    if !active {
+        drag_cancel(gs)
+        return
+    }
     gs.edit_timer -= dt
     // Right click on a door swings it, whatever the tool (door.odin).
     if !gs.right_held { b.door_click = false }
@@ -319,11 +349,34 @@ build_update :: proc(gs: ^Game_State, dt: f32) {
     }
 }
 
-// Left breaks, right places; a click edits at once, holding repeats every
-// EDIT_REPEAT seconds (one undo for the whole stroke). The brush radius
-// applies to both; torches are always one block.
+// Left breaks, right places, a block at a click (or the round brush, its
+// radius set), holding repeating every EDIT_REPEAT seconds. With the box
+// brush, holding and moving drags out a box instead, applied on letting go
+// (build_drag.odin). A stroke is one undo; torches are always one block.
 @(private="file")
 build_block_update :: proc(gs: ^Game_State) {
+    if gs.build.box {
+        d := &gs.build.drag
+        switch drag_step(gs, REACH) {
+        case .None, .Held, .Cancel:
+        case .Press:
+            if d.place && gs.selected_block == .Door {
+                door_place(gs, d.hit, d.nrm) // doors go in one at a time (door.odin)
+                drag_cancel(gs)
+                return
+            }
+            build_apply(gs, sphere_region(d.start, 0), d.place ? gs.selected_block : .Air, .All)
+        case .Release:
+            if !d.moved { return }
+            if region_volume(drag_region(d)) > drag_limit(gs) {
+                ui_toast(gs, "Too big: make it smaller", 1.2)
+                return
+            }
+            // Placing fills only what's empty; one undo with the click's block.
+            build_apply(gs, drag_region(d), d.place ? gs.selected_block : .Air, d.place ? .Air : .All, merge = true)
+        }
+        return
+    }
     breaking := gs.left_pressed  || (gs.left_held  && gs.edit_timer <= 0)
     placing  := gs.right_pressed || (gs.right_held && gs.edit_timer <= 0)
     if !breaking && !placing { return }
@@ -670,8 +723,9 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
 
 // Sets each of `pos` to its block of `blocks` (a door's two halves), and
 // tells everyone. undo: kept for Ctrl+Z (placing a door); swinging one
-// isn't. Returns how many voxels changed.
-build_set :: proc(gs: ^Game_State, pos: [][3]int, blocks: []u8, undo: bool) -> int {
+// isn't. merge: one undo with the edit before (as build_apply's). Returns
+// how many voxels changed.
+build_set :: proc(gs: ^Game_State, pos: [][3]int, blocks: []u8, undo: bool, merge := false) -> int {
     rec: Edit_Record
     changed := make([dynamic][3]int, context.temp_allocator)
     olds := make([dynamic]u8, context.temp_allocator)
@@ -693,10 +747,18 @@ build_set :: proc(gs: ^Game_State, pos: [][3]int, blocks: []u8, undo: bool) -> i
     build_commit(gs, changed[:], dirty, olds[:])
     if undo {
         b := &gs.build
-        b.stroke = false
         for &x in b.redo { delete(x.changes) }
         clear(&b.redo)
-        push_record(b, &b.undo, rec)
+        if merge && b.stroke && len(b.undo) > 0 {
+            last := &b.undo[len(b.undo) - 1]
+            append(&last.changes, ..rec.changes[:])
+            b.undo_voxels += len(rec.changes)
+            delete(rec.changes)
+            trim_undo(b)
+        } else {
+            push_record(b, &b.undo, rec)
+        }
+        b.stroke = true
     }
     return len(changed)
 }
@@ -840,6 +902,29 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
     pv.face = make([dynamic][2][3]f32, context.temp_allocator)
     b := &gs.build
     eye := gs.camera.pos
+    switch gs.survival ? .Magic : b.tool {
+    case .Magic, .Block:
+        if !drag_showing(gs) {
+            // The box brush, before a click: faintly, which way a box begun
+            // here would lie (with the block outlined below).
+            if b.box && !b.drag.on {
+                reach := gs.survival || b.tool == .Magic ? MAGIC_REACH : REACH
+                if hit, nrm, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), reach, plants = true); ok {
+                    drag_hover_patch(gs, &pv.cursor, hit, nrm)
+                }
+            }
+            break
+        }
+        // The box being dragged out.
+        r := drag_region(&b.drag)
+        lo := [3]f32{f32(r.lo.x), f32(r.lo.y), f32(r.lo.z)}
+        hi := [3]f32{f32(r.hi.x), f32(r.hi.y), f32(r.hi.z)} + 1
+        wire_box(&pv.segs, (lo + hi) / 2, (hi - lo) / 2 + 0.004, 1, 0)
+        pv.fill = b.drag.place
+        pv.too_big = region_volume(r) > drag_limit(gs)
+        return
+    case .Area, .Shape:
+    }
     switch gs.survival ? .Magic : b.tool {
     case .Magic:
         // What the spell would take: the block, and the sphere round it.

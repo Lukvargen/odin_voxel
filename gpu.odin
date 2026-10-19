@@ -54,7 +54,8 @@ Camera_Uniform :: struct #packed {
     gi_frame:       [4]i32, // x = first probe slot renewed this frame, y = frame counter
     torch:          [4]i32, // torch shadows (torch.odin): xyz = the box's min chunk, w = emitters listed (0 = off)
     torch_params:   [4]f32, // x = share of torch light left in its shadow
-    crack:          [4]i32, // the block our spell is unweaving (magic.odin): xyz, w = stage * 8 + spell size (0 = none)
+    crack:          [4]i32, // the blocks our spell is unweaving (magic.odin): min corner, w = crack stage (0 = none)
+    crack_hi:       [4]i32, // ...max corner, w = a ball's radius about the middle (0: the whole box)
 }
 
 // A held torch lights the world around the player as a point light in the
@@ -840,7 +841,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
     uniform.gi_origin, uniform.gi_frame = gi_uniforms(gs, render_pos)
     uniform.torch = torch_uniform(gs, render_pos)
     uniform.torch_params = {gs.torch.floor, 0, 0, 0}
-    uniform.crack = magic_crack_uniform(gs)
+    uniform.crack, uniform.crack_hi = magic_crack_uniform(gs)
     gs.gi.uniform = uniform // gi_time runs the probe pass again with it
     SDL.PushGPUComputeUniformData(cmd, 0, &uniform, size_of(uniform))
 

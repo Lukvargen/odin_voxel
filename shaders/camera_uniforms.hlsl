@@ -37,7 +37,8 @@ cbuffer CameraUniforms : register(b0, space2) {
     int4   u_gi_frame;       // x = first probe slot updated this frame, y = frame counter
     int4   u_torch;          // torch shadows (torch.odin): xyz = the box's min chunk, w = emitters listed (0 = off)
     float4 u_torch_params;   // x = share of torch light left in its shadow
-    int4   u_crack;          // the block being unwoven (magic.odin): xyz, w = stage * 8 + spell size (0 = none)
+    int4   u_crack;          // the blocks being unwoven (magic.odin): min corner, w = crack stage (0 = none)
+    int4   u_crack_hi;       // ...max corner, w = a ball's radius about the middle (0: the whole box)
 };
 
 #endif // CAMERA_UNIFORMS_HLSL

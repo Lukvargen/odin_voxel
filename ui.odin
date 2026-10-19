@@ -747,6 +747,32 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
         cx, cy := math.floor(w / 2), math.floor(h / 2)
         crosshair_bar("CrossH", cx - 9, cy - 1, 18, 2)
         crosshair_bar("CrossV", cx - 1, cy - 9, 2, 18)
+        // A box being dragged out: how big, under the crosshair (build_drag.odin).
+        if drag_showing(gs) {
+            label, too_big := drag_label(gs)
+            if clay.UI(clay.ID("DragLabel"))({
+                layout = {padding = {8, 8, 4, 5}},
+                floating = {attachTo = .Root, offset = {cx, cy + 26}, zIndex = 6, attachment = {.CenterTop, .LeftTop}, pointerCaptureMode = .Passthrough},
+                custom = deco(.Tooltip, radius = 6),
+            }) {
+                text(label, too_big ? COLOR_ACCENT_2 : COLOR_TEXT, 13, FONT_ID_TITLE)
+            }
+            if clay.UI(clay.ID("DragHint"))({
+                floating = {attachTo = .Root, offset = {cx, cy + 56}, zIndex = 6, attachment = {.CenterTop, .LeftTop}, pointerCaptureMode = .Passthrough},
+            }) {
+                text("wheel or Ctrl + mouse: depth (back past 1: the other side)   other button: cancel", COLOR_TEXT_FAINT, 11)
+            }
+        } else if gs.build.box && (gs.survival || gs.build.tool == .Block || gs.build.tool == .Magic) {
+            // The box brush, before a click: how a drag decides its lie.
+            if clay.UI(clay.ID("BoxHint"))({
+                layout = {padding = {7, 7, 3, 4}},
+                floating = {attachTo = .Root, offset = {cx, cy + 70}, zIndex = 6, attachment = {.CenterTop, .LeftTop}, pointerCaptureMode = .Passthrough},
+                custom = deco(.Tooltip, radius = 5, alpha = 0.6),
+            }) {
+                lie, _ := drag_view_lie(camera_forward(gs.camera))
+                text(lie == .Flat ? "box: a floor   (look more level for a wall)" : "box: a wall   (look down steeply for a floor)", COLOR_TEXT_DIM, 11)
+            }
+        }
     }
 
     // Entering a biome: its name for a moment. At startup, where the
@@ -1266,7 +1292,7 @@ draw_target_outline :: proc(gs: ^Game_State, w, h: f32) {
     dist := la.length(la.clamp(eye, lo, hi) - eye)
     alpha := u8(clamp(200 - dist * 2, 70, 200))
     col := [3]u8{255, 250, 240}
-    if gs.build.tool != .Block {
+    if gs.build.tool != .Block || drag_showing(gs) {
         col = pv.fill ? [3]u8{255, 250, 240} : CLEAR_COL
         if pv.too_big { col = {255, 180, 60} }
         alpha = max(alpha, 150)
@@ -1323,11 +1349,13 @@ build_hud_layout :: proc(gs: ^Game_State, w: f32) {
         }
         switch b.tool {
         case .Block:
-            param_row("Brush", gs.brush_radius == 0 ? "1 block" : fmt.tprintf("radius %d", gs.brush_radius), "Ctrl", live == .Brush)
+            param_row("Brush", b.box ? "box" : gs.brush_radius == 0 ? "1 block" : fmt.tprintf("radius %d", gs.brush_radius), "B", live == .Brush)
+            if b.box { hint("hold and drag: a box (floor, wall)") }
         case .Magic:
             s := magic_spell_size(gs)
-            param_row("Spell", s == 0 ? "1 block" : fmt.tprintf("radius %d", s), "Ctrl", live == .Brush)
+            param_row("Spell", b.box ? "box" : s == 0 ? "1 block" : fmt.tprintf("radius %d", s), "B", live == .Brush)
             hint("hold left: unweave   right: conjure")
+            if b.box { hint("hold and drag: a box (floor, wall)") }
         case .Area:
             param_row("Cursor", build_cursor_name(b.cursor), "C", false)
             if b.cursor == .Air { param_row("Reach", fmt.tprintf("%d", b.air_dist), "Alt", live == .Distance) }
@@ -1476,6 +1504,7 @@ help_card :: proc(gs: ^Game_State, a: f32) {
             key_row("Middle click", "pick block", a)
             key_row("1-9, wheel", "hotbar", a)
             key_row("E", "what you carry", a)
+            key_row("B", "box: drag many at once", a)
         } else {
             key_row("Space", "jump; twice to fly", a)
             key_row("Left click", "break", a)
@@ -1484,7 +1513,7 @@ help_card :: proc(gs: ^Game_State, a: f32) {
             key_row("1-9, wheel", "hotbar", a)
             key_row("E", "all blocks", a)
             key_row("T", "block / magic / area / shape", a)
-            key_row("B", "brush size", a)
+            key_row("B", "brush: one / box / size", a)
             key_row("Ctrl Z / Y", "undo / redo", a)
         }
         key_row("G", "hang glider", a)
@@ -2031,7 +2060,7 @@ menu_controls :: proc(gs: ^Game_State) {
         }
     }
     moving   := Group{"Moving", {"WASD", "move", "Ctrl  or  W W", "sprint", "Shift", "sneak: quiet, hard to spot, won't fall off", "Space", "jump; hold to swim up", "Space twice", "fly: Shift down, Alt fast"}}
-    building := Group{"Building", {"L / R click", "break / place; hold repeats", "Middle click", "pick the block you look at", "1-9, wheel", "hotbar", "E", "all blocks", "B, Ctrl+wheel", "brush size", "T", "tool: block / area / shape", "Ctrl Z / Ctrl Y", "undo / redo"}}
+    building := Group{"Building", {"L / R click", "break / place; hold repeats", "Middle click", "pick the block you look at", "1-9, wheel", "hotbar", "E", "all blocks", "B, Ctrl+wheel", "brush: one block, box (drag), size", "T", "tool: block / area / shape", "Ctrl Z / Ctrl Y", "undo / redo"}}
     tools    := Group{"Area and shape", {"Area: L / R", "the box's two corners", "Area: F / X", "fill / clear the box", "C", "area cursor: block / face / air", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "push lit face; shape size", "Shift+wheel", "move box; shape height", "Alt+wheel", "air reach; turn shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V, C", "cycle back"}}
     fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll", "F (hold)", "guard; parry just in time"}}
     gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
