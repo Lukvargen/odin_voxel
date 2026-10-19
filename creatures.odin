@@ -216,8 +216,8 @@ shape_hum_arm :: proc(p: [3]f32, voxel: f32) -> Pal {
 @(private="file")
 shape_hum_fore :: proc(p: [3]f32, voxel: f32) -> Pal {
     t := clamp(-p.y / HUM_FORE_LEN, 0, 1)
-    if p.y < -HUM_FORE_LEN + 0.04 {
-        return vm_capsule(p, {0, -HUM_FORE_LEN + 0.035, 0}, {0, -HUM_FORE_LEN + 0.005, 0}, 0.06) < 0 ? .Guard : .Empty
+    if p.y < -HUM_FORE_LEN + 0.04 { // the cuff: a band, ending at the wrist (an open glove goes on from there)
+        return p.y > -HUM_FORE_LEN && la.length(p.xz - {0, 0.005}) < 0.062 ? .Guard : .Empty
     }
     return vm_capsule(p, {0, 0, 0}, {0, -HUM_FORE_LEN + 0.04, 0.005}, 0.052 + 0.014 * t) < 0 ? .Shirt : .Empty
 }
@@ -512,9 +512,9 @@ HUM_NECK    :: [3]f32{0, 0.6, -0.04} // a little back: the face over the feet
 HUM_EYE     :: f32(1.7) - HUM_HIPS_Y - 0.6 // PLAYER_EYE_HEIGHT, design
 HUM_UPPER_LEN :: f32(0.28) // shoulder to elbow
 HUM_FORE_LEN  :: f32(0.26) // elbow to wrist
+HUM_GLOVE_SCALE :: [3]f32{1.3, 1.6, 0.85} // magic.odin's open glove at the size of the body's hand (Hum_Hand)
 
 // A basis whose -y axis points along d (limbs hang along -y).
-@(private="file")
 basis_hang_along :: proc(d, ref: [3]f32) -> Basis {
     y := -la.normalize(d)
     x := la.cross(y, ref)
@@ -618,8 +618,10 @@ humanoid_add_parts :: proc(f: ^Ent_Frame, feet: [3]f32, a: ^Player_Anim, look_ya
             ent_part(f, .Hum_Hand, base + torso * wrist, torso * fore, {1, 1, 1}, tint)
             continue
         }
-        // The open glove: fingers on from the forearm and up a little,
-        // palm to the block.
+        // The open glove in the fist's place, as big as it (the fist is
+        // broad: the glove's palm widened and thickened to match, its
+        // fingers a little shorter), its cuff under the forearm's; fingers
+        // on from the forearm and up a little, palm to the block.
         dir := la.normalize(wrist - elbow)
         fingers := la.normalize(dir + {0, 0.45, 0})
         pn := la.normalize0(palm_n - fingers * la.dot(palm_n, fingers))
@@ -627,8 +629,8 @@ humanoid_add_parts :: proc(f: ^Ent_Frame, feet: [3]f32, a: ^Player_Anim, look_ya
         y := -pn
         glove := basis_from_axes(la.cross(y, fingers), y, fingers)
         rune := MAGIC_TINT * ((0.5 + 0.9 * act.k) * (0.9 + 0.1 * math.sin(act.t * 9)))
-        ent_part(f, side > 0 ? .Glove_L : .Glove_R, base + torso * wrist, torso * glove, {0.75, 0.75, 0.75}, rune)
-        palm := wrist + fingers * 0.07 + pn * 0.025
+        ent_part(f, side > 0 ? .Glove_L : .Glove_R, base + torso * wrist, torso * glove, HUM_GLOVE_SCALE, rune)
+        palm := wrist + fingers * 0.05 + pn * 0.04
         act.palms[side > 0 ? 1 : 0] = feet + (base + torso * palm - feet) * world_scale
     }
     // The head: turned and tipped to where the player looks.

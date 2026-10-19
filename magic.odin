@@ -495,18 +495,18 @@ magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         // The runes on the palms glow brighter as the spell takes hold.
         rune := MAGIC_TINT * ((m.channeling || m.conjure > 0 ? 0.7 + 0.8 * frac : 0.35) * (0.9 + 0.1 * math.sin(m.t * 9)))
         for h, i in hands {
-            // Slimmer than the sword arm's sleeves: these come right past the eye.
-            limb :: proc(f: ^Ent_Frame, model: Model_Id, a, b: [3]f32, k: f32) {
+            // The body's own sleeves (creatures.odin), as others see them:
+            // stretched to these arms' lengths, slimmer, as they come right
+            // past the eye; the gold cuff at the wrist, under the glove's.
+            limb :: proc(f: ^Ent_Frame, model: Model_Id, a, b, ref: [3]f32, length, k: f32) {
                 d := b - a
                 l := la.length(d)
                 if l < 1e-4 { return }
-                z := d / l
-                x := la.normalize0(la.cross([3]f32{0, 1, 0}, z))
-                if x == 0 { x = {1, 0, 0} }
-                ent_part(f, model, a, basis_from_axes(x, la.cross(z, x), z), {k, k, l}, PLAYER_TINT)
+                ent_part(f, model, a, basis_hang_along(d, ref), {k, l / length, k}, PLAYER_TINT)
             }
-            limb(f, .Arm_Upper, h.shoulder, h.elbow, 0.6)
-            limb(f, .Arm_Fore, h.elbow, h.wrist, 0.45)
+            fwd := camera_forward(gs.camera)
+            limb(f, .Hum_Arm, h.shoulder, h.elbow, fwd, HUM_UPPER_LEN, 0.75)
+            limb(f, .Hum_Fore, h.elbow, h.wrist, fwd, HUM_FORE_LEN, 0.75)
             ent_part(f, i == 0 ? .Glove_R : .Glove_L, h.wrist, h.rot, {1, 1, 1}, rune)
         }
         ent_end(f)

@@ -95,5 +95,14 @@ bench_players_run :: proc(gs: ^Game_State) {
     path = fmt.tprintf("%s/players_eyes.bmp", bench_shot_dir)
     bench_screenshot(gs, path)
     fmt.printf("bench players: wrote %s (the middle row through their eyes)\n", path)
+
+    // Our own hands, raised to cast, in first person (magic_add_parts).
     others^ = {}
+    gs.magic.raise, gs.magic.aim = 1, cam.pos + {0, -1, 3}
+    for _ in 0 ..< 10 { entities_update(gs, 1.0 / 60.0) }
+    bench_measure(gs)
+    path = fmt.tprintf("%s/players_cast_first.bmp", bench_shot_dir)
+    bench_screenshot(gs, path)
+    fmt.printf("bench players: wrote %s\n", path)
+    gs.magic.raise = 0
 }
