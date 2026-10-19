@@ -11,7 +11,9 @@ import la "core:math/linalg"
 // enemy_think (wolves circle and dart in, boars charge, deer bolt: see their
 // specs).
 //
-// Shapes are in metres, facing +z, posed at the spec's scale.
+// Shapes are in metres, facing +z, posed at the spec's scale, baked at
+// the humanoid monsters' voxel (1/20 m: enemies.odin) so they look of a
+// piece with them; thin parts are kept at least a voxel across (thin).
 
 Beast_Rig :: struct {
     body, head, leg, tail: Model_Id,
@@ -98,6 +100,10 @@ beast_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
 @(private="file")
 ease_out :: proc(t: f32) -> f32 { return 1 - (1 - t) * (1 - t) }
 
+// A radius (or half width) no thinner than about a voxel, so a part
+// doesn't fall between the voxel centres when baked.
+thin :: proc(r, voxel: f32) -> f32 { return max(r, voxel * 0.55) }
+
 // A cheap shake for something stuck on a blade (hit stop).
 @(private="file")
 rand_jitter :: proc(t: f32) -> f32 { return math.sin(t) * 0.7 + math.sin(t * 2.3) * 0.3 }
@@ -151,22 +157,22 @@ spider_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
 shape_spider_body :: proc(p: [3]f32, voxel: f32) -> Pal {
     q := [3]f32{abs(p.x), p.y, p.z}
     // Eyes: a cluster on the front, glowing.
-    if (la.length(q - {0.05, 0.08, 0.27}) < 0.03) || (la.length(q - {0.09, 0.05, 0.25}) < 0.022) { return .Eye_Glow }
+    if (la.length(q - {0.05, 0.08, 0.27}) < thin(0.03, voxel)) || (la.length(q - {0.1, 0.04, 0.24}) < thin(0.022, voxel)) { return .Eye_Glow }
     // Fangs.
-    if vm_capsule(q, {0.04, -0.02, 0.28}, {0.035, -0.09, 0.31}, 0.018) < 0 { return .Bone_Shadow }
+    if vm_capsule(q, {0.04, -0.02, 0.28}, {0.035, -0.09, 0.31}, thin(0.018, voxel)) < 0 { return .Bone_Shadow }
     head := la.length((p - {0, 0.02, 0.15}) / [3]f32{1, 0.75, 1}) - 0.15
     abdomen := la.length((p - {0, 0.08, -0.2}) / [3]f32{1, 0.8, 1.15}) - 0.24
     if min(head, abdomen) > 0 { return .Empty }
     // A mark down the abdomen's back, faintly aglow.
-    if abdomen < 0 && p.y > 0.2 && q.x < 0.035 && p.z < -0.12 && p.z > -0.32 { return .Eye_Red }
+    if abdomen < 0 && p.y > 0.2 && q.x < thin(0.035, voxel) && p.z < -0.12 && p.z > -0.32 { return .Eye_Red }
     return abdomen < 0 && p.y < -0.02 ? .Hide_Dark : .Hide
 }
 
 // Out along +x from the hip: up to the knee, then down to the foot.
 @(private="file")
 shape_spider_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
-    if vm_capsule(p, {0, 0, 0}, {0.3, 0.2, 0}, 0.028) < 0 { return .Hide }
-    if vm_capsule(p, {0.3, 0.2, 0}, {0.5, -0.34, 0}, 0.022) < 0 { return p.y < -0.25 ? .Hide_Dark : .Hide }
+    if vm_capsule(p, {0, 0, 0}, {0.3, 0.2, 0}, thin(0.028, voxel)) < 0 { return .Hide }
+    if vm_capsule(p, {0.3, 0.2, 0}, {0.5, -0.34, 0}, thin(0.022, voxel)) < 0 { return p.y < -0.25 ? .Hide_Dark : .Hide }
     return .Empty
 }
 
@@ -189,7 +195,7 @@ shape_wolf_head :: proc(p: [3]f32, voxel: f32) -> Pal {
     // Ears: short and pointed, upright.
     if q.y > 0.13 && q.y < 0.26 {
         k := (q.y - 0.13) / 0.13
-        if abs(q.x - 0.07) < 0.04 * (1 - k) + 0.008 && abs(p.z - 0.02) < 0.025 { return k > 0.7 ? .Fur_Dark : .Fur }
+        if abs(q.x - 0.07) < thin(0.04 * (1 - k) + 0.008, voxel) && abs(p.z - 0.02) < thin(0.025, voxel) { return k > 0.7 ? .Fur_Dark : .Fur }
     }
     // Muzzle: long, tapering, a black nose.
     if p.z > 0.1 && p.z < 0.34 {
@@ -201,7 +207,7 @@ shape_wolf_head :: proc(p: [3]f32, voxel: f32) -> Pal {
         }
     }
     if vm_round_box(p, {0, 0.05, 0.03}, {0.11, 0.1, 0.11}, 0.05) < 0 {
-        if p.z > 0.1 && abs(q.x - 0.06) < 0.02 && abs(p.y - 0.09) < 0.02 { return .Eye_Yellow }
+        if p.z > 0.1 && abs(q.x - 0.06) < thin(0.02, voxel) && abs(p.y - 0.09) < thin(0.02, voxel) { return .Eye_Yellow }
         if p.y < -0.02 && q.x > 0.07 { return .Fur_Light } // cheeks
         return .Fur
     }
@@ -243,15 +249,15 @@ shape_boar_body :: proc(p: [3]f32, voxel: f32) -> Pal {
 shape_boar_head :: proc(p: [3]f32, voxel: f32) -> Pal {
     q := [3]f32{abs(p.x), p.y, p.z}
     // Tusks: curving up and out from the snout's sides.
-    if la.length(q - {0.075, -0.02, 0.27}) < 0.022 || la.length(q - {0.09, 0.02, 0.27}) < 0.018 { return .Tusk }
+    if la.length(q - {0.08, -0.02, 0.28}) < thin(0.022, voxel) || la.length(q - {0.1, 0.03, 0.27}) < thin(0.018, voxel) { return .Tusk }
     // Ears: small, up and back.
-    if q.y > 0.1 && q.y < 0.2 && abs(q.x - 0.1) < 0.04 * (1 - (q.y - 0.1) / 0.1) + 0.01 && abs(p.z + 0.02) < 0.025 { return .Hide_Dark }
+    if q.y > 0.1 && q.y < 0.2 && abs(q.x - 0.1) < thin(0.04 * (1 - (q.y - 0.1) / 0.1) + 0.01, voxel) && abs(p.z + 0.02) < thin(0.025, voxel) { return .Hide_Dark }
     // Snout: a long box with a flat, dark disc at the end.
     if p.z > 0.12 && p.z < 0.36 && q.x < 0.075 && p.y > -0.1 && p.y < 0.04 + 0.04 * (0.36 - p.z) / 0.24 {
         return p.z > 0.345 && q.x < 0.045 && p.y > -0.07 && p.y < 0.01 ? .Nose : .Hide
     }
     if vm_round_box(p, {0, 0, 0.06}, {0.13, 0.13, 0.12}, 0.05) < 0 {
-        if p.z > 0.12 && abs(q.x - 0.09) < 0.018 && abs(p.y - 0.06) < 0.018 { return .Eye }
+        if p.z > 0.12 && abs(q.x - 0.09) < thin(0.018, voxel) && abs(p.y - 0.06) < thin(0.018, voxel) { return .Eye }
         return .Hide
     }
     return .Empty
@@ -266,7 +272,7 @@ shape_boar_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
 
 @(private="file")
 shape_boar_tail :: proc(p: [3]f32, voxel: f32) -> Pal {
-    if vm_capsule(p, {0, 0, 0}, {0, -0.12, -0.05}, 0.018) < 0 { return .Hide }
+    if vm_capsule(p, {0, 0, 0}, {0, -0.12, -0.05}, thin(0.018, voxel)) < 0 { return .Hide }
     if la.length(p - {0, -0.14, -0.06}) < 0.035 { return .Hide_Dark } // the tuft
     return .Empty
 }
@@ -288,12 +294,12 @@ shape_deer_body :: proc(p: [3]f32, voxel: f32) -> Pal {
 shape_deer_head :: proc(p: [3]f32, voxel: f32) -> Pal {
     q := [3]f32{abs(p.x), p.y, p.z}
     // Antlers: a beam each side, up and back, with tines.
-    beam := vm_capsule(q, {0.04, 0.5, 0.16}, {0.13, 0.82, 0.06}, 0.017)
-    tine1 := vm_capsule(q, {0.07, 0.62, 0.12}, {0.09, 0.74, 0.22}, 0.013)
-    tine2 := vm_capsule(q, {0.11, 0.74, 0.08}, {0.2, 0.86, 0.12}, 0.013)
+    beam := vm_capsule(q, {0.04, 0.5, 0.16}, {0.13, 0.82, 0.06}, thin(0.017, voxel))
+    tine1 := vm_capsule(q, {0.07, 0.62, 0.12}, {0.09, 0.74, 0.22}, thin(0.013, voxel))
+    tine2 := vm_capsule(q, {0.11, 0.74, 0.08}, {0.2, 0.86, 0.12}, thin(0.013, voxel))
     if min(beam, tine1, tine2) < 0 { return .Antler }
     // Ears: out to the sides.
-    if vm_round_box(q, {0.12, 0.5, 0.12}, {0.05, 0.022, 0.015}, 0.01) < 0 { return .Fur }
+    if vm_round_box(q, {0.12, 0.5, 0.12}, {0.05, thin(0.022, voxel), thin(0.015, voxel)}, 0.01) < 0 { return .Fur }
     // Neck, rising from the shoulders.
     if vm_capsule(p, {0, 0, 0}, {0, 0.38, 0.12}, 0.07) < 0 { return p.z > 0.09 && p.y > 0.16 && p.y < 0.32 ? .Fur_Light : .Fur } // a pale throat
     // Muzzle, tapering to a dark nose.
@@ -301,7 +307,7 @@ shape_deer_head :: proc(p: [3]f32, voxel: f32) -> Pal {
         return p.z > 0.345 && p.y > 0.4 ? .Nose : .Fur
     }
     if vm_round_box(p, {0, 0.44, 0.18}, {0.06, 0.06, 0.08}, 0.03) < 0 {
-        if p.z > 0.2 && abs(q.x - 0.06) < 0.016 && abs(p.y - 0.46) < 0.016 { return .Eye }
+        if p.z > 0.2 && abs(q.x - 0.06) < thin(0.016, voxel) && abs(p.y - 0.46) < thin(0.016, voxel) { return .Eye }
         return .Fur
     }
     return .Empty
@@ -309,7 +315,7 @@ shape_deer_head :: proc(p: [3]f32, voxel: f32) -> Pal {
 
 @(private="file")
 shape_deer_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
-    if vm_capsule(p, {0, 0, 0}, {0, -0.78, 0.01}, 0.032) < 0 { return p.y < -0.74 ? .Fur_Dark : .Fur }
+    if vm_capsule(p, {0, 0, 0}, {0, -0.78, 0.01}, thin(0.032, voxel)) < 0 { return p.y < -0.74 ? .Fur_Dark : .Fur }
     if vm_round_box(p, {0, -0.84, 0.02}, {0.03, 0.03, 0.04}, 0.01) < 0 { return .Fur_Dark } // hoof
     return .Empty
 }
@@ -321,7 +327,7 @@ shape_deer_tail :: proc(p: [3]f32, voxel: f32) -> Pal {
 }
 
 beasts_models_bake :: proc() {
-    V :: 1.0 / 32
+    V :: 1.0 / 20 // the humanoid monsters' (enemies.odin enemy_models_bake)
     ent_models[.Spider_Body] = model_bake({-0.3, -0.16, -0.5}, {0.3, 0.3, 0.36}, V, shape_spider_body)
     ent_models[.Spider_Leg]  = model_bake({-0.04, -0.4, -0.04}, {0.55, 0.25, 0.04}, V, shape_spider_leg)
     ent_models[.Wolf_Body] = model_bake({-0.24, -0.26, -0.5}, {0.24, 0.26, 0.5}, V, shape_wolf_body)

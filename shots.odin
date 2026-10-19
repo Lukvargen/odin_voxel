@@ -148,10 +148,9 @@ shots_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
 shape_arrow :: proc(p: [3]f32, voxel: f32) -> Pal {
     r := la.length(p.xy)
     switch {
-    case p.z > 0.3:  if r < 0.03 * (0.4 - p.z) / 0.1 + 0.005 { return .Iron }
-    case p.z > -0.28: if r < 0.012 { return .Wood }
-    case:            if (abs(p.x) < 0.006 && abs(p.y) < 0.04) || (abs(p.y) < 0.006 && abs(p.x) < 0.04) { return .Feather_White }
-                     if r < 0.012 { return .Wood }
+    case p.z > 0.3:  if r < thin(0.04 * (0.42 - p.z) / 0.12, voxel) { return .Iron }
+    case p.z > -0.28: if r < thin(0.012, voxel) { return .Wood }
+    case:            if (abs(p.x) < thin(0.006, voxel) && abs(p.y) < 0.05) || (abs(p.y) < thin(0.006, voxel) && abs(p.x) < 0.05) { return .Feather_White }
     }
     return .Empty
 }
@@ -166,24 +165,24 @@ shape_pebble :: proc(p: [3]f32, voxel: f32) -> Pal {
 // archer (+y, once in the hand: enemies.odin), the string across their tips.
 @(private="file")
 shape_bow :: proc(p: [3]f32, voxel: f32) -> Pal {
-    if abs(p.z) > 0.52 || abs(p.x) > 0.02 { return .Empty }
+    if abs(p.z) > 0.52 || abs(p.x) > thin(0.02, voxel) { return .Empty }
     k := p.z / 0.52
     limb_y := 0.13 * k * k
-    if abs(p.y - limb_y) < (abs(p.z) < 0.07 ? 0.03 : 0.018) { return abs(p.z) < 0.07 ? .Leather_Dark : .Wood_Dark }
-    if abs(p.y - 0.135) < 0.006 && abs(p.x) < 0.006 { return .Bone }
+    if abs(p.y - limb_y) < thin(abs(p.z) < 0.07 ? 0.03 : 0.018, voxel) { return abs(p.z) < 0.07 ? .Leather_Dark : .Wood_Dark }
+    if abs(p.y - 0.14) < thin(0.006, voxel) { return .Bone } // the string
     return .Empty
 }
 
 // A leather strap from the hand along z, the pouch at its end.
 @(private="file")
 shape_sling :: proc(p: [3]f32, voxel: f32) -> Pal {
-    if vm_capsule(p, {0, 0, 0}, {0, 0, 0.32}, 0.012) < 0 { return .Leather }
+    if vm_capsule(p, {0, 0, 0}, {0, 0, 0.32}, thin(0.012, voxel)) < 0 { return .Leather }
     if la.length(p - {0, 0, 0.36}) < 0.045 { return .Leather_Dark }
     return .Empty
 }
 
 shots_models_bake :: proc() {
-    V :: 1.0 / 40
+    V :: 1.0 / 24 // the monsters' weapons' (enemies.odin: the club, the old sword, the axe)
     ent_models[.Arrow]  = model_bake({-0.05, -0.05, -0.4}, {0.05, 0.05, 0.42}, V, shape_arrow)
     ent_models[.Pebble] = model_bake({-0.08, -0.08, -0.08}, {0.08, 0.08, 0.08}, V, shape_pebble)
     ent_models[.Bow]    = model_bake({-0.03, -0.05, -0.55}, {0.03, 0.17, 0.55}, V, shape_bow)
