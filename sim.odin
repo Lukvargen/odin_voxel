@@ -27,8 +27,9 @@ Player :: struct {
     fly_mode:   bool,   // nothing hunts a flying player
     sneaking:   bool,
     sprinting:  bool,
-    sword:      bool,   // drawn: slimes only come for an armed player
-    sword_pose: Sword_Pose, // where it is in the hand, view space (combat.odin), for the others to draw
+    sword:      bool,   // fighting, the weapon bar out (fists too): slimes only come for an armed player
+    weapon:     Weapon, // in hand while fighting (crafting.odin; .None: fists)
+    sword_pose: Sword_Pose, // where it (or the fist) is in the hand, view space (combat.odin), for the others to draw
     swing_id:   u32,        // counts its swings (Combat.attack_id): a new one, the others hear it
     torch:      bool,       // a torch in hand: it lights the world around it for everyone (gpu.odin hand_lights)
     // Hang gliding (glider.odin): how the wing sits, for the others to draw.

@@ -72,6 +72,7 @@ float3 gi_albedo(uint id, float3 n, float y) {
     if (id == BLOCK_GLOW_MOSS)     return float3(0.20, 0.40, 0.25);
     if (id == BLOCK_DRIPSTONE)     return float3(0.48, 0.40, 0.31);
     if (id == BLOCK_STONE_BRICKS)  return float3(0.44, 0.44, 0.40);
+    if (id == BLOCK_WORKBENCH)     return float3(0.48, 0.34, 0.19);
     if (id == BLOCK_CRYSTAL)       return float3(0.95, 0.65, 0.25);
     if (id == BLOCK_TORCH)         return float3(0.45, 0.26, 0.10);
     if (id == BLOCK_CORAL)         return float3(0.80, 0.42, 0.45);

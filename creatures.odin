@@ -270,7 +270,7 @@ Player_Anim :: struct {
 
 player_anim_update :: proc(gs: ^Game_State, dt: f32) {
     cam := &gs.camera
-    anim_step(&gs.player_anim, cam.velocity, cam.yaw, gs.combat.sword, cam.on_ground || cam.fly_mode, dt)
+    anim_step(&gs.player_anim, cam.velocity, cam.yaw, gs.combat.fighting, cam.on_ground || cam.fly_mode, dt)
     anim_climb(&gs.player_anim, cam.climbing, cam.mantle.hands, cam.pos)
 }
 
@@ -323,19 +323,19 @@ player_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     feet := gs.camera.pos - [3]f32{0, PLAYER_EYE_HEIGHT, 0}
     feet.y += gs.camera.step_visual_offset
     ent_scale_about(f, feet, world_scale)
-    sword := gs.combat.sword
+    sword := gs.combat.fighting
     act := local_body_act(gs)
     if sword { act.raise = 0 }
     paint := look_paint(gs.look)
     hips := humanoid_add_parts(f, feet, a, gs.camera.yaw, gs.camera.pitch, gs.look, paint, right_arm = !sword, act = &act)
     if sword && !first { // in first person combat_add_parts draws it, seen and with a shadow
-        // The sword arm reaches for the grip, posed as in first person from
-        // a viewpoint at the eyes.
+        // The sword arm reaches for the grip (or punches), posed as in first
+        // person from a viewpoint at the eyes.
         fwd, right, up := camera_basis(gs.camera)
         eye := feet + [3]f32{0, HUM_HIPS_Y + 0.6 + HUM_EYE, 0} + fwd * 0.15
         shoulder := feet + basis_yaw(a.body_yaw) * [3]f32{-look_parts(gs.look).arm_x, HUM_HIPS_Y + HUM_ARM_Y, 0}
         grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
-        sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, tint = paint.cloth)
+        sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, gs.combat.weapon, tint = paint.cloth)
     }
     ent_end(f)
 }

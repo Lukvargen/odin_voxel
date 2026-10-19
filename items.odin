@@ -47,6 +47,7 @@ server_survival_edit :: proc(srv: ^Server, slot: int, p: [3]int, new: u8) -> boo
     old := u8(get_voxel(srv.sim.world, p.x, p.y, p.z))
     if !server_in_reach(srv, slot, p, old, new) { return false }
     felled := (block_is_log(old) || block_is_leaves(old)) && fell_granted(srv, slot, p)
+    if !felled && new != old && !spell_can_take(true, voxel_item(old)) { return false } // too hard for the spell yet
     gain, extra, cost := item_change(old, new, p, felled && block_is_leaves(old))
     items := &srv.items[slot]
     if cost != .Air && items[cost] == 0 && gain != cost { return false }
@@ -120,6 +121,7 @@ server_fell :: proc(srv: ^Server, slot: int, m: Msg_Fell) -> bool {
 // new one's; full of mana.
 server_items_restore :: proc(srv: ^Server, slot: int, rec: Player_Record, known: bool) {
     srv.items[slot] = known ? rec.kept.items : (srv.survival ? survival_fresh().items : {})
+    srv.weapons[slot] = known ? rec.kept.weapons : {}
     srv.items_due[slot] = true
     srv.mana_spent[slot] = 0
 }
@@ -146,10 +148,11 @@ server_mana_draw :: proc(srv: ^Server, slot: int, amount: f32) -> bool {
 }
 
 // The edits this client sent, not yet answered by the server's count: each
-// commit's gains and costs, by its number.
+// commit's gains and costs, by its number (and a craft's: crafting.odin).
 Item_Guess :: struct {
-    seq:   u32,
-    delta: [Block_Type]i32,
+    seq:     u32,
+    delta:   [Block_Type]i32,
+    weapons: [Weapon]i32,
 }
 
 // This client just changed `changed` (old values in `olds`; felled: a tree
@@ -177,7 +180,7 @@ client_items_predict :: proc(gs: ^Game_State, changed: [][3]int, olds: []u8, fel
 // The server's count, as of our edit `seq`.
 client_items_heard :: proc(gs: ^Game_State, m: Msg_Items) {
     n := &gs.net
-    n.items_base = m.items
+    n.items_base, n.weapons_base = m.items, m.weapons
     kept := 0
     for g in n.item_guesses {
         if g.seq <= m.seq { continue }
@@ -188,7 +191,7 @@ client_items_heard :: proc(gs: ^Game_State, m: Msg_Items) {
     client_items_sum(gs)
 }
 
-// gs.items: the server's count and our guesses since.
+// gs.items (and weapons): the server's count and our guesses since.
 client_items_sum :: proc(gs: ^Game_State) {
     n := &gs.net
     for b in Block_Type {
@@ -196,6 +199,12 @@ client_items_sum :: proc(gs: ^Game_State) {
         for g in n.item_guesses { v += i64(g.delta[b]) }
         gs.items[b] = u32(max(v, 0))
     }
+    for w in Weapon {
+        v := i64(n.weapons_base[w])
+        for g in n.item_guesses { v += i64(g.weapons[w]) }
+        gs.weapons[w] = u32(max(v, 0))
+    }
+    if !weapon_owned(gs, gs.combat.weapon) { weapon_select(gs, gs.weapon_slot) } // the server said no
 }
 
 // What the hotbar shows and you may conjure: what you carry, less what's

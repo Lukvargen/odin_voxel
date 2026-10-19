@@ -479,15 +479,17 @@ bench_fell_run :: proc(gs: ^Game_State) {
 
     bench_fell_server(&ok_all, trunk)
 
-    // A save from before saplings: its doors come back as doors.
-    {
+    // Saves from before saplings (VXC2) and before the workbench (VXC3):
+    // their doors come back as doors, and a VXC3 sapling as a sapling.
+    for old in ([2]struct { magic: string, by: u8 }{{SAVE_MAGIC_V2, 2}, {SAVE_MAGIC_V3, 1}}) {
         col := generate_column_at(0, 0)
         defer column_free(col)
         c := &col.chunks[chunk_y_index(2)]
-        old_door := u8(Block_Type.Door) - 1 // where doors started then
+        old_door := u8(Block_Type.Door) - old.by // where doors started then
         chunk_set_voxel(c, 5, old_door)
+        if old.by == 1 { chunk_set_voxel(c, 6, u8(Block_Type.Sapling)) }
         out := make([dynamic]u8, context.temp_allocator)
-        append(&out, SAVE_MAGIC_V2)
+        append(&out, old.magic)
         column_encode(col, &out)
         keep := save_dir
         save_dir = bench_shot_dir != "" ? bench_shot_dir : "."
@@ -497,7 +499,8 @@ bench_fell_run :: proc(gs: ^Game_State) {
         _ = os.remove(path)
         save_dir = keep
         ok := back != nil && chunk_voxel(&back.chunks[chunk_y_index(2)], 5) == u8(Block_Type.Door) && back.modified
-        check(&ok_all, "an old save's door loads as a door, to be saved anew", ok)
+        if ok && old.by == 1 { ok = chunk_voxel(&back.chunks[chunk_y_index(2)], 6) == u8(Block_Type.Sapling) }
+        check(&ok_all, fmt.tprintf("an old save's (%s) door loads as a door, to be saved anew", old.magic), ok)
         if back != nil { column_free(back) }
     }
     fmt.println(ok_all ? "bench fell: all ok" : "bench fell: FAILED")
@@ -622,8 +625,7 @@ bench_fell_server :: proc(ok_all: ^bool, at: [3]int) {
     delete(srv.local_out.reliable)
 }
 
-// The ground's top voxel at (x, z), under any canopy.
-@(private="file")
+// The ground's top voxel at (x, z), under any canopy (bench craft too).
 ground_top :: proc(gs: ^Game_State, x, z: int) -> int {
     for y := surface_height_at(x, z) + 6; y > WORLD_Y_MIN; y -= 1 {
         v := u8(get_voxel(gs, x, y, z))

@@ -247,7 +247,7 @@ vary :: proc(amount: f32 = 0.08) -> f32 {
 }
 
 block_material :: proc(b: Block_Type) -> Material {
-    if block_is_door(u8(b)) { return .Wood }
+    if block_is_door(u8(b)) || b == .Workbench { return .Wood }
     #partial switch b {
     case .Grass, .Dry_Grass, .Moss:      return .Grass
     case .Dirt:                          return .Dirt

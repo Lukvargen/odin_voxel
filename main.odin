@@ -27,7 +27,7 @@ Game_State :: struct {
     glider: Glider, // hang glider (glider.odin)
     player_anim: Player_Anim, // third-person body animation (creatures.odin)
     look:        Look,        // how the player looks (player_look.odin; the Character screen)
-    combat: Combat, // the sword, health, combos (combat.odin)
+    combat: Combat, // fists and swords, health, combos (combat.odin)
     fx: Effects, // goo, sparks, dust, damage numbers (fx.odin)
     sky_thermals:      [MAX_SKY_THERMALS]Sky_Thermal, // strong thermals near the player, for cumulus (glider.odin)
     sky_thermal_count: int,
@@ -118,11 +118,14 @@ Game_State :: struct {
     sun_intensity:  f32,   // sun direct-light multiplier
     survival:       bool, // the world's game mode (Msg_Rules): magic building, an inventory (magic.odin)
     items:          [Block_Type]u32, // survival: the blocks carried
+    weapons:        [Weapon]u32,     // survival: the weapons made (crafting.odin)
     magic:          Magic,           // survival: the spell that breaks and places blocks (magic.odin)
     felling:        Felling,         // trees coming down (felling.odin)
     selected_block: Block_Type, // = hotbar[hotbar_slot]
     hotbar:         [HOTBAR_SLOTS]Block_Type, // keys 1-9 / wheel; middle click and E change it
     hotbar_slot:    int,
+    weapon_bar:     [WEAPON_SLOTS]Weapon, // R swaps the hotbar for it; keys 1-4 / wheel (crafting.odin)
+    weapon_slot:    int,
 
     // Entities (entities.odin, voxel_models.odin)
     entities:         [dynamic]Entity,
@@ -213,6 +216,7 @@ game_main :: proc() -> (relaunch: []string) {
     gs.sun_intensity  = 1.9
     gs.hotbar         = DEFAULT_HOTBAR
     gs.selected_block = gs.hotbar[0]
+    gs.weapon_bar     = DEFAULT_WEAPON_BAR
     gs.brush_radius   = 0
     gs.entities_enabled = true
     gs.clouds_enabled   = true
@@ -253,6 +257,7 @@ game_main :: proc() -> (relaunch: []string) {
             case a == "climb": bench_climb = true
             case a == "doors": bench_doors = true
             case a == "fell": bench_fell = true
+            case a == "craft": bench_craft = true
             case a == "character": bench_character = true
             case a == "forest": bench_fell_forest = true // bench fell: a big forest tree instead
             case a == "plants": bench_plants = true
@@ -583,7 +588,7 @@ game_main :: proc() -> (relaunch: []string) {
         ctrl_held  := held(kb, keys_free, .LCTRL)
         if !move_fwd { gs.sprint_latched = false }
         sprint := ctrl_held || gs.sprint_latched
-        sneak  := held(kb, keys_free, .LSHIFT) && !gs.combat.sword // drawn, Shift dodges
+        sneak  := held(kb, keys_free, .LSHIFT) && !gs.combat.fighting // drawn, Shift dodges
         ultra  := held(kb, keys_free, .LALT)
 
         // In fly mode, Space held moves up
@@ -603,10 +608,14 @@ game_main :: proc() -> (relaunch: []string) {
         sky_update(gs, dt) // the clock ticks in the server (server_simulate)
 
         // The wheel walks the hotbar (down = next) or sizes the current
-        // tool (up = bigger), by the modifiers held (build_tools.odin).
+        // tool (up = bigger), by the modifiers held (build_tools.odin);
+        // fighting, the weapon bar.
         if wheel_dy != 0 && gs.mouse_locked && !gs.glider.deployed {
-            if gs.combat.sword { combat_toggle_sword(gs) }
-            build_wheel(gs, wheel_dy > 0 ? 1 : -1, held_mods())
+            if gs.combat.fighting {
+                weapon_select(gs, cycle(gs.weapon_slot, WEAPON_SLOTS, wheel_dy > 0 ? -1 : 1))
+            } else {
+                build_wheel(gs, wheel_dy > 0 ? 1 : -1, held_mods())
+            }
         }
 
         // Ctrl held while dragging out a box: the mouse gives it depth and the
@@ -794,7 +803,7 @@ on_key_down :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods, repeat, playi
     // Alt flies fast, Shift sneaks or dodges), so these never care.
     switch key {
     case SDL.K_LSHIFT:
-        dodge = gs.combat.sword
+        dodge = gs.combat.fighting
     case SDL.K_W:
         press_time := SDL.GetTicks()
         if press_time - gs.w_last_press_ms <= DOUBLE_TAP_MS { gs.sprint_latched = true }
@@ -856,10 +865,13 @@ on_key_down :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods, repeat, playi
         gs.no_textures = !gs.no_textures
         ui_toast(gs, gs.no_textures ? "Textures off (F10)" : "Textures on")
     case SDL.K_1 ..= SDL.K_9:
-        if gs.combat.sword { combat_toggle_sword(gs) } // back to building
-        hotbar_select(gs, int(key - SDL.K_1))
+        if gs.combat.fighting {
+            if int(key - SDL.K_1) < WEAPON_SLOTS { weapon_select(gs, int(key - SDL.K_1)) }
+        } else {
+            hotbar_select(gs, int(key - SDL.K_1))
+        }
     case SDL.K_R:
-        combat_toggle_sword(gs)
+        combat_toggle(gs)
     case SDL.K_G:
         if gs.glider.deployed { glider_toggle_deploy(gs) }
         gs.glider.equipped = !gs.glider.equipped

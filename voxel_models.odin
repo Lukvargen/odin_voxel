@@ -33,7 +33,8 @@ Model_Id :: enum u32 {
     Hum_Hair_Short, Hum_Hair_Swept, Hum_Hair_Long, Hum_Hair_Tied, Hum_Hair_Braid, Hum_Hair_Bun, Hum_Hair_Fringe,
     Hum_Beard_Short, Hum_Beard_Full,
     // combat.odin, slime.odin
-    Sword,      // grip at the origin, blade along +z
+    Sword,      // grip at the origin, blade along +z (the steel one)
+    Wood_Sword, Stone_Sword, // the same, made at a workbench (crafting.odin)
     Slime,      // 1 m cube-ish blob standing on its origin, face toward +z
     Goo,        // a small cube: splatter, dust
     Fist,       // a right hand around the sword's grip, in the sword's frame
@@ -92,6 +93,7 @@ Pal :: enum u8 {
     Slime, Slime_Light, Slime_Core, Mouth,
     Bone, Bone_Shadow, Eye_Glow, Hide, Hide_Dark, Leather, Leather_Dark,
     Tusk, Iron, Rust, Wood, Wood_Dark, Cloth, Eye_Yellow, Eye_Red,
+    Wood_Light, Flint, Flint_Edge, // the made swords' blades (combat.odin)
     Fish_Scale, Fish_Belly, Fish_Fin, Fish_Stripe,
     Magic,               // glows in the part's tint (sparks, motes)
     Block, Block_Glow,   // the part's block, textured (ent_texture); glowing a little (motes)
@@ -156,6 +158,9 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Rust:          return {124, 72, 42}, 0
     case .Wood:          return {116, 80, 48}, 0
     case .Wood_Dark:     return {72, 48, 30}, 0
+    case .Wood_Light:    return {170, 126, 78}, 0
+    case .Flint:         return {112, 114, 118}, 0
+    case .Flint_Edge:    return {158, 160, 164}, 0
     case .Cloth:         return {128, 38, 30}, 0
     case .Eye_Yellow:    return {232, 204, 70}, 0
     case .Eye_Red:       return {196, 40, 28}, PAL_EMIT

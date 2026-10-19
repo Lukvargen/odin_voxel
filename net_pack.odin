@@ -18,6 +18,7 @@ Net_Player :: struct #packed {
     yaw, pitch: f16,    // yaw wrapped to 0..360
     sword_pose: [9]f16, // grip, blade, back
     swing_id:   u8,     // only ever compared for a change
+    weapon:     Weapon,
     glide_heading, glide_pitch, glide_bank, glide_unfold: f16,
     invuln, block_time: f16,
     reach:      [3]f16, // offset from pos (a lip or a block within reach)
@@ -78,6 +79,7 @@ player_pack :: proc(p: Player) -> (n: Net_Player) {
         for c, j in v { n.sword_pose[i * 3 + j] = f16(c) }
     }
     n.swing_id = u8(p.swing_id)
+    n.weapon = p.weapon
     n.glide_heading, n.glide_pitch = f16(wrap_angle(p.glide_heading, 360)), f16(p.glide_pitch)
     n.glide_bank, n.glide_unfold = f16(p.glide_bank), f16(p.glide_unfold)
     n.invuln, n.block_time = f16(p.invuln), f16(min(p.block_time, 60000))
@@ -101,6 +103,7 @@ player_unpack :: proc(n: Net_Player) -> (p: Player) {
         back  = {f32(sp[6]), f32(sp[7]), f32(sp[8])},
     }
     p.swing_id = u32(n.swing_id)
+    p.weapon = n.weapon <= max(Weapon) ? n.weapon : .None // (untrusted)
     p.glide_heading, p.glide_pitch, p.glide_bank, p.glide_unfold = f32(n.glide_heading), f32(n.glide_pitch), f32(n.glide_bank), f32(n.glide_unfold)
     p.invuln, p.block_time = f32(n.invuln), f32(n.block_time)
     return

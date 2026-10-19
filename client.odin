@@ -26,6 +26,7 @@ Client_Net :: struct {
     // and our guesses for the edits it hasn't answered yet.
     edit_seq:     u32,
     items_base:   [Block_Type]u32,
+    weapons_base: [Weapon]u32,
     item_guesses: [dynamic]Item_Guess,
     remote:   bool,       // joined a server elsewhere (for good: no own server if it drops)
     away:     bool,       // joined from the main menu: no world of our own to go back to (the menu instead)
@@ -155,7 +156,8 @@ client_leave :: proc(gs: ^Game_State) {
 client_send_kept :: proc(gs: ^Game_State, now: bool) {
     n := &gs.net
     if !n.restored { return }
-    k := Player_Kept{hp = gs.combat.hp, glider = gs.glider.equipped, hotbar = gs.hotbar, hotbar_slot = u8(gs.hotbar_slot)}
+    k := Player_Kept{hp = gs.combat.hp, glider = gs.glider.equipped, hotbar = gs.hotbar, hotbar_slot = u8(gs.hotbar_slot),
+        weapon_bar = gs.weapon_bar, weapon_slot = u8(gs.weapon_slot)}
     if k == n.sent_kept { return }
     rest := k
     rest.hp = n.sent_kept.hp
@@ -174,14 +176,17 @@ client_restore :: proc(gs: ^Game_State, m: Msg_Restore) {
         gs.camera.pitch = rec.pitch
     }
     gs.camera.fly_mode = m.known && rec.fly_mode && !k.glider && !gs.survival
-    gs.combat.sword = m.known && rec.sword
+    gs.combat.fighting = m.known && rec.sword
     gs.combat.hp = k.hp
     gs.glider.equipped = k.glider
     gs.hotbar = k.hotbar
-    gs.net.items_base = k.items // the server's Items says the same, right behind
+    gs.weapon_bar = k.weapon_bar
+    gs.net.items_base, gs.net.weapons_base = k.items, k.weapons // the server's Items says the same, right behind
     clear(&gs.net.item_guesses)
     client_items_sum(gs)
+    if gs.survival { for &w in gs.weapon_bar { if !weapon_owned(gs, w) { w = .None } } } // (a bar from before there was crafting)
     hotbar_select(gs, int(k.hotbar_slot))
+    weapon_select(gs, int(k.weapon_slot))
     gs.net.restored, gs.net.sent_kept = true, {} // and tell the server what we carry
 }
 
@@ -254,7 +259,7 @@ client_send_input :: proc(gs: ^Game_State) {
     client_send(gs, .Player_State, player_pack(Player{
         active = true, pos = cam.pos, velocity = cam.velocity, yaw = cam.yaw, pitch = cam.pitch,
         on_ground = cam.on_ground, fly_mode = cam.fly_mode, sneaking = cam.sneaking, sprinting = cam.sprinting,
-        sword = c.sword, sword_pose = c.pose, swing_id = c.attack_id, invuln = c.invuln, blocking = c.blocking, block_time = c.block_time,
+        sword = c.fighting, weapon = c.weapon, sword_pose = c.pose, swing_id = c.attack_id, invuln = c.invuln, blocking = c.blocking, block_time = c.block_time,
         torch = holding_torch(gs),
         climbing = act.climbing, channeling = gs.magic.channeling, conjuring = gs.magic.conjure > 0,
         raise = act.raise, reach = act.at, reach_k = act.k,
@@ -705,7 +710,7 @@ others_update :: proc(gs: ^Game_State, dt: f32) {
                 q.reach_k = math.lerp(a.reach_k, b.reach_k, k)
             }
             if q.swing_id != was.swing_id && q.sword {
-                play_at(.Sword_Swing, q.pos, 0.6, vary(0.06), 14) // another swing
+                swing_sound(q.weapon, .Slash_1, q.pos, 0.6) // another swing
             }
         }
         p := &o.latest
@@ -755,7 +760,7 @@ others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
                 eye := feet + [3]f32{0, HUM_HIPS_Y + 0.6 + HUM_EYE, 0} + fwd * 0.15
                 shoulder := feet + basis_yaw(o.anim.body_yaw) * [3]f32{-look_parts(look).arm_x, HUM_HIPS_Y + HUM_ARM_Y, 0}
                 grip, blade, edge, flat := sword_place(o.pose, eye, fwd, right, up, shoulder)
-                sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, tint = paint.cloth)
+                sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, p.weapon, tint = paint.cloth)
             }
         }
         ent_end(f)

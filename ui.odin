@@ -5,7 +5,7 @@ package main
 // corners, one accent colour; no gradients, glows or shadows.
 //
 // While playing there's little on screen: the crosshair and target outline,
-// the hotbar (put away with the sword drawn), toasts, the biome's name for a
+// the hotbar (the weapon bar while fighting), toasts, the biome's name for a
 // moment when you enter one, health only while hurt, and damage numbers over
 // what you hit. Gliding, nothing but where you're steering while looking
 // around (the flight shows in the world). The controls card on H, the debug
@@ -79,6 +79,8 @@ UI_State :: struct {
     block_name_t: f32,
     prev_block:   Block_Type,
     prev_slot:    int,
+    weapon_name_t: f32, // the weapon in hand's name over the weapon bar, as for blocks
+    prev_weapon:  Weapon,
     biome:        Biome,
     biome_timer:  f32,
     biome_shown:  Biome, // the name on screen...
@@ -330,6 +332,11 @@ ui_draw :: proc(gs: ^Game_State, dt: f32) {
     // Timers.
     ui.toast_t      = max(ui.toast_t - dt, 0)
     ui.block_name_t = max(ui.block_name_t - dt, 0)
+    ui.weapon_name_t = max(ui.weapon_name_t - dt, 0)
+    if gs.combat.weapon != ui.prev_weapon {
+        ui.prev_weapon = gs.combat.weapon
+        ui.weapon_name_t = BLOCK_NAME_SECONDS
+    }
     ui.help_t       = max(ui.help_t - dt, 0)
     if gs.selected_block != ui.prev_block || gs.hotbar_slot != ui.prev_slot {
         ui.prev_block, ui.prev_slot = gs.selected_block, gs.hotbar_slot
@@ -383,7 +390,7 @@ ui_draw :: proc(gs: ^Game_State, dt: f32) {
     if ui.out_tex != nil {
         SDL.RenderTexture(r, ui.out_tex, nil, nil)
     }
-    if ui.screen == .None && !ui.hud_hidden && !gs.combat.sword { draw_target_outline(gs, fw, fh) }
+    if ui.screen == .None && !ui.hud_hidden && !gs.combat.fighting { draw_target_outline(gs, fw, fh) }
     SDL_Clay_RenderClayCommands(&ui.renderer_data, &cmds)
 
     // Consume single-frame edges.
@@ -395,6 +402,7 @@ ui_draw :: proc(gs: ^Game_State, dt: f32) {
 // What a custom element draws behind its children (ui_draw_custom).
 Ui_Deco :: enum u8 {
     Block_Icon,
+    Weapon_Icon,  // a weapon, or fists (.None), as a little picture
     Glass,        // a panel: flat, a hairline border
     Glass_Soft,   // the same, more see-through (HUD cards)
     Button, Button_Hover, Button_On, Button_On_Hover,
@@ -408,14 +416,15 @@ Ui_Deco :: enum u8 {
 Ui_Custom :: struct {
     deco:   Ui_Deco,
     block:  Block_Type,
+    weapon: Weapon,
     radius: f32,
     alpha:  f32, // fades the whole thing
     shape:  Build_Shape,
 }
 
-deco :: proc(d: Ui_Deco, block := Block_Type.Air, radius: f32 = 8, alpha: f32 = 1, shape := Build_Shape.Sphere) -> clay.CustomElementConfig {
+deco :: proc(d: Ui_Deco, block := Block_Type.Air, radius: f32 = 8, alpha: f32 = 1, shape := Build_Shape.Sphere, weapon := Weapon.None) -> clay.CustomElementConfig {
     p := new(Ui_Custom, context.temp_allocator)
-    p^ = {deco = d, block = block, radius = radius, alpha = alpha, shape = shape}
+    p^ = {deco = d, block = block, weapon = weapon, radius = radius, alpha = alpha, shape = shape}
     return {customData = p}
 }
 
@@ -511,6 +520,8 @@ ui_draw_custom :: proc(rd: ^Clay_SDL3RendererData, rect: SDL.FRect, data: rawptr
     switch d.deco {
     case .Block_Icon:
         draw_block_icon(r, rect, d.block)
+    case .Weapon_Icon:
+        draw_weapon_icon(r, rect, d.weapon, a)
     case .Glass, .Tooltip:
         flat(r, rect, d.radius, COLOR_PANEL, COLOR_PANEL_BORDER, 1, a)
         bevel(r, rect, 1, a = a * 0.6)
@@ -794,9 +805,11 @@ hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     }
     if ui.debug_open { debug_layout(gs) }
 
-    if !gliding && ui.screen != .Inventory && !gs.combat.sword {
+    if !gliding && ui.screen != .Inventory && !gs.combat.fighting {
         hotbar_layout(gs)
         if playing && !gs.survival { build_hud_layout(gs, w) } // survival has no tools: magic (magic.odin)
+    } else if !gliding && ui.screen != .Inventory {
+        weapon_bar_layout(gs) // fighting: the weapon bar in the hotbar's place (R)
     }
     if playing { combat_hud_layout(gs, w, h) }
     name_tags_layout(gs, w, h)
@@ -959,6 +972,59 @@ hotbar_layout :: proc(gs: ^Game_State) {
     }
 }
 
+// Fighting: the weapon bar where the hotbar was, the weapon in hand's name
+// over it for a moment.
+@(private="file")
+weapon_bar_layout :: proc(gs: ^Game_State) {
+    ui := &gs.ui
+    if clay.UI(clay.ID("WeaponWrap"))({
+        layout = {layoutDirection = .TopToBottom, childGap = 7, childAlignment = {x = .Center}},
+        floating = anchored(.CenterBottom, {0, -14}),
+    }) {
+        if ui.weapon_name_t > 0 {
+            a := min(ui.weapon_name_t / 0.5, 1)
+            text(WEAPONS[gs.combat.weapon].name, fade(COLOR_TEXT, a), 16, FONT_ID_TITLE)
+        }
+        if clay.UI(clay.ID("WeaponBar"))({
+            layout = {padding = clay.PaddingAll(7), childGap = 5, childAlignment = {y = .Center}},
+            custom = deco(.Glass_Soft, radius = 10),
+        }) {
+            weapon_slots(gs, false)
+        }
+    }
+}
+
+// The weapon bar's slots: what's in each (an empty one is fists, drawn
+// faint), the one in hand framed. clickable: in the inventory, a click
+// picks the slot.
+@(private="file")
+weapon_slots :: proc(gs: ^Game_State, clickable: bool) {
+    SLOT :: 46
+    for w, i in gs.weapon_bar {
+        on := i == gs.weapon_slot
+        id := clay.ID(clickable ? "InvWeapon" : "Weapon", u32(i))
+        hovered := clickable && clay.PointerOver(id)
+        owned := weapon_owned(gs, w)
+        if clay.UI(id)({
+            layout = {sizing = {clay.SizingFixed(SLOT), clay.SizingFixed(SLOT)}, childAlignment = {.Center, .Center}},
+            custom = deco(on ? .Slot_On : (hovered ? .Slot_Hover : .Slot), radius = 6),
+        }) {
+            shown := owned ? w : .None
+            if clay.UI()({layout = {sizing = {clay.SizingFixed(SLOT - 10), clay.SizingFixed(SLOT - 10)}},
+                custom = deco(.Weapon_Icon, weapon = shown, alpha = shown == .None ? 0.35 : 1)}) {}
+            if clay.UI(clay.ID(clickable ? "InvWeaponKey" : "WeaponKey", u32(i)))({
+                floating = {attachTo = .Parent, offset = {5, 3}, zIndex = 12, attachment = {.LeftTop, .LeftTop}, pointerCaptureMode = .Passthrough},
+            }) {
+                text(fmt.tprintf("%d", i + 1), on ? COLOR_ACCENT : COLOR_TEXT_FAINT, 10, FONT_ID_TITLE)
+            }
+        }
+        if hovered && gs_ui_left_pressed() {
+            weapon_select(gs, i)
+            play(.Click, 0.4)
+        }
+    }
+}
+
 // Health, only while hurt: a thin bar over where the hotbar sits.
 @(private="file")
 health_bar :: proc(gs: ^Game_State, w, h: f32) {
@@ -968,7 +1034,7 @@ health_bar :: proc(gs: ^Game_State, w, h: f32) {
     if a <= 0 { return }
     if clay.UI(clay.ID("Health"))({
         layout = {sizing = {clay.SizingFixed(W), clay.SizingFixed(6)}},
-        floating = anchored(.CenterBottom, {0, gs.combat.sword ? -28 : -86}),
+        floating = anchored(.CenterBottom, {0, -86}),
         backgroundColor = fade(COLOR_BAR_BG, a), cornerRadius = clay.CornerRadiusAll(3),
     }) {
         fill := clamp(c.hp / PLAYER_MAX_HP, 0, 1)
@@ -988,7 +1054,7 @@ mana_bar :: proc(gs: ^Game_State) {
     if a <= 0 { return }
     if clay.UI(clay.ID("Mana"))({
         layout = {sizing = {clay.SizingFixed(W), clay.SizingFixed(6)}},
-        floating = anchored(.CenterBottom, {0, gs.combat.sword ? -38 : -112}), // over the held block's name
+        floating = anchored(.CenterBottom, {0, -112}), // over the held block's (or weapon's) name
         backgroundColor = fade(COLOR_BAR_BG, a), cornerRadius = clay.CornerRadiusAll(3),
     }) {
         fill := clamp(magic_mana(m) / MANA_MAX, 0, 1)
@@ -1089,7 +1155,7 @@ hotbar_slots :: proc(gs: ^Game_State, clickable: bool) {
             }) {
                 text(fmt.tprintf("%d", i + 1), on ? COLOR_ACCENT : COLOR_TEXT_FAINT, 10, FONT_ID_TITLE)
             }
-            if gs.survival && b != .Air { item_count(gs, clay.ID(clickable ? "InvHotCount" : "HotCount", u32(i)), items_shown(gs, b)) }
+            if gs.survival && b != .Air { item_count(gs, clay.ID(clickable ? "InvHotCount" : "HotCount", u32(i)), items_shown(gs, b), on && gs.magic.empty_t > 0) }
         }
         if hovered && gs_ui_left_pressed() {
             hotbar_select(gs, i)
@@ -1100,12 +1166,14 @@ hotbar_slots :: proc(gs: ^Game_State, clickable: bool) {
 
 // How many of a block you carry, in a slot's corner (survival).
 @(private="file")
-item_count :: proc(gs: ^Game_State, id: clay.ElementId, n: u32) {
+item_count :: proc(gs: ^Game_State, id: clay.ElementId, n: u32, blink := false) {
     if clay.UI(id)({
         floating = {attachTo = .Parent, offset = {-4, -2}, zIndex = 12, attachment = {.RightBottom, .RightBottom}, pointerCaptureMode = .Passthrough},
     }) {
         label := n >= 10_000 ? fmt.tprintf("%dk", n / 1000) : fmt.tprintf("%d", n)
-        text(label, n == 0 ? COLOR_BAD : COLOR_TEXT, 12, FONT_ID_TITLE)
+        col := n == 0 ? COLOR_BAD : COLOR_TEXT
+        if blink && int(gs.magic.empty_t * 10) % 2 == 0 { col = {255, 236, 228, 255} } // just ran out: it blinks
+        text(label, col, blink ? 15 : 12, FONT_ID_TITLE)
     }
 }
 
@@ -1146,6 +1214,7 @@ icon_colors :: proc(b: Block_Type) -> (top, side: [3]f32) {
     case .Cactus:     return {0.36, 0.60, 0.27}, {0.30, 0.54, 0.22}
     case .Weathered_Stone: return {0.45, 0.52, 0.36}, {0.50, 0.50, 0.50}
     case .Stone_Bricks:    return {0.58, 0.57, 0.55}, {0.52, 0.51, 0.50}
+    case .Workbench:       return {0.68, 0.50, 0.30}, {0.50, 0.35, 0.20}
     case .Crystal:         return {1.00, 0.80, 0.42}, {0.95, 0.62, 0.25}
     case .Kelp:            return {0.30, 0.42, 0.14}, {0.26, 0.38, 0.12}
     case .Seagrass:        return {0.30, 0.55, 0.22}, {0.26, 0.50, 0.19}
@@ -1239,6 +1308,12 @@ draw_block_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, b: Block_Type) {
                     if fi > 0 && j == 0 && icon_hash(i, j, fi) < 0.6 { col = top }
                 case .Stone_Bricks:
                     if j % 2 == 1 || (i + (j / 2) * 2) % 4 == 0 { col *= 0.72 }
+                case .Workbench:
+                    // A rim round the top, a saw on it; legs at the sides' corners.
+                    if fi == 0 && (i == 0 || i == N - 1 || j == 0 || j == N - 1) { col *= 0.7 }
+                    if fi == 0 && j == 1 && i >= 1 && i <= 2 { col = {0.72, 0.74, 0.76} }
+                    if fi > 0 && (i == 0 || i == N - 1) { col *= 0.72 }
+                    if fi > 0 && j == 0 { col *= 1.12 }
                 }
                 n := 0.9 + 0.2 * icon_hash(i, j, fi + int(b) * 5)
                 lit := col * f.shade * n
@@ -1508,7 +1583,7 @@ help_card :: proc(gs: ^Game_State, a: f32) {
             key_row("Right click", "conjure a block", a)
             key_row("Middle click", "pick block", a)
             key_row("1-9, wheel", "hotbar", a)
-            key_row("E", "what you carry", a)
+            key_row("E", "what you carry, crafting", a)
             key_row("B", "box: drag many at once", a)
         } else {
             key_row("Space", "jump; twice to fly", a)
@@ -1522,7 +1597,7 @@ help_card :: proc(gs: ^Game_State, a: f32) {
             key_row("Ctrl Z / Y", "undo / redo", a)
         }
         key_row("G", "hang glider", a)
-        key_row("R", "sword", a)
+        key_row("R", gs.survival ? "fight: fists, or what you've made" : "fight: weapon bar", a)
         key_row("F5", "camera", a)
         key_row("F1 / F3", "hide HUD / debug", a)
         key_row("F2", "screenshot", a)
@@ -2065,9 +2140,9 @@ menu_controls :: proc(gs: ^Game_State) {
         }
     }
     moving   := Group{"Moving", {"WASD", "move", "Ctrl  or  W W", "sprint", "Shift", "sneak: quiet, hard to spot, won't fall off", "Space", "jump; hold to swim up", "Space twice", "fly: Shift down, Alt fast"}}
-    building := Group{"Building", {"L / R click", "break / place; hold repeats", "Middle click", "pick the block you look at", "1-9, wheel", "hotbar", "E", "all blocks", "B, Ctrl+wheel", "brush: one block, box (drag), size", "T", "tool: block / area / shape", "Ctrl Z / Ctrl Y", "undo / redo"}}
+    building := Group{"Building", {"L / R click", "break / place; hold repeats", "Middle click", "pick the block you look at", "1-9, wheel", "hotbar", "E", gs.survival ? "inventory, crafting" : "all blocks", "B, Ctrl+wheel", "brush: one block, box (drag), size", "T", "tool: block / area / shape", "Ctrl Z / Ctrl Y", "undo / redo"}}
     tools    := Group{"Area and shape", {"Area: L / R", "the box's two corners", "Area: F / X", "fill / clear the box", "C", "area cursor: block / face / air", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "push lit face; shape size", "Shift+wheel", "move box; shape height", "Alt+wheel", "air reach; turn shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V, C", "cycle back"}}
-    fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll", "F (hold)", "guard; parry just in time"}}
+    fighting := Group{"Fighting", {"R", "weapon bar / back to building", "1-4, wheel", "weapon (empty: fists)", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash, uppercut", "Shift", "dodge roll", "F (hold)", "guard; parry just in time"}}
     gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
     other    := Group{"Other", {"Enter", "chat", "Tab (hold)", "players", "F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)", "F4", "sound board (debug)"}}
     cols := controls_columns(gs) == 3 ? [][]Group{{moving, building}, {tools, gliding}, {fighting, other}} : [][]Group{{moving, building, fighting}, {tools, gliding, other}}
@@ -2080,14 +2155,20 @@ menu_controls :: proc(gs: ^Game_State) {
     }
 }
 
-// ─── Block picker (E) ──────────────────────────────────────────────────────
+// ─── Inventory (E) ─────────────────────────────────────────────────────────
 
-// Every block, and the hotbar under them. Click a block to put it in the
-// selected hotbar slot; click a hotbar slot to select it.
+// Creative: every block and weapon, the hotbar and the weapon bar under
+// them. Click a block (a weapon) to put it in the selected hotbar (weapon)
+// slot; click a slot to select it. Survival's is its own (survival_inventory).
 inventory_layout :: proc(gs: ^Game_State) {
+    if gs.survival {
+        survival_inventory(gs)
+        return
+    }
     ui := &gs.ui
     shade("InvShade", 100)
     hovered_block := Block_Type.Air
+    hovered_weapon: Maybe(Weapon)
     SLOT :: 46
     if clay.UI(clay.ID("Inventory"))({
         layout = {layoutDirection = .TopToBottom, padding = clay.PaddingAll(20), childGap = 10},
@@ -2128,21 +2209,292 @@ inventory_layout :: proc(gs: ^Game_State) {
                 }
             }
         }
-        divider()
-        heading("Hotbar")
+        heading("Weapons")
         if clay.UI()({layout = {childGap = 5}}) {
-            hotbar_slots(gs, true)
+            for w in Weapon { // fists too: an empty slot
+                id := clay.ID("InvWeaponPick", u32(w))
+                hov := clay.PointerOver(id)
+                if clay.UI(id)({
+                    layout = {sizing = {clay.SizingFixed(SLOT), clay.SizingFixed(SLOT)}, childAlignment = {.Center, .Center}},
+                    custom = deco(hov ? .Slot_Hover : (w == gs.weapon_bar[gs.weapon_slot] ? .Slot_On : .Slot), radius = 6),
+                }) {
+                    if clay.UI()({layout = {sizing = {clay.SizingFixed(SLOT - 10), clay.SizingFixed(SLOT - 10)}}, custom = deco(.Weapon_Icon, weapon = w)}) {}
+                }
+                if hov { hovered_weapon = w }
+                if hov && gs_ui_left_pressed() { weapon_put(gs, w) }
+            }
+        }
+        divider()
+        if clay.UI()({layout = {childGap = 24}}) {
+            if clay.UI()({layout = {layoutDirection = .TopToBottom, childGap = 8}}) {
+                heading("Hotbar")
+                if clay.UI()({layout = {childGap = 5}}) { hotbar_slots(gs, true) }
+            }
+            if clay.UI()({layout = {layoutDirection = .TopToBottom, childGap = 8}}) {
+                heading("Weapon bar (R)")
+                if clay.UI()({layout = {childGap = 5}}) { weapon_slots(gs, true) }
+            }
         }
     }
     // Tooltip by the pointer.
-    if hovered_block != .Air {
+    w, on_weapon := hovered_weapon.?
+    if hovered_block != .Air || on_weapon {
         if clay.UI(clay.ID("Tooltip"))({
             layout = {padding = {10, 10, 6, 8}},
             floating = {attachTo = .Root, offset = {ui.mouse_pos.x + 16, ui.mouse_pos.y - 30}, zIndex = 40,
                         attachment = {.LeftTop, .LeftTop}, pointerCaptureMode = .Passthrough},
             custom = deco(.Tooltip, radius = 6),
         }) {
-            text(block_name(hovered_block), COLOR_TEXT, 14, FONT_ID_TITLE)
+            text(on_weapon ? WEAPONS[w].name : block_name(hovered_block), COLOR_TEXT, 14, FONT_ID_TITLE)
+        }
+    }
+}
+
+// Weapon w (or fists) into the selected weapon slot; it's off any other.
+@(private="file")
+weapon_put :: proc(gs: ^Game_State, w: Weapon) {
+    for &h, i in gs.weapon_bar { if h == w && i != gs.weapon_slot && w != .None { h = .None } }
+    gs.weapon_bar[gs.weapon_slot] = w
+    gs.combat.weapon = max(Weapon) // (so weapon_select takes it up even if it's the same)
+    weapon_select(gs, gs.weapon_slot)
+    play(.Click, 0.4)
+}
+
+// Survival's inventory: on the left what you carry, a list (not a grid):
+// each block with its count, the weapons you've made and your fists; a
+// click puts one in the selected slot. On the right everything you can
+// make, by where it's made (by hand, at a workbench close by), what each
+// takes and how much of it you have; Make makes one (crafting.odin). The
+// hotbar and the weapon bar under both.
+@(private="file")
+survival_inventory :: proc(gs: ^Game_State) {
+    ui := &gs.ui
+    shade("InvShade", 100)
+    ROW    :: 38
+    LIST_W :: 300
+    CRAFT_W :: 420
+    list_h := clamp(ui.screen_h - 250, 140, 420)
+    near := stations_near(gs)
+    if clay.UI(clay.ID("Inventory"))({
+        layout = {layoutDirection = .TopToBottom, padding = clay.PaddingAll(20), childGap = 12},
+        floating = {attachTo = .Root, zIndex = 20, attachment = {.CenterCenter, .CenterCenter}, pointerCaptureMode = .Capture},
+        custom = deco(.Glass, radius = 12),
+    }) {
+        if clay.UI()({layout = {childGap = 20}}) {
+            // What you carry.
+            if clay.UI()({layout = {layoutDirection = .TopToBottom, childGap = 8, sizing = {clay.SizingFixed(LIST_W), clay.SizingFit()}}}) {
+                text("Carried", COLOR_ACCENT, 22, FONT_ID_TITLE)
+                if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 6}}) {
+                    body := clay.ID("CarriedList")
+                    if clay.UI(body)({
+                        layout = {layoutDirection = .TopToBottom, childGap = 3, sizing = {clay.SizingGrow(), clay.SizingFit({max = list_h})}},
+                        clip = {vertical = true, childOffset = clay.GetScrollOffset()},
+                    }) {
+                        any := false
+                        for b in Block_Type {
+                            n := items_shown(gs, b)
+                            if n == 0 || b == .Air { continue }
+                            any = true
+                            on_bar := -1
+                            for h, i in gs.hotbar { if h == b { on_bar = i } }
+                            id := clay.ID("CarriedRow", u32(b))
+                            list_row(id, ROW, b == gs.selected_block, on_bar, block_name(b), fmt.tprintf("%d", n), deco(.Block_Icon, b))
+                            if clay.PointerOver(id) && gs_ui_left_pressed() {
+                                gs.hotbar[gs.hotbar_slot] = b
+                                hotbar_select(gs, gs.hotbar_slot)
+                                play(.Click, 0.4)
+                            }
+                        }
+                        if !any { text("Nothing yet: hold left on a block to unweave it", COLOR_TEXT_DIM, 13) }
+                        if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFixed(4)}}}) {}
+                        heading("Weapons")
+                        for w in Weapon {
+                            if !weapon_owned(gs, w) { continue }
+                            on_bar := -1
+                            for h, i in gs.weapon_bar { if h == w && w != .None { on_bar = i } }
+                            id := clay.ID("WeaponRow", u32(w))
+                            count := w != .None && gs.weapons[w] > 1 ? fmt.tprintf("%d", gs.weapons[w]) : ""
+                            list_row(id, ROW, w == gs.weapon_bar[gs.weapon_slot], on_bar, WEAPONS[w].name, count,
+                                deco(.Weapon_Icon, weapon = w, alpha = w == .None ? 0.7 : 1))
+                            if clay.PointerOver(id) && gs_ui_left_pressed() { weapon_put(gs, w) }
+                        }
+                    }
+                    scrollbar(gs, body)
+                }
+            }
+            // What you can make.
+            if clay.UI()({layout = {layoutDirection = .TopToBottom, childGap = 8, sizing = {clay.SizingFixed(CRAFT_W), clay.SizingFit()}}}) {
+                if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childAlignment = {y = .Bottom}}}) {
+                    text("Crafting", COLOR_ACCENT, 22, FONT_ID_TITLE)
+                    spacer()
+                    if near[.Workbench] { text("at a workbench", COLOR_GOOD, 13) } else { text("by hand", COLOR_TEXT_DIM, 13) }
+                }
+                if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 6}}) {
+                    body := clay.ID("CraftList")
+                    if clay.UI(body)({
+                        layout = {layoutDirection = .TopToBottom, childGap = 3, sizing = {clay.SizingGrow(), clay.SizingFit({max = list_h})}},
+                        clip = {vertical = true, childOffset = clay.GetScrollOffset()},
+                    }) {
+                        for s in Station {
+                            heading(s == .Hand ? "By hand" : "At a workbench")
+                            if !near[s] { text("Stand near a workbench to make these", COLOR_TEXT_FAINT, 12) }
+                            for r, i in RECIPES {
+                                if r.station == s { recipe_row(gs, i, near[s]) }
+                            }
+                            if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFixed(4)}}}) {}
+                        }
+                    }
+                    scrollbar(gs, body)
+                }
+            }
+        }
+        divider()
+        if clay.UI()({layout = {childGap = 24}}) {
+            if clay.UI()({layout = {layoutDirection = .TopToBottom, childGap = 8}}) {
+                heading("Hotbar")
+                if clay.UI()({layout = {childGap = 5}}) { hotbar_slots(gs, true) }
+            }
+            if clay.UI()({layout = {layoutDirection = .TopToBottom, childGap = 8}}) {
+                heading("Weapon bar (R)")
+                if clay.UI()({layout = {childGap = 5}}) { weapon_slots(gs, true) }
+            }
+        }
+        text("Click something carried to put it in the selected slot", COLOR_TEXT_FAINT, 12)
+    }
+}
+
+// A row of the carried list: an icon in a slot, the name, which bar slot
+// it's on (if any), how many. on: it's the selected slot's.
+@(private="file")
+list_row :: proc(id: clay.ElementId, h: f32, on: bool, on_bar: int, name, count: string, icon: clay.CustomElementConfig) {
+    hov := clay.PointerOver(id)
+    if clay.UI(id)({
+        layout = {sizing = {clay.SizingGrow(), clay.SizingFixed(h)}, padding = {4, 10, 2, 2}, childGap = 10, childAlignment = {y = .Center}},
+        custom = deco(hov ? .Slot_Hover : (on ? .Slot_On : .Slot), radius = 5),
+    }) {
+        if clay.UI()({layout = {sizing = {clay.SizingFixed(h - 6), clay.SizingFixed(h - 6)}}, custom = icon}) {}
+        text(name, COLOR_TEXT, 15)
+        spacer()
+        if on_bar >= 0 { text(fmt.tprintf("[%d]", on_bar + 1), COLOR_TEXT_FAINT, 12, FONT_ID_TITLE) }
+        text(count, COLOR_TEXT, 15, FONT_ID_TITLE)
+    }
+}
+
+// A recipe: what it makes and how many, what it takes (each in green if
+// you have enough, red if not, with how many you have), and Make, lit only
+// if you can make it here and now.
+@(private="file")
+recipe_row :: proc(gs: ^Game_State, i: int, here: bool) {
+    r := RECIPES[i]
+    can := here && recipe_affordable(&gs.items, r)
+    a: f32 = here ? 1 : 0.45
+    id := clay.ID("Recipe", u32(i))
+    if clay.UI(id)({
+        layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, padding = {4, 6, 4, 4}, childGap = 10, childAlignment = {y = .Center}},
+        custom = deco(.Slot, radius = 5, alpha = a),
+    }) {
+        icon := r.weapon != .None ? deco(.Weapon_Icon, weapon = r.weapon, alpha = a) : deco(.Block_Icon, r.block, alpha = a)
+        if clay.UI()({layout = {sizing = {clay.SizingFixed(34), clay.SizingFixed(34)}}, custom = icon}) {}
+        if clay.UI()({layout = {layoutDirection = .TopToBottom, childGap = 3, sizing = {clay.SizingGrow(), clay.SizingFit()}}}) {
+            title := r.count > 1 ? fmt.tprintf("%s  x%d", recipe_name(r), r.count) : recipe_name(r)
+            text(title, fade(COLOR_TEXT, a), 15, FONT_ID_TITLE)
+            if clay.UI()({layout = {childGap = 10}}) {
+                for ing in r.needs {
+                    have := ingredient_have(&gs.items, ing)
+                    col := have >= ing.n ? COLOR_GOOD : COLOR_BAD
+                    text(fmt.tprintf("%d %s (%d)", ing.n, ing.name, have), fade(col, a), 12)
+                }
+            }
+        }
+        if can {
+            if button(clay.ID("Make", u32(i)), "Make", width = 64, height = 28) {
+                if craft(gs, i) { play(.Pickup, 0.3, 1.2) } // it shows up in the list, and on a bar
+            }
+        } else {
+            if clay.UI()({layout = {sizing = {clay.SizingFixed(64), clay.SizingFixed(28)}, childAlignment = {.Center, .Center}}}) {
+                text(here ? "need more" : "", COLOR_TEXT_FAINT, 11)
+            }
+        }
+    }
+}
+
+// A weapon, or fists, as a little picture: 12x12 cells from a pattern, a
+// sword lying corner to corner tip up, in its own wood, stone or steel.
+@(private="file")
+draw_weapon_icon :: proc(r: ^SDL.Renderer, rect: SDL.FRect, w: Weapon, alpha: f32) {
+    SWORD :: [12]string{
+        "...........E",
+        "..........BE",
+        ".........BE.",
+        "........BE..",
+        ".......BE...",
+        "..G...BE....",
+        "...G.BE.....",
+        "....G.......",
+        "...H.G......",
+        "..H...G.....",
+        ".H..........",
+        "P...........",
+    }
+    FIST :: [12]string{
+        "............",
+        "............",
+        "...KKKKKK...",
+        "..KkkkkkkK..",
+        "..KkLkLkkK..",
+        "..KkkkkkkKT.",
+        "..KkkkkkkKT.",
+        "..KkkkkkkKT.",
+        "...KkkkkKT..",
+        "....KKKK....",
+        "....CCCC....",
+        "............",
+    }
+    col :: proc(w: Weapon, ch: u8) -> (c: [3]u8, ok: bool) {
+        switch w {
+        case .None:
+            switch ch {
+            case 'K': return {70, 42, 26}, true
+            case 'k': return {116, 72, 42}, true
+            case 'L', 'T': return {156, 104, 62}, true
+            case 'C': return {214, 162, 58}, true
+            }
+        case .Wooden_Sword:
+            switch ch {
+            case 'B': return {170, 126, 78}, true
+            case 'E': return {116, 80, 48}, true
+            case 'G', 'P': return {72, 48, 30}, true
+            case 'H': return {104, 70, 44}, true
+            }
+        case .Stone_Sword:
+            switch ch {
+            case 'B': return {120, 122, 126}, true
+            case 'E': return {170, 172, 176}, true
+            case 'G': return {62, 42, 28}, true
+            case 'H', 'P': return {116, 80, 48}, true
+            }
+        case .Steel_Sword:
+            switch ch {
+            case 'B': return {196, 204, 216}, true
+            case 'E': return {240, 244, 250}, true
+            case 'G': return {214, 162, 58}, true
+            case 'H': return {92, 54, 32}, true
+            case 'P': return {90, 200, 255}, true
+            }
+        }
+        return
+    }
+    rows := w == .None ? FIST : SWORD
+    side := min(rect.w, rect.h)
+    u := side / 12
+    x0, y0 := rect.x + (rect.w - side) / 2, rect.y + (rect.h - side) / 2
+    for row, y in rows {
+        for i in 0 ..< 12 {
+            c, ok := col(w, row[i])
+            if !ok { continue }
+            q := SDL.FRect{x0 + f32(i) * u, y0 + f32(y) * u, u + 0.5, u + 0.5}
+            SDL.SetRenderDrawColor(r, c.r, c.g, c.b, u8(255 * clamp(alpha, 0, 1)))
+            SDL.RenderFillRect(r, &q)
         }
     }
 }

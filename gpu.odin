@@ -71,7 +71,7 @@ render_aspect :: proc(gs: ^Game_State) -> f32 {
     return gs.render_h > 0 ? f32(gs.render_w) / f32(gs.render_h) : 1
 }
 
-holding_torch :: proc(gs: ^Game_State) -> bool { return gs.selected_block == .Torch && !gs.combat.sword }
+holding_torch :: proc(gs: ^Game_State) -> bool { return gs.selected_block == .Torch && !gs.combat.fighting }
 
 // Lit entries first; w = 0 ends the list.
 hand_lights :: proc(gs: ^Game_State, eye, fwd, right, up: [3]f32) -> (lights: [HAND_LIGHTS][4]f32) {

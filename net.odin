@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Look), size_of(Msg_Player_Look), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), size_of(Msg_Rules), size_of(Msg_Items), size_of(Msg_Fell), size_of(Net_Player), size_of(Net_Slime), size_of(Net_Enemy), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Look), size_of(Msg_Player_Look), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), size_of(Msg_Rules), size_of(Msg_Items), size_of(Msg_Fell), size_of(Msg_Craft), size_of(Net_Player), size_of(Net_Slime), size_of(Net_Enemy), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -51,6 +51,7 @@ Msg_Kind :: enum u8 {
     Column_Request, // [2]i32: an edited column (Edited), please
     Keep,         // Player_Kept: what this client's player carries, when it changes (player_save.odin)
     Set_Look,     // Look: how this client's player looks (player_look.odin), when it changes
+    Craft,        // Msg_Craft: make a recipe (survival: crafting.odin)
     // both ways: blocks a player changed (client → server → the others)
     Voxels,       // Msg_Voxels
     Chunk_Voxels, // Msg_Chunk_Voxels: a whole chunk, when an edit changed much of it
@@ -92,8 +93,9 @@ Msg_Restore :: struct {
 }
 
 Msg_Items :: struct {
-    seq:   u32, // the last of your edits counted in it
-    items: [Block_Type]u32,
+    seq:     u32, // the last of your edits (and crafts) counted in it
+    items:   [Block_Type]u32,
+    weapons: [Weapon]u32,
 }
 
 Msg_Rules :: struct {

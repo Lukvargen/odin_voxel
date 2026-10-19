@@ -208,7 +208,7 @@ build_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
         if !plain { return false }
         b.tool = Build_Tool(cycle(int(b.tool), len(Build_Tool), step))
         drag_cancel(gs)
-        if gs.combat.sword { combat_toggle_sword(gs) }
+        if gs.combat.fighting { combat_toggle(gs) }
     case SDL.K_Q:
         if !plain || b.tool != .Shape { return false }
         b.shape = Build_Shape(cycle(int(b.shape), len(Build_Shape), step))
@@ -238,7 +238,7 @@ build_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
 @(private="file")
 area_key :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods) -> bool {
     b := &gs.build
-    if gs.combat.sword || gs.glider.deployed { return false }
+    if gs.combat.fighting || gs.glider.deployed { return false }
     plain := mods & {.Ctrl, .Alt} == {}
     switch key {
     case SDL.K_C:
@@ -328,7 +328,7 @@ build_wheel :: proc(gs: ^Game_State, steps: int, mods: Mods) {
 // Once a frame, after the player moved: the clicks of the current tool.
 build_update :: proc(gs: ^Game_State, dt: f32) {
     b := &gs.build
-    active := gs.mouse_locked && !gs.glider.deployed && !gs.combat.sword
+    active := gs.mouse_locked && !gs.glider.deployed && !gs.combat.fighting
     if !active {
         if b.drag.on { drag_cancel(gs) } // a box waiting stays (a look in the inventory)
         return
@@ -619,8 +619,9 @@ region_contains :: proc(r: ^Edit_Region, v: [3]int) -> bool {
 
 // Sets every voxel of `r` that `mask` allows to `block` (.Air clears, and
 // then ignores the mask), never into the player. Records the edit for undo.
+// spare_hard: what the survival spell can't take yet stays (block_tier).
 // Returns how many voxels changed.
-build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Build_Mask, merge := false) -> int {
+build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Build_Mask, merge := false, spare_hard := false) -> int {
     r := r
     b := &gs.build
     if !merge { b.stroke = false }
@@ -664,6 +665,7 @@ build_apply :: proc(gs: ^Game_State, r: Edit_Region, block: Block_Type, mask: Bu
                     if mask == .Solid && !block_solid(cur) { continue }
                 }
                 if !into_player && aabb_hits_voxel(eye, p) { continue }
+                if spare_hard && !spell_can_take(true, voxel_item(cur)) { continue } // survival's spell: too hard for it yet
                 if !chunk_set_voxel(c, vi, blk) { continue }
                 col.modified = true
                 if slot := ring_slot(x >> 3, y >> 3, z >> 3); slot != last_slot {
@@ -932,7 +934,7 @@ build_preview :: proc(gs: ^Game_State) -> (pv: Build_Preview) {
         hi := [3]f32{f32(r.hi.x), f32(r.hi.y), f32(r.hi.z)} + 1
         wire_box(&pv.segs, (lo + hi) / 2, (hi - lo) / 2 + 0.004, 1, 0)
         pv.fill = b.drag.place
-        pv.too_big = region_volume(r) > drag_limit(gs)
+        pv.too_big = region_volume(r) > drag_limit(gs) || (magic_active(gs) && gs.survival && magic_box_out_of_reach(gs, r)) // amber: the spell can't
         if b.drag.pending {
             ax, side := box_face(gs, r.lo, r.hi)
             face_marks(&pv.face, lo, hi, ax, side)

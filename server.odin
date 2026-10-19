@@ -46,6 +46,7 @@ Server :: struct {
     // Survival: what each player carries, the server's to count (items.odin);
     // the last edit number counted, and whether they're due to hear it.
     items:        [MAX_PLAYERS][Block_Type]u32,
+    weapons:      [MAX_PLAYERS][Weapon]u32, // ...and the weapons they've made (crafting.odin)
     items_seq:    [MAX_PLAYERS]u32,
     items_due:    [MAX_PLAYERS]bool,
     fell_grants:  [MAX_PLAYERS][FELL_SLOTS]Fell_Grant, // trees they may take down out of reach (items.odin)
@@ -148,7 +149,7 @@ server_items_tell :: proc(srv: ^Server) {
         if !srv.items_due[slot] { continue }
         srv.items_due[slot] = false
         if slot != srv.local_player && srv.remotes[slot].peer == nil { continue }
-        outbox_put(server_outbox(srv, slot), .Items, Msg_Items{seq = srv.items_seq[slot], items = srv.items[slot]})
+        outbox_put(server_outbox(srv, slot), .Items, Msg_Items{seq = srv.items_seq[slot], items = srv.items[slot], weapons = srv.weapons[slot]})
     }
 }
 
@@ -457,6 +458,9 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
                 server_items_restore(srv, player, rec, known)
                 outbox_put(server_outbox(srv, player), .Restore, Msg_Restore{known = known, move = known, record = rec})
             }
+        case .Craft:
+            m := msg_get(&r, Msg_Craft) or_break
+            server_craft(srv, player, m)
         case .Keep:
             m := msg_get(&r, Player_Kept) or_break
             srv.kept[player], srv.kept_known[player] = m, true

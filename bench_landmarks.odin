@@ -182,7 +182,7 @@ bench_enemies_run :: proc(gs: ^Game_State) {
     cam.pos = base + {0, PLAYER_EYE_HEIGHT, 0}
     cam.yaw, cam.pitch = 0, 4
     combat_init(&gs.combat)
-    combat_toggle_sword(gs)
+    combat_toggle(gs)
     gs.combat.blocking, gs.combat.guard = true, 1
     for view in 0 ..< 2 {
         gs.glider.third_person = view == 1

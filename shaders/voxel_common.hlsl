@@ -96,8 +96,9 @@ int region_of(int rx, int ry, int rz) {
 #define BLOCK_GLOW_MUSHROOM 43u // plant, emissive
 #define BLOCK_GLOW_MOSS     44u // emissive
 #define BLOCK_SAPLING       45u // a land plant (micro model)
-#define BLOCK_DOOR          46u // doors: 48 ids, one per state (door_shape)
-#define BLOCK_DOOR_LAST     93u
+#define BLOCK_WORKBENCH     46u // crafted (crafting.odin)
+#define BLOCK_DOOR          47u // doors: 48 ids, one per state (door_shape)
+#define BLOCK_DOOR_LAST     94u
 
 // World blocks per design block (terrain.odin TERRAIN_SCALE): textures laid
 // out over the world in design sizes use it.

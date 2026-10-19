@@ -3,9 +3,12 @@ package main
 import "core:math"
 import la "core:math/linalg"
 
-// Melee with a sword, Cube World style: fast combos, a dodge roll, and hits
-// that feel heavy. R draws and sheathes it (1-9 or the wheel go back to
-// building); while it's out:
+// Melee, Cube World style: fast combos, a dodge roll, and hits that feel
+// heavy. R swaps the hotbar for the weapon bar and back (crafting.odin):
+// what's in its slot (1-4, the wheel) is in your hand, a sword, or with
+// nothing there your fists, which punch instead (FIST_ATTACKS: quicker,
+// lighter, closer). A sword hits as hard and reaches as far as it's made
+// (WEAPONS). While fighting:
 //
 // - Left click: a three hit combo on the ground (slash, backhand slash,
 //   overhead finisher); click per swing or hold. A click during a swing is
@@ -35,7 +38,8 @@ import la "core:math/linalg"
 // The sword is drawn as voxel-model parts (combat_add_parts, and in the
 // chase view on the body: player_add_parts). Swings are arcs in view space:
 // the blade sweeps around a pivot in front of the chest from one angle to
-// another, and the hand holds its grip.
+// another, and the hand holds its grip. Punches are straight paths for one
+// fist or the other (FIST_MOVES).
 
 SLOWMO_SCALE       :: f32(0.3) // the world's speed at the start of a slow-down...
 SLOWMO_HEAVY       :: f32(0.14) // ...lasting this long after a heavy hit...
@@ -139,8 +143,68 @@ ATTACKS := [Attack_Kind]Attack_Info{
         hitstop = 0.11, shake = 1.2, u = {0, 0, 1}, v = {0, -1, 0}, a0 = 70 * DEG, a1 = 75 * DEG},
 }
 
+// Punches: quicker and lighter than the sword's swings, and closer. On the
+// ground a jab (left), a cross (right) and a hook to finish; in the air the
+// jab and the cross; the uppercut (right click) launches; from up high, the
+// fists come down. No u, v, a0, a1: the fists go by FIST_MOVES.
+FIST_ATTACKS := [Attack_Kind]Attack_Info{
+    .None = {},
+    .Slash_1 = {windup = 0.05, strike = 0.07, follow = 0.06, recover = 0.12, damage = 4, knock = {3, 2.5}, arc = 40 * DEG, reach = 2.6,
+        hitstop = 0.04, shake = 0.2},
+    .Slash_2 = {windup = 0.06, strike = 0.08, follow = 0.07, recover = 0.13, damage = 5, knock = {4, 3}, arc = 40 * DEG, reach = 2.7,
+        hitstop = 0.05, shake = 0.25},
+    .Finisher = {windup = 0.13, strike = 0.1, follow = 0.1, recover = 0.2, damage = 9, knock = {10, 5}, arc = 55 * DEG, reach = 2.7,
+        hitstop = 0.08, shake = 0.6},
+    .Air_Slash_1 = {windup = 0.05, strike = 0.07, follow = 0.06, recover = 0.1, damage = 4, knock = {2, 6}, arc = 45 * DEG, reach = 2.7,
+        hitstop = 0.04, shake = 0.2},
+    .Air_Slash_2 = {windup = 0.05, strike = 0.07, follow = 0.06, recover = 0.1, damage = 4, knock = {2, 6}, arc = 45 * DEG, reach = 2.7,
+        hitstop = 0.04, shake = 0.2},
+    .Rise = {windup = 0.1, strike = 0.09, follow = 0.12, recover = 0.16, damage = 7, knock = {2, 12}, arc = 40 * DEG, reach = 2.7,
+        hitstop = 0.07, shake = 0.55},
+    .Plunge = {windup = 0.06, strike = 10, damage = 12, knock = {6, 8}, arc = math.PI, hitstop = 0.08, shake = 0.8},
+    .Plunge_Land = {strike = 0.02, follow = 0.1, recover = 0.18, damage = 8, knock = {10, 7}, arc = math.PI, reach = PLUNGE_RADIUS * 0.7,
+        hitstop = 0.09, shake = 1},
+}
+
+// A punch's path in view space, written for the right fist (a left one is
+// thrown mirrored): from where the fist waits back to `wind`, then out to
+// `hit`, knuckles leading; held there a moment, then back. tilt: 0 the fist
+// upright, 1 turned flat (a hook).
+Fist_Move :: struct {
+    left:      bool,
+    wind, hit: [3]f32,
+    tilt:      f32,
+}
+
+FIST_MOVES := [Attack_Kind]Fist_Move{
+    .None        = {},
+    .Slash_1     = {left = true, wind = {0.2, -0.28, 0.34}, hit = {0.07, -0.16, 0.62}},
+    .Slash_2     = {wind = {0.26, -0.3, 0.3}, hit = {0.05, -0.16, 0.64}},
+    .Finisher    = {wind = {0.46, -0.26, 0.28}, hit = {-0.02, -0.18, 0.56}, tilt = 1},
+    .Air_Slash_1 = {left = true, wind = {0.2, -0.28, 0.34}, hit = {0.07, -0.18, 0.62}},
+    .Air_Slash_2 = {wind = {0.26, -0.3, 0.3}, hit = {0.05, -0.18, 0.64}},
+    .Rise        = {wind = {0.16, -0.62, 0.34}, hit = {0.06, -0.02, 0.56}},
+    .Plunge      = {wind = {0.1, -0.42, 0.5}, hit = {0.1, -0.5, 0.52}},
+    .Plunge_Land = {wind = {0.1, -0.5, 0.52}, hit = {0.1, -0.5, 0.52}},
+}
+
+FIST_GUARD :: [3]f32{0.2, -0.3, 0.4}   // the right fist, waiting (view space)
+FIST_BLOCK :: [3]f32{0.1, -0.12, 0.36} // guarding: both up before the face
+
+// A swing of `kind` with what's in hand: the sword's, as strong and as long
+// as the weapon, or a punch.
+attack_info :: proc(c: ^Combat, kind: Attack_Kind) -> Attack_Info {
+    if c.weapon == .None { return FIST_ATTACKS[kind] }
+    a := ATTACKS[kind]
+    w := WEAPONS[c.weapon]
+    a.damage *= w.damage
+    if kind != .Plunge_Land { a.reach *= w.reach }
+    return a
+}
+
 // Where the sword is, in view space: the middle of the grip, which way the
-// blade points, and which way the back of the hand holding it faces.
+// blade points, and which way the back of the hand holding it faces. A
+// fist's: the middle of the fist, the way its fingers curl round.
 Sword_Pose :: struct { grip, blade, back: [3]f32 }
 
 Combat_Input :: struct {
@@ -150,7 +214,8 @@ Combat_Input :: struct {
 }
 
 Combat :: struct {
-    sword:       bool, // drawn (R)
+    fighting:    bool,   // the weapon bar out (R): what's in its slot in hand...
+    weapon:      Weapon, // ...this (crafting.odin); .None: fists
     hp:          f32,
     since_hurt:  f32,
     invuln:      f32,
@@ -167,7 +232,8 @@ Combat :: struct {
     air_attacks: int,         // air slashes in this jump
     cooldown:    f32,         // no new swing until this runs out
     swing_from:  Sword_Pose,  // where the hand was when the swing started
-    pose:        Sword_Pose,  // this frame's
+    pose:        Sword_Pose,  // this frame's (fists: the one punching, as if the right: what the others see)
+    fists:       [2]Sword_Pose, // fists: the right and the left, this frame's (first person)
     sway:        [3]f32,      // the hand lagging behind turns and bouncing on landings (view space)...
     sway_vel:    [3]f32,      // ...on a loose spring
     last_look:   [2]f32,      // yaw, pitch last frame
@@ -194,16 +260,30 @@ Combat :: struct {
     slowmo_len:  f32, // ...of a slow-down this long
 }
 
+// A sword in hand until the weapon bar says otherwise (weapon_select).
 combat_init :: proc(c: ^Combat) {
-    c^ = {hp = PLAYER_MAX_HP, dodge_time = 10, pose = sword_carry(0, 0, 0)}
+    c^ = {hp = PLAYER_MAX_HP, dodge_time = 10, weapon = .Steel_Sword, pose = sword_carry(0, 0, 0)}
 }
 
-combat_toggle_sword :: proc(gs: ^Game_State) {
+// R: to fighting, or back to building.
+combat_toggle :: proc(gs: ^Game_State) {
     c := &gs.combat
-    c.sword = !c.sword
+    c.fighting = !c.fighting
     c.attack, c.queued = .None, .None
-    // No toast: the sword in your hand (and the hotbar going away) says it.
-    play(.Sword_Draw, c.sword ? 0.7 : 0.5, (c.sword ? 1 : 0.8) * vary(0.05))
+    // No toast: what's in your hands (and the weapon bar for the hotbar) says it.
+    if c.weapon == .None {
+        play(.Dodge, c.fighting ? 0.22 : 0.16, (c.fighting ? 1.35 : 1.15) * vary(0.05)) // fists up: a rustle
+    } else {
+        play(.Sword_Draw, c.fighting ? 0.7 : 0.5, (c.fighting ? 1 : 0.8) * vary(0.05))
+    }
+}
+
+// A swing cutting the air, or a punch (lighter, higher); at `at` for
+// another player's.
+swing_sound :: proc(weapon: Weapon, kind: Attack_Kind, at: Maybe([3]f32) = nil, volume: f32 = 0.8) {
+    pitch: f32 = weapon == .None ? 1.5 : (kind == .Finisher ? 0.85 : 1) * (weapon == .Wooden_Sword ? 0.9 : 1)
+    v := weapon == .None ? volume * 0.4 : volume
+    if p, ok := at.?; ok { play_at(.Sword_Swing, p, v, pitch * vary(0.06), 14) } else { play(.Sword_Swing, v, pitch * vary(0.06)) }
 }
 
 // The world's dt this frame: slowed for a moment after a kill or a heavy
@@ -225,14 +305,14 @@ slow_down :: proc(c: ^Combat, length: f32) {
 
 combat_dodging :: proc(c: ^Combat) -> bool { return c.dodge_time < DODGE_TIME }
 
-attack_duration :: proc(kind: Attack_Kind) -> f32 {
-    a := ATTACKS[kind]
+attack_duration :: proc(c: ^Combat, kind: Attack_Kind) -> f32 {
+    a := attack_info(c, kind)
     return a.windup + a.strike + a.follow + a.recover
 }
 
 @(private="file")
-chain_point :: proc(kind: Attack_Kind) -> f32 {
-    a := ATTACKS[kind]
+chain_point :: proc(c: ^Combat, kind: Attack_Kind) -> f32 {
+    a := attack_info(c, kind)
     return a.windup + a.strike + a.follow * 0.6
 }
 
@@ -252,7 +332,7 @@ combat_pre_update :: proc(gs: ^Game_State, in_: Combat_Input, dt: f32) {
     c.dodge_cooldown = max(c.dodge_cooldown - dt, 0)
     c.cooldown = max(c.cooldown - dt, 0)
     c.chain_timer = max(c.chain_timer - dt, 0)
-    if !c.sword || gs.glider.deployed { c.attack, c.blocking = .None, false; return }
+    if !c.fighting || gs.glider.deployed { c.attack, c.blocking = .None, false; return }
 
     // Dodge: cancels the swing.
     if in_.dodge && c.dodge_cooldown == 0 && (grounded(gs) || !c.air_dodge_used) {
@@ -286,7 +366,7 @@ combat_pre_update :: proc(gs: ^Game_State, in_: Combat_Input, dt: f32) {
     // Guard: up when asked for, unless mid-swing past the wind-up (it comes
     // up as soon as the swing is done) or rolling.
     if in_.block && !combat_dodging(c) {
-        can := c.attack == .None || (c.attack != .Plunge && c.attack_time < ATTACKS[c.attack].windup)
+        can := c.attack == .None || (c.attack != .Plunge && c.attack_time < attack_info(c, c.attack).windup)
         if !c.blocking && can {
             c.blocking, c.block_time = true, 0
             c.attack, c.queued = .None, .None
@@ -315,7 +395,7 @@ combat_pre_update :: proc(gs: ^Game_State, in_: Combat_Input, dt: f32) {
     }
     busy := c.attack == .Plunge || c.attack == .Plunge_Land
     if want != .None && !busy {
-        if (c.attack == .None || c.attack_time >= chain_point(c.attack)) && c.cooldown == 0 {
+        if (c.attack == .None || c.attack_time >= chain_point(c, c.attack)) && c.cooldown == 0 {
             start_attack(gs, want)
         } else if c.queued == .None || in_.special {
             c.queued = want
@@ -327,7 +407,7 @@ combat_pre_update :: proc(gs: ^Game_State, in_: Combat_Input, dt: f32) {
 
     // Plunging: a hang at the top, then straight down, fast.
     if c.attack == .Plunge {
-        if c.attack_time >= ATTACKS[.Plunge].windup {
+        if c.attack_time >= attack_info(c, .Plunge).windup {
             cam.velocity.y = min(cam.velocity.y, -PLUNGE_SPEED)
             cam.velocity.xz *= math.exp(-2 * dt)
         } else {
@@ -352,7 +432,7 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
     // Stuck in what it hit: the swing waits (a plunge keeps falling).
     step := c.hitstop > 0 && c.attack != .Plunge ? 0 : dt
     c.attack_time += step
-    a := ATTACKS[c.attack]
+    a := attack_info(c, c.attack)
 
     #partial switch c.attack {
     case .Plunge:
@@ -376,16 +456,16 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
             fx_shockwave(&gs.fx, feet)
             play(.Slam, 1, vary(0.06))
             for t in combat_targets(gs) {
-                if la.length(t.center - feet) < ATTACKS[.Plunge_Land].reach + t.radius { hit_target(gs, t, .Plunge_Land) }
+                if la.length(t.center - feet) < attack_info(c, .Plunge_Land).reach + t.radius { hit_target(gs, t, .Plunge_Land) }
             }
             slow_down(c, SLOWMO_HEAVY)
-            gs.glider.shake = min(gs.glider.shake + ATTACKS[.Plunge_Land].shake, 1.5)
+            gs.glider.shake = min(gs.glider.shake + attack_info(c, .Plunge_Land).shake, 1.5)
         }
         return
     case .Plunge_Land:
     case:
         if c.attack_time >= a.windup && c.attack_time - step < a.windup + a.strike {
-            if c.attack_time - step < a.windup { play(.Sword_Swing, 0.8, (c.attack == .Finisher ? 0.85 : 1) * vary(0.06)) }
+            if c.attack_time - step < a.windup { swing_sound(c.weapon, c.attack) }
             eye := cam.pos
             fwd := camera_flat_forward(cam^)
             for t in combat_targets(gs) {
@@ -395,9 +475,9 @@ combat_post_update :: proc(gs: ^Game_State, dt: f32) {
         }
     }
 
-    if c.attack_time >= chain_point(c.attack) && c.queued != .None && c.attack != .Finisher && c.cooldown == 0 {
+    if c.attack_time >= chain_point(c, c.attack) && c.queued != .None && c.attack != .Finisher && c.cooldown == 0 {
         start_attack(gs, c.queued)
-    } else if c.attack_time >= attack_duration(c.attack) {
+    } else if c.attack_time >= attack_duration(c, c.attack) {
         // The end of a string: a breath before the next.
         if c.attack == .Finisher || (c.attack == .Air_Slash_2 || c.air_attacks >= AIR_ATTACKS_MAX) && !grounded(gs) {
             c.cooldown = COMBO_COOLDOWN
@@ -492,7 +572,7 @@ sword_reaches :: proc(c: [3]f32, r: f32, eye, fwd: [3]f32, pitch: f32, a: Attack
 hit_amount :: proc(gs: ^Game_State, kind: Attack_Kind, at: [3]f32) -> (damage: f32, knock: [3]f32, boosted: bool) {
     c := &gs.combat
     cam := &gs.camera
-    a := ATTACKS[kind]
+    a := attack_info(c, kind)
     speed := la.length(cam.velocity.xz)
     speed_bonus := clamp((speed - SPEED_DAMAGE_FROM) / SPEED_DAMAGE_FROM, 0, 1) * SPEED_DAMAGE_MAX
     combo_bonus := min(f32(c.combo) * COMBO_DAMAGE_STEP, COMBO_DAMAGE_MAX)
@@ -513,7 +593,7 @@ hit_amount :: proc(gs: ^Game_State, kind: Attack_Kind, at: [3]f32) -> (damage: f
 hit_feedback :: proc(gs: ^Game_State, kind: Attack_Kind, killed: bool) {
     c := &gs.combat
     cam := &gs.camera
-    a := ATTACKS[kind]
+    a := attack_info(c, kind)
     c.combo += 1
     c.best_combo = max(c.best_combo, c.combo)
     c.combo_timer = COMBO_TIMEOUT
@@ -580,7 +660,7 @@ hit_target :: proc(gs: ^Game_State, t: Target, kind: Attack_Kind) {
         msg.target, msg.uid = .Enemy, t.enemy.uid
         killed = t.enemy.hp - damage <= 0
     }
-    if !killed { msg.freeze = ATTACKS[kind].hitstop + 0.02 } // shudders on the blade, then flies
+    if !killed { msg.freeze = attack_info(&gs.combat, kind).hitstop + 0.02 } // shudders on the blade, then flies
     client_send(gs, .Hit, msg)
     hit_feedback(gs, kind, killed)
 }
@@ -643,12 +723,19 @@ combat_view_update :: proc(gs: ^Game_State, dt: f32) {
     c.hurt_flash = max(c.hurt_flash - 2.5 * dt, 0)
     c.guard += ((c.blocking ? f32(1) : 0) - c.guard) * min(dt * 18, 1)
     c.combo_pop = max(c.combo_pop - 5 * dt, 0)
-    if combat_dodging(c) && c.sword {
+    if combat_dodging(c) && c.fighting {
         t := c.dodge_time / DODGE_TIME
         cam.view_offset.y -= 0.35 * math.sin(t * math.PI) // ducking into the roll
     }
     run := clamp(la.length(cam.velocity.xz) / (WALK_SPEED * SPRINT_FACTOR), 0, 1)
-    c.pose = sword_pose(gs, run)
+    if c.weapon == .None {
+        c.fists = {fist_pose(gs, false, run), fist_pose(gs, true, run)}
+        // The others see the fist that's punching, as if the right.
+        c.pose = c.fists[0]
+        if c.attack != .None && FIST_MOVES[c.attack].left { c.pose = mirror_pose(c.fists[1]) }
+    } else {
+        c.pose = sword_pose(gs, run)
+    }
 
     // The hand isn't welded to the view: it lags behind turning, bobs when
     // landing, breathes standing still. A loose spring, so it overshoots a
@@ -671,6 +758,49 @@ combat_view_update :: proc(gs: ^Game_State, dt: f32) {
     breath := (1 - run) * (c.attack == .None ? 1 : 0)
     c.pose.grip += c.sway + [3]f32{0, 0.007 * breath * math.sin(c.time * 1.7), 0}
     c.pose.blade += [3]f32{0.03 * breath * math.sin(c.time * 1.1), 0, 0} - c.sway * 0.8 // the tip lags further
+    for &f, i in c.fists { f.grip += c.sway + [3]f32{0, 0.007 * breath * math.sin(c.time * 1.7 + f32(i) * 1.3), 0} }
+}
+
+// A pose as seen in a mirror down the middle of the view (a left fist's as
+// a right one's).
+@(private="file")
+mirror_pose :: proc(p: Sword_Pose) -> Sword_Pose {
+    q := p
+    q.grip.x, q.blade.x, q.back.x = -p.grip.x, -p.blade.x, -p.back.x
+    return q
+}
+
+// A fist's pose (view space, left or right): waiting up in front, bobbing
+// with the stride, raised to guard, or thrown in its punch (FIST_MOVES).
+@(private="file")
+fist_pose :: proc(gs: ^Game_State, left: bool, run: f32) -> Sword_Pose {
+    c := &gs.combat
+    air: f32 = grounded(gs) ? 0 : 1
+    phase := gs.player_anim.walk_phase + (left ? math.PI : 0)
+    rest := FIST_GUARD + [3]f32{0.015 * math.sin(phase) * run, -0.025 * run * abs(math.cos(phase)) + 0.03 * air, 0}
+    if c.guard > 0.001 { rest = la.lerp(rest, FIST_BLOCK, c.guard * c.guard * (3 - 2 * c.guard)) }
+    at, tilt := rest, f32(0)
+    mv := FIST_MOVES[c.attack]
+    if c.attack != .None && mv.left == left {
+        a := attack_info(c, c.attack)
+        t := c.attack_time
+        switch {
+        case t < a.windup:
+            f := t / max(a.windup, 0.001)
+            at, tilt = la.lerp(rest, mv.wind, 1 - (1 - f) * (1 - f)), mv.tilt * f
+        case t < a.windup + a.strike:
+            f := (t - a.windup) / a.strike // snapping out, slowing at the end
+            at, tilt = la.lerp(mv.wind, mv.hit, 1 - (1 - f) * (1 - f) * (1 - f)), mv.tilt
+        case t < a.windup + a.strike + a.follow:
+            at, tilt = mv.hit, mv.tilt
+        case:
+            r := clamp((t - a.windup - a.strike - a.follow) / max(a.recover, 0.001), 0, 1)
+            k := r * r * (3 - 2 * r)
+            at, tilt = la.lerp(mv.hit, rest, k), mv.tilt * (1 - k)
+        }
+    }
+    p := Sword_Pose{grip = at, blade = la.normalize(la.lerp([3]f32{-0.15, 1, 0.1}, [3]f32{-1, 0.2, 0.1}, tilt)), back = {1, 0, -0.2}}
+    return left ? mirror_pose(p) : p
 }
 
 // ─── The sword's pose ──────────────────────────────────────────────────────
@@ -714,7 +844,7 @@ sword_pose :: proc(gs: ^Game_State, run: f32) -> Sword_Pose {
         return blend_sword(carry, SWORD_GUARD, g)
     }
     if c.attack == .None { return carry }
-    a := ATTACKS[c.attack]
+    a := attack_info(c, c.attack)
     t := c.attack_time
     switch {
     case t < a.windup:
@@ -780,10 +910,10 @@ two_bone_ik :: proc(shoulder, target, pole: [3]f32, upper, lower: f32) -> (elbow
     return
 }
 
-// The sword in a fist at the end of an arm from `shoulder`: upper arm and
-// forearm meeting at an elbow bent toward `pole`. Out of reach, hand and
-// sword come back to where the straight arm ends.
-sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: [3]f32, scale: f32 = 1, tint: [3]f32) {
+// The weapon in a fist at the end of an arm from `shoulder` (or just the
+// fist): upper arm and forearm meeting at an elbow bent toward `pole`. Out
+// of reach, hand and weapon come back to where the straight arm ends.
+sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: [3]f32, weapon: Weapon, scale: f32 = 1, tint: [3]f32) {
     wrist := grip - edge * 0.075 * scale - blade * 0.012 * scale
     elbow, w := two_bone_ik(shoulder, wrist, pole, UPPER_ARM_LEN * scale, FOREARM_LEN * scale)
     g := grip + (w - wrist)
@@ -791,22 +921,34 @@ sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: 
     ent_segment(f, .Arm_Fore, elbow, w, pole, tint)
     rot := basis_from_axes(edge, flat, blade)
     ent_part(f, .Fist, g, rot, {scale, scale, scale})
-    ent_part(f, .Sword, g, rot)
+    if weapon != .None { ent_part(f, WEAPONS[weapon].model, g, rot) }
 }
 
 // The sword and the arm holding it, in first person.
 combat_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     c := &gs.combat
-    if !c.sword || gs.camera.climbing || gs.glider.deployed || gs.glider.chase_dist > 1.5 || !ent_begin(f) { return }
+    if !c.fighting || gs.camera.climbing || gs.glider.deployed || gs.glider.chase_dist > 1.5 || !ent_begin(f) { return }
     cam := gs.camera
     fwd, right, up := camera_view_basis(cam, 1)
     right, up = la.normalize(right), la.normalize(up)
     eye := camera_view_eye(cam)
     ent_scale_about(f, eye, world_scale)
+    tint := look_paint(gs.look).cloth
+    if c.weapon == .None {
+        // Both fists, the elbows down and out to their sides.
+        for p, i in c.fists {
+            s := i == 0 ? f32(1) : -1
+            shoulder := eye + right * (SWORD_SHOULDER.x * s) + up * SWORD_SHOULDER.y + fwd * SWORD_SHOULDER.z
+            grip, blade, edge, flat := sword_place(p, eye, fwd, right, up, shoulder)
+            sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * (0.7 * s) - up - fwd * 0.3, .None, tint = tint)
+        }
+        ent_end(f)
+        return
+    }
     shoulder := eye + right * SWORD_SHOULDER.x + up * SWORD_SHOULDER.y + fwd * SWORD_SHOULDER.z
     grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
     // The elbow hangs down and out to the side.
-    sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.7 - up - fwd * 0.3, tint = look_paint(gs.look).cloth)
+    sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.7 - up - fwd * 0.3, c.weapon, tint = tint)
     ent_end(f)
 }
 
@@ -878,6 +1020,41 @@ shape_sword :: proc(p: [3]f32, voxel: f32) -> Pal {
         return z <= 13 ? .Blade_Fuller : .Blade
     case z == 17:
         if y == 0 && x == 0 { return .Blade_Edge }
+    }
+    return .Empty
+}
+
+// Whittled from a log: a plain wooden blade, a wide rounded tip, a crossbar
+// and a grip bound with leather.
+shape_wood_sword :: proc(p: [3]f32, voxel: f32) -> Pal {
+    v := vox(p)
+    x, y, z := abs(v.x), abs(v.y), v.z
+    switch {
+    case z == -3: if x == 0 && y <= 1 { return .Wood_Dark }
+    case z >= -2 && z <= 2: if x == 0 && y == 0 { return z % 2 == 0 ? .Leather : .Leather_Dark }
+    case z == 3: if x <= 2 && y == 0 { return .Wood_Dark }
+    case z >= 4 && z <= 13:
+        if y != 0 || x > 1 { break }
+        return x == 1 ? .Wood : .Wood_Light
+    case z == 14: if y == 0 && x == 0 { return .Wood }
+    }
+    return .Empty
+}
+
+// Knapped stone lashed to a wooden hilt: a grey blade with paler chipped
+// edges, a short guard.
+shape_stone_sword :: proc(p: [3]f32, voxel: f32) -> Pal {
+    v := vox(p)
+    x, y, z := abs(v.x), abs(v.y), v.z
+    switch {
+    case z == -3: if x == 0 && y <= 1 { return .Wood_Dark }
+    case z >= -2 && z <= 2: if x == 0 && y == 0 { return z % 2 == 0 ? .Grip_Wrap : .Wood }
+    case z == 3: if x <= 2 && y <= (x == 0 ? 1 : 0) { return x == 2 ? .Wood_Dark : .Leather_Dark }
+    case z >= 4 && z <= 14:
+        if y != 0 || x > 1 { break }
+        if x == 1 { return (z * 7) % 3 == 0 ? .Flint : .Flint_Edge } // chipped
+        return .Flint
+    case z == 15: if y == 0 && x == 0 { return .Flint_Edge }
     }
     return .Empty
 }

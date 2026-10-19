@@ -178,10 +178,11 @@ Block_Type :: enum u8 {
     Glow_Mushroom = 43,  // a plant, and a dim light
     Glow_Moss     = 44,  // on cave ceilings: a dim light
     Sapling       = 45,  // a land plant: planted, it grows into a tree (saplings.odin)
+    Workbench     = 46,  // crafted (crafting.odin); near one, more can be made
     // Doors (door.odin): 48 ids from here, one per state (facing, hinge,
     // open, which part). Door itself is the one in hand and in the
     // inventory; the rest only appear placed, so this stays the last name.
-    Door          = 46,  // (45 before saplings: VXC2 saves are moved up a place on load)
+    Door          = 47,  // (46 before the workbench, 45 before saplings: older saves are moved up on load)
 }
 
 // Every block id there is: the named ones and the doors' states.

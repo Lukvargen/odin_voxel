@@ -675,6 +675,34 @@ float3 voxel_surface_texture(uint block_id, int3 vkey, float3 hit_pos, float3 nr
         return float3(0.10, 0.28, 0.36);
     }
 
+    if (block_id == BLOCK_WORKBENCH) {
+        // A carpenter's bench: on top, oak planks in a darker rim with a saw
+        // and a square left out on them; round the sides, legs at the
+        // corners and an apron under the top over a plank panel.
+        int2  c  = top ? txl.xz : (abs(nrm.x) > 0.5 ? txl.zy : txl.xy);
+        float th = lerp(0.5, h, detail);
+        if (nrm.y < -0.5) return float3(0.30, 0.20, 0.11) * (0.9 + 0.2 * th);
+        if (top) {
+            float plank = hash31i(int3(vkey.x, vkey.y * 8 + (c.y >> 1), vkey.z));
+            float3 wood = float3(0.62, 0.45, 0.27) * (0.88 + 0.16 * plank) * (0.92 + 0.16 * th);
+            if ((c.y & 1) == 1 && c.y != 7) wood *= lerp(1.0, 0.86, detail); // the joint between planks
+            if (c.x == 0 || c.x == 7 || c.y == 0 || c.y == 7) wood = float3(0.40, 0.27, 0.15) * (0.9 + 0.2 * th);
+            if (c.y == 2 && c.x >= 1 && c.x <= 4) return float3(0.62, 0.64, 0.66) * (0.9 + 0.2 * th); // the saw's blade...
+            if (c.y == 3 && c.x >= 2 && c.x <= 4 && (c.x & 1) == 0) return float3(0.46, 0.48, 0.50); // ...its teeth
+            if (c.y == 2 && c.x == 5) return float3(0.26, 0.14, 0.08);                         // ...its handle
+            if ((c.y == 5 && c.x >= 3 && c.x <= 6) || (c.x == 6 && c.y == 4)) return float3(0.70, 0.66, 0.52); // a square
+            return saturate(wood * (1.0 + vj * 0.06));
+        }
+        float3 wood = float3(0.50, 0.35, 0.20) * (0.92 + 0.16 * th);
+        bool leg   = c.x == 0 || c.x == 7;
+        bool apron = c.y >= 6;
+        if (leg) return saturate(float3(0.36, 0.24, 0.13) * (0.9 + 0.2 * th));
+        if (apron) return saturate(wood * (c.y == 7 ? 1.12 : 0.95));
+        if (c.y == 5 || c.y == 0) return saturate(wood * 0.62); // the apron's shadow, the stretcher
+        float plank = hash31i(int3(vkey.x * 8 + c.x / 3, vkey.y, vkey.z * 8 + c.x / 3));
+        return saturate(wood * (0.82 + 0.14 * plank) * ((c.x % 3) == 0 ? 0.85 : 1.0));
+    }
+
     if (block_is_door(block_id)) {
         // Oak planks running up the door in a darker frame; a middle rail,
         // two sunken panels below it, window panes above (see-through:
@@ -1326,6 +1354,7 @@ float3 far_block_color(uint id, int2 cell, float3 n, float y) {
     if (id == BLOCK_GRAVEL)        return float3(0.50, 0.48, 0.44);
     if (id == BLOCK_CACTUS)        return float3(0.22, 0.45, 0.15);
     if (id == BLOCK_STONE_BRICKS)  return float3(0.40, 0.41, 0.36);
+    if (id == BLOCK_WORKBENCH)     return float3(0.48, 0.34, 0.19);
     if (id == BLOCK_TORCH)         return float3(0.45, 0.26, 0.10);
     if (id == BLOCK_CRYSTAL)       return float3(0.95, 0.65, 0.25);
     if (id == BLOCK_TERRACOTTA) {

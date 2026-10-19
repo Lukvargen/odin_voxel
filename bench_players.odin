@@ -31,16 +31,16 @@ bench_players_run :: proc(gs: ^Game_State) {
     others[1].hurt = 0.8
     // Walking across, sword drawn and carried, mid-stride.
     put(&others[2], {active = true, pos = eye_at(gs, x + 2, z + 7), yaw = 270, velocity = {-4, 0, 0}, on_ground = true,
-        sword = true, sword_pose = gs.combat.pose}) // the carry pose, as combat_init leaves it
+        sword = true, weapon = .Steel_Sword, sword_pose = gs.combat.pose}) // the carry pose, as combat_init leaves it
     others[2].anim.amp, others[2].anim.walk_phase = 0.9, 1.2
     // Mid-swing (a finisher, posed by the combat code itself), facing the camera.
     c := &gs.combat
     saved := c^
-    c.sword, c.attack = true, .Finisher
+    c.fighting, c.attack, c.weapon = true, .Finisher, .Steel_Sword
     c.attack_time = ATTACKS[.Finisher].windup + ATTACKS[.Finisher].strike * 0.5
     swing := sword_pose(gs, 0)
     c^ = saved
-    put(&others[4], {active = true, pos = eye_at(gs, x + 4, z + 5), yaw = 200, on_ground = true, sword = true, sword_pose = swing})
+    put(&others[4], {active = true, pos = eye_at(gs, x + 4, z + 5), yaw = 200, on_ground = true, sword = true, weapon = .Steel_Sword, sword_pose = swing})
     // Gliding in toward the camera, banking.
     glide := cam.pos + {0, 4, 10}
     put(&others[3], {active = true, pos = glide, yaw = 180, velocity = {0, -1, -9},

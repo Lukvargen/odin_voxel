@@ -31,7 +31,7 @@ bench_combat_run :: proc(gs: ^Game_State) {
     gs.mouse_locked = true
     gs.ui.help_t = 0
     combat_init(&gs.combat)
-    combat_toggle_sword(gs)
+    combat_toggle(gs)
     gs.ui.toast_t = 0
 
     // Slimes in front (+z at yaw 0): a big one to hit, more behind it.
@@ -159,7 +159,7 @@ bench_fight_run :: proc(gs: ^Game_State) {
         cam.pos = {f32(x) + 0.5, f32(bench_ground(gs, x, z)) + 1 + PLAYER_EYE_HEIGHT, f32(z) + 0.5}
         cam.fly_mode, cam.velocity, cam.yaw, cam.pitch = false, {}, 0, -5
         combat_init(&gs.combat)
-        combat_toggle_sword(gs)
+        combat_toggle(gs)
         ahead := 7 * world_scale // design blocks away
         g := bench_ground(gs, x, z + int(math.floor(0.5 + ahead))) + 1
         e := enemy_spawn(gs, kind, {f32(x) + 0.5, f32(g), f32(z) + 0.5 + ahead})

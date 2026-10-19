@@ -493,6 +493,8 @@ combat_models_bake :: proc() {
     // Chunky hand-held things: voxel centres on whole multiples of HAND_VOXEL.
     v := HAND_VOXEL
     ent_models[.Sword]     = model_bake({-3.5 * v, -1.5 * v, -3.5 * v}, {3.5 * v, 1.5 * v, 17.5 * v}, v, shape_sword)
+    ent_models[.Wood_Sword]  = model_bake({-3.5 * v, -1.5 * v, -3.5 * v}, {3.5 * v, 1.5 * v, 15.5 * v}, v, shape_wood_sword)
+    ent_models[.Stone_Sword] = model_bake({-3.5 * v, -1.5 * v, -3.5 * v}, {3.5 * v, 1.5 * v, 16.5 * v}, v, shape_stone_sword)
     ent_models[.Fist]      = model_bake({-1.5 * v, -1.5 * v, -1.5 * v}, {1.5 * v, 1.5 * v, 1.5 * v}, v, shape_fist)
     ent_models[.Arm_Upper] = model_bake({-1.5 * v, -1.5 * v, 0}, {1.5 * v, 1.5 * v, 1}, v, shape_arm_upper)
     ent_models[.Arm_Fore]  = model_bake({-2.5 * v, -2.5 * v, 0}, {2.5 * v, 2.5 * v, 1}, v, shape_arm_fore)

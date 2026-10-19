@@ -26,7 +26,10 @@ Player_Kept :: struct {
     glider:      bool, // equipped
     hotbar:      [HOTBAR_SLOTS]Block_Type,
     hotbar_slot: u8,
+    weapon_bar:  [WEAPON_SLOTS]Weapon, // R (crafting.odin)
+    weapon_slot: u8,
     items:       [Block_Type]u32, // survival: the blocks carried, as the server counts them (items.odin); clients don't send it
+    weapons:     [Weapon]u32,     // ...and the weapons made (crafting.odin)
 }
 
 // A whole character: the server's Player (where, how) and what it kept.
@@ -35,17 +38,15 @@ Player_Record :: struct {
     yaw:      f32,
     pitch:    f32,
     fly_mode: bool,
-    sword:    bool,   // drawn
+    sword:    bool,   // fighting: the weapon bar out
     kept:     Player_Kept,
 }
 
-PLAYER_FRESH :: Player_Kept{hp = PLAYER_MAX_HP, hotbar = DEFAULT_HOTBAR}
+PLAYER_FRESH :: Player_Kept{hp = PLAYER_MAX_HP, hotbar = DEFAULT_HOTBAR, weapon_bar = DEFAULT_WEAPON_BAR}
 
-// New in a survival world: empty hands but for a few torches.
+// New in a survival world: nothing at all. Fists, and the spell.
 survival_fresh :: proc() -> (k: Player_Kept) {
     k.hp = PLAYER_MAX_HP
-    k.hotbar[HOTBAR_SLOTS - 1] = .Torch
-    k.items[.Torch] = 8
     return
 }
 
@@ -64,7 +65,10 @@ Player_File :: struct {
     glider:      bool,
     hotbar:      []string,
     hotbar_slot: int,
+    weapon_bar:  []string, // by name too; "None": fists
+    weapon_slot: int,
     items:       map[string]int, // survival: how many of each block, by name
+    weapons:     map[string]int, // ...and each weapon
 }
 
 // Player `name`'s character: the server's own copy if it has one (they were
@@ -86,6 +90,7 @@ player_record_note :: proc(srv: ^Server, slot: int, write: bool) {
     name := string(n.text[:n.len])
     rec := Player_Record{pos = p.pos, yaw = p.yaw, pitch = p.pitch, fly_mode = p.fly_mode, sword = p.sword, kept = srv.kept[slot]}
     rec.kept.items = srv.items[slot] // the server's count, never the client's word (items.odin)
+    rec.kept.weapons = srv.weapons[slot]
     if _, known := srv.records[name]; !known { name = strings.clone(name) }
     srv.records[name] = rec
     if write && srv.world.save_enabled { player_file_save(name, rec) }
@@ -123,6 +128,17 @@ player_file_load :: proc(name: string) -> (rec: Player_Record, ok: bool) {
         if b, found := reflect.enum_from_name(Block_Type, s); found && b != .Air { rec.kept.hotbar[i] = b }
     }
     rec.kept.hotbar_slot = u8(clamp(f.hotbar_slot, 0, HOTBAR_SLOTS - 1))
+    if f.weapon_bar != nil {
+        rec.kept.weapon_bar = {}
+        for s, i in f.weapon_bar {
+            if i >= WEAPON_SLOTS { break }
+            if w, found := reflect.enum_from_name(Weapon, s); found { rec.kept.weapon_bar[i] = w }
+        }
+    }
+    rec.kept.weapon_slot = u8(clamp(f.weapon_slot, 0, WEAPON_SLOTS - 1))
+    for s, n in f.weapons {
+        if w, found := reflect.enum_from_name(Weapon, s); found && w != .None { rec.kept.weapons[w] = u32(clamp(n, 0, int(max(i32)))) }
+    }
     for s, n in f.items {
         if b, found := reflect.enum_from_name(Block_Type, s); found && b != .Air { rec.kept.items[b] = u32(clamp(n, 0, int(max(i32)))) }
     }
@@ -135,11 +151,16 @@ player_file_save :: proc(name: string, rec: Player_Record) {
     for b, i in rec.kept.hotbar { hotbar[i] = fmt.tprint(b) }
     items := make(map[string]int, allocator = context.temp_allocator)
     for n, b in rec.kept.items { if n > 0 { items[fmt.tprint(b)] = int(n) } }
+    weapon_bar := make([]string, WEAPON_SLOTS, context.temp_allocator)
+    for w, i in rec.kept.weapon_bar { weapon_bar[i] = fmt.tprint(w) }
+    weapons := make(map[string]int, allocator = context.temp_allocator)
+    for n, w in rec.kept.weapons { if n > 0 { weapons[fmt.tprint(w)] = int(n) } }
     f := Player_File{
         version = PLAYER_FILE_VERSION, name = name,
         pos = rec.pos, yaw = rec.yaw, pitch = rec.pitch,
         health = rec.kept.hp, flying = rec.fly_mode, sword_drawn = rec.sword, glider = rec.kept.glider,
         hotbar = hotbar, hotbar_slot = int(rec.kept.hotbar_slot), items = items,
+        weapon_bar = weapon_bar, weapon_slot = int(rec.kept.weapon_slot), weapons = weapons,
     }
     data, err := json.marshal(f, {pretty = true, use_spaces = true, spaces = 2}, context.temp_allocator)
     if err != nil { return }

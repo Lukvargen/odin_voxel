@@ -187,8 +187,9 @@ felling_trunk_logs :: proc(w: ^World, p: [3]int) -> int {
     return f.ok ? len(f.logs) : 0
 }
 
-// Seconds of channelling to fell a tree of n logs.
-fell_time :: proc(n: int) -> f32 { return min(0.8 + f32(n) / 150, 3) }
+// Seconds of channelling to fell a tree of n logs: a good while, more for
+// a bigger one.
+fell_time :: proc(n: int) -> f32 { return min(2 + f32(n) * 0.09, 8) }
 
 // Turns about the unit axis a by th (radians).
 @(private="file")
