@@ -101,8 +101,17 @@ beast_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
 ease_out :: proc(t: f32) -> f32 { return 1 - (1 - t) * (1 - t) }
 
 // A radius (or half width) no thinner than about a voxel, so a part
-// doesn't fall between the voxel centres when baked.
-thin :: proc(r, voxel: f32) -> f32 { return max(r, voxel * 0.55) }
+// doesn't fall between the voxel centres when baked: they needn't lie on
+// its axis, and can be off it both ways (half a voxel's diagonal).
+thin :: proc(r, voxel: f32) -> f32 { return max(r, voxel * 0.75) }
+
+// Now and then a voxel (`share` of them, by where it is): flecks of a
+// darker coat, grizzled fur.
+fleck :: proc(p: [3]f32, voxel: f32, share: f32) -> bool {
+    q := [3]f32{math.round(p.x / voxel), math.round(p.y / voxel), math.round(p.z / voxel)}
+    h := math.sin(q.x * 12.9898 + q.y * 78.233 + q.z * 37.719) * 43758.5453
+    return h - math.floor(h) < share
+}
 
 // A cheap shake for something stuck on a blade (hit stop).
 @(private="file")
@@ -181,34 +190,44 @@ shape_spider_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
 
 @(private="file")
 shape_wolf_body :: proc(p: [3]f32, voxel: f32) -> Pal {
-    trunk := vm_round_box(p, {0, 0, -0.04}, {0.15, 0.15, 0.38}, 0.09)
-    chest := la.length((p - {0, -0.02, 0.24}) / [3]f32{1, 1.1, 1}) - 0.2
-    if min(trunk, chest) > 0 { return .Empty }
-    if p.y < -0.13 || (p.z > 0.36 && p.y < -0.02) { return .Fur_Light } // belly, throat
-    if p.y > 0.15 && p.z > -0.3 && p.z < 0.22 { return .Hide_Dark }     // the saddle
+    trunk := vm_round_box(p, {0, 0, -0.06}, {0.15, 0.15, 0.36}, 0.09)
+    ruff := la.length((p - {0, 0.04, 0.26}) / [3]f32{1.05, 1.05, 0.9}) - 0.22 // the thick fur over the shoulders
+    haunch := la.length((p - {0, 0.02, -0.3}) / [3]f32{1, 1, 1.1}) - 0.16
+    if min(trunk, ruff, haunch) > 0 { return .Empty }
+    if p.y < -0.13 { return .Fur_Light }                     // belly
+    if p.z > 0.3 && p.y < 0.02 { return .Fur_Light }         // the throat and chest
+    if p.y > 0.12 && p.z > -0.36 && p.z < 0.3 {              // the saddle: dark, grizzled
+        return fleck(p, voxel, 0.22) ? .Fur_Dark : (fleck(p + 7, voxel, 0.3) ? .Fur : .Hide_Dark)
+    }
+    if fleck(p, voxel, 0.12) { return .Hide_Dark }           // flecks down the flanks
     return .Fur
 }
 
 @(private="file")
 shape_wolf_head :: proc(p: [3]f32, voxel: f32) -> Pal {
     q := [3]f32{abs(p.x), p.y, p.z}
-    // Ears: short and pointed, upright.
-    if q.y > 0.13 && q.y < 0.26 {
-        k := (q.y - 0.13) / 0.13
-        if abs(q.x - 0.07) < thin(0.04 * (1 - k) + 0.008, voxel) && abs(p.z - 0.02) < thin(0.025, voxel) { return k > 0.7 ? .Fur_Dark : .Fur }
-    }
-    // Muzzle: long, tapering, a black nose.
-    if p.z > 0.1 && p.z < 0.34 {
-        k := (p.z - 0.1) / 0.24
-        hw := 0.07 - 0.025 * k
-        if q.x < hw && p.y > -0.06 && p.y < 0.07 - 0.03 * k {
-            if p.z > 0.31 && p.y > 0.0 { return .Nose }
-            return p.y < -0.03 ? .Fur_Light : .Fur
+    // Ears: upright, pointed, dark backs and pale insides.
+    if q.y > 0.13 && q.y < 0.28 {
+        k := (q.y - 0.13) / 0.15
+        if abs(q.x - 0.075) < thin(0.045 * (1 - k) + 0.006, voxel) && abs(p.z - 0.01) < thin(0.03, voxel) {
+            if k > 0.8 { return .Hide_Dark }
+            return p.z > 0.02 && k < 0.6 ? .Fur_Light : .Fur
         }
     }
-    if vm_round_box(p, {0, 0.05, 0.03}, {0.11, 0.1, 0.11}, 0.05) < 0 {
-        if p.z > 0.1 && abs(q.x - 0.06) < thin(0.02, voxel) && abs(p.y - 0.09) < thin(0.02, voxel) { return .Eye_Yellow }
-        if p.y < -0.02 && q.x > 0.07 { return .Fur_Light } // cheeks
+    // Muzzle: long and tapering, pale below, a black nose.
+    if p.z > 0.1 && p.z < 0.35 {
+        k := (p.z - 0.1) / 0.25
+        hw := 0.075 - 0.028 * k
+        top := 0.07 - 0.035 * k
+        if q.x < hw && p.y > -0.07 && p.y < top {
+            if p.z > 0.32 && p.y > 0.0 && q.x < 0.035 { return .Nose }
+            return p.y < -0.02 ? .Fur_Light : .Fur
+        }
+    }
+    if vm_round_box(p, {0, 0.05, 0.03}, {0.12, 0.1, 0.11}, 0.05) < 0 {
+        if p.z > 0.1 && abs(q.x - 0.065) < voxel * 0.55 && abs(p.y - 0.09) < voxel * 0.55 { return .Eye_Yellow } // a voxel each
+        if p.z > 0.08 && p.y > 0.11 && p.y < 0.14 { return .Hide_Dark } // the brow
+        if p.y < 0.02 && q.x > 0.07 { return .Fur_Light }              // the cheek ruff
         return .Fur
     }
     return .Empty
@@ -216,18 +235,23 @@ shape_wolf_head :: proc(p: [3]f32, voxel: f32) -> Pal {
 
 @(private="file")
 shape_wolf_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
-    if vm_capsule(p, {0, 0, 0}, {0, -0.47, 0.02}, 0.045) < 0 { return p.y < -0.4 ? .Fur_Dark : .Fur }
-    if vm_round_box(p, {0, -0.52, 0.04}, {0.045, 0.03, 0.06}, 0.02) < 0 { return .Fur_Dark } // paw
+    // Thick at the top, slender below; a dark paw.
+    t := clamp(-p.y / 0.5, 0, 1)
+    if vm_capsule(p, {0, 0, 0}, {0, -0.47, 0.02}, thin(0.065 - 0.03 * t, voxel)) < 0 { return p.y < -0.42 ? .Hide_Dark : (p.z > 0.03 && t > 0.4 ? .Fur_Light : .Fur) }
+    if vm_round_box(p, {0, -0.52, 0.04}, {0.05, 0.03, 0.065}, 0.02) < 0 { return .Hide_Dark }
     return .Empty
 }
 
 @(private="file")
 shape_wolf_tail :: proc(p: [3]f32, voxel: f32) -> Pal {
-    // Bushy, hanging down and back; the tip pale.
-    t := clamp(-p.z / 0.4, 0, 1)
-    c := [3]f32{0, -0.2 * t * t - 0.05 * t, -0.4 * t}
-    r := 0.04 + 0.04 * math.sin(t * math.PI)
-    if la.length(p - c) < r && p.z <= 0.02 { return t > 0.85 ? .Fur_Light : .Fur }
+    // Bushy, hanging down and back, dark along the top and at the tip.
+    t := clamp(-p.z / 0.42, 0, 1)
+    c := [3]f32{0, -0.2 * t * t - 0.05 * t, -0.42 * t}
+    r := 0.05 + 0.045 * math.sin(t * math.PI)
+    if la.length(p - c) < thin(r, voxel) && p.z <= 0.02 {
+        if t > 0.85 { return .Hide_Dark }
+        return p.y > c.y + r * 0.4 && fleck(p, voxel, 0.6) ? .Hide_Dark : .Fur
+    }
     return .Empty
 }
 
@@ -304,7 +328,7 @@ shape_deer_head :: proc(p: [3]f32, voxel: f32) -> Pal {
     if vm_capsule(p, {0, 0, 0}, {0, 0.38, 0.12}, 0.07) < 0 { return p.z > 0.09 && p.y > 0.16 && p.y < 0.32 ? .Fur_Light : .Fur } // a pale throat
     // Muzzle, tapering to a dark nose.
     if p.z > 0.24 && p.z < 0.36 && q.x < 0.05 - 0.015 * (p.z - 0.24) / 0.12 && p.y > 0.37 && p.y < 0.46 {
-        return p.z > 0.345 && p.y > 0.4 ? .Nose : .Fur
+        return p.z > 0.345 && p.y > 0.41 && q.x < 0.03 ? .Nose : .Fur
     }
     if vm_round_box(p, {0, 0.44, 0.18}, {0.06, 0.06, 0.08}, 0.03) < 0 {
         if p.z > 0.2 && abs(q.x - 0.06) < thin(0.016, voxel) && abs(p.y - 0.46) < thin(0.016, voxel) { return .Eye }
