@@ -537,7 +537,7 @@ head_face :: proc(p: [3]f32, voxel: f32, stubble: bool) -> Pal {
 // side of the middle (HEAD_F_LO): rows up and down from the eyes, columns
 // out from the middle. Eyes two rows tall (white, iris, white) under a line
 // of lashes that flicks out at the corner; a shaded lid, then brows that
-// arch down at their ends; a small nose; small lips, two voxels across.
+// arch down at their ends; a small nose; a mouth a row of lip, shaded under.
 @(private="file")
 head_face_fem :: proc(p: [3]f32, voxel: f32, stubble: bool) -> Pal {
     q := [3]f32{abs(p.x), p.y, p.z}
@@ -566,12 +566,8 @@ head_face_fem :: proc(p: [3]f32, voxel: f32, stubble: bool) -> Pal {
         case 0, -1:
             if col == 2 || col == 4 { return .Eye_White }
             if col == 3 { return .Eye }
-        case -4: if col == 0 { return .Skin_Shade } // under the nose
-        case -5:
-            if col == 0 { return .Lip }
-            if col == 1 { return .Skin_Shade } // the mouth's corners
-        case -6: if col == 0 { return .Lip }
-        case -7: if col == 0 { return .Skin_Shade } // under the lip
+        case -5: if col <= 1 { return .Lip }
+        case -6: if col == 0 { return .Skin_Shade } // under the lip
         }
     }
     if stubble && p.y < 0.168 && p.y > 0.06 && p.z > -0.02 && !(row <= -5 && row >= -6 && col <= 2) {
