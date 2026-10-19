@@ -235,6 +235,7 @@ Msg_Slime_View :: struct {
     pos, vel:  [3]f32,
     color:     [3]f32,
     yaw, squash, flash, freeze, bar, hp, age: f32,
+    level:     u8,
 }
 
 Msg_Enemy_View :: struct {
@@ -247,6 +248,7 @@ Msg_Enemy_View :: struct {
     pos, vel:  [3]f32,
     tint:      [3]f32,
     yaw, timer, flash, freeze, bar, hp, death, rising, walk_phase, speed, age: f32,
+    level:     u8,
 }
 
 NET_RELIABLE   :: u8(0)

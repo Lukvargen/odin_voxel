@@ -478,7 +478,7 @@ replicas_update :: proc(gs: ^Game_State, dt: f32) {
         rep.age += dt
         if rep.age > REPLICA_TIMEOUT || rep.count == 0 { sl.alive = false; continue }
         a, b, k, ahead := replica_at(rep, t)
-        sl.size, sl.state, sl.on_ground, sl.color, sl.hp, sl.freeze = a.size, a.state, a.on_ground, a.color, a.hp, a.freeze
+        sl.size, sl.state, sl.on_ground, sl.color, sl.hp, sl.freeze, sl.level = a.size, a.state, a.on_ground, a.color, a.hp, a.freeze, a.level
         sl.pos = replica_lerp_pos(a.pos, b.pos, k) + a.vel * ahead
         sl.vel = math.lerp(a.vel, b.vel, k)
         sl.yaw = replica_lerp_angle(a.yaw, b.yaw, k)
@@ -493,7 +493,7 @@ replicas_update :: proc(gs: ^Game_State, dt: f32) {
         rep.age += dt
         if rep.age > REPLICA_TIMEOUT || rep.count == 0 { e.alive = false; continue }
         a, b, k, ahead := replica_at(rep, t)
-        e.kind, e.state, e.swing, e.on_ground, e.tint, e.hp, e.freeze, e.speed = a.kind, a.state, a.swing, a.on_ground, a.tint, a.hp, a.freeze, a.speed
+        e.kind, e.state, e.swing, e.on_ground, e.tint, e.hp, e.freeze, e.speed, e.level = a.kind, a.state, a.swing, a.on_ground, a.tint, a.hp, a.freeze, a.speed, a.level
         e.pos = replica_lerp_pos(a.pos, b.pos, k) + a.vel * ahead
         e.vel = math.lerp(a.vel, b.vel, k)
         e.yaw = replica_lerp_angle(a.yaw, b.yaw, k)

@@ -49,9 +49,9 @@ Slime_Kind :: struct {
 }
 
 SLIME_KINDS := [Slime_Size]Slime_Kind{
-    .Small  = {width = 0.7, hp = 16, weight = 1,   damage = 6,  hop_speed = 6,   hop_up = 7.5, hop_every = {0.3, 0.55}, leap_range = 5,   windup = 0.38},
-    .Medium = {width = 1.2, hp = 40, weight = 1.4, damage = 11, hop_speed = 5.5, hop_up = 8,   hop_every = {0.45, 0.75}, leap_range = 6,  windup = 0.5},
-    .Big    = {width = 2.0, hp = 95, weight = 2.4, damage = 18, hop_speed = 5,   hop_up = 8.5, hop_every = {0.7, 1.0},  leap_range = 7.5, windup = 0.65},
+    .Small  = {width = 0.7, hp = 24, weight = 1,   damage = 8,  hop_speed = 6,   hop_up = 7.5, hop_every = {0.3, 0.55}, leap_range = 5,   windup = 0.38},
+    .Medium = {width = 1.2, hp = 60, weight = 1.4, damage = 14, hop_speed = 5.5, hop_up = 8,   hop_every = {0.45, 0.75}, leap_range = 6,  windup = 0.5},
+    .Big    = {width = 2.0, hp = 140, weight = 2.4, damage = 24, hop_speed = 5,   hop_up = 8.5, hop_every = {0.7, 1.0},  leap_range = 7.5, windup = 0.65},
 }
 
 // The old Cube World hues, a touch softer.
@@ -92,6 +92,7 @@ Slime :: struct {
     squash:     f32,    // squashed flat (> 0) or stretched (< 0), on a spring
     squash_vel: f32,
     bar:        f32,    // the health bar shows for a while after a hit
+    level:      u8,     // levels.odin: its health and blows scale with it
     freeze:     f32,    // stuck on the sword: held still, shuddering, then knocked away
     age:        f32,
     prey:       int,    // the player it hops after (sim.odin)
@@ -123,10 +124,10 @@ slime_spawn :: proc(s: ^Slimes, size: Slime_Size, pos, vel: [3]f32, color: [3]f3
         sl = {
             alive = true, size = size, pos = pos, vel = vel,
             yaw   = rand.float32_range(0, 2 * math.PI),
-            hp    = SLIME_KINDS[size].hp,
             timer = rand.float32_range(0.5, 2),
             color = color,
         }
+        slime_set_level(&sl, monster_level(pos)) // (a split's children take their parent's)
         s.last_uid += 1
         sl.uid = s.last_uid
         return &sl
@@ -216,7 +217,9 @@ slime_try_spawn :: proc(sim: ^Sim, feet: [3]f32) {
         if !ok { continue }
         roll := rand.float32()
         size := roll < 0.45 ? Slime_Size.Big : (roll < 0.85 ? .Medium : .Small)
-        slime_spawn(&sim.slimes, size, {x, f32(y) + 0.5 * world_scale, z}, {}, slime_color_for(terrain_at(ix, iz).biome))
+        if sl := slime_spawn(&sim.slimes, size, {x, f32(y) + 0.5 * world_scale, z}, {}, slime_color_for(terrain_at(ix, iz).biome)); sl != nil {
+            if sim.day.night > 0.5 { slime_set_level(sl, monster_level(sl.pos, 1)) } // tougher by night
+        }
         return
     }
 }
@@ -288,7 +291,7 @@ slime_think :: proc(sim: ^Sim, sl: ^Slime, dt: f32) {
             sl.state, sl.timer = .Chase, 0.9 // sitting a moment after: the opening
         } else if slime_touches_player(sl, p) {
             knock := [3]f32{dir.x * 9, 5, dir.y * 9} * world_scale
-            if r := player_hurt(sim, sl.prey, kind.damage, knock, slime_center(sl)); r != .Missed {
+            if r := player_hurt(sim, sl.prey, kind.damage * level_damage(sl.level), knock, slime_center(sl)); r != .Missed {
                 if r == .Parried { sl.state, sl.timer = .Stunned, 1.2; sl.vel = [3]f32{-dir.x * 7, 6, -dir.y * 7} * world_scale; sl.flash = 1; return }
                 sl.vel = [3]f32{-dir.x * 3, 4, -dir.y * 3} * world_scale
                 sl.state, sl.timer = .Chase, 1
@@ -414,6 +417,7 @@ slime_damage :: proc(sim: ^Sim, sl: ^Slime, damage: f32, knock: [3]f32, boosted:
         for side in ([2]f32{-1, 1}) {
             vel := knock * 0.4 + across * side * 4 + {0, 8, 0}
             if ch := slime_spawn(s, child, sl.pos + across * side * kind.width * 0.25, vel, sl.color); ch != nil {
+                slime_set_level(ch, sl.level)
                 ch.state, ch.timer = .Stunned, 0.6
                 ch.hit_id = sl.hit_id // not hit again by the swing that split it
                 ch.squash = -0.3

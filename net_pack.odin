@@ -41,6 +41,7 @@ Net_Slime :: struct #packed {
     color:     [3]f16,
     yaw, squash, flash, freeze, bar, hp: f16,
     age:       f32, // grows for good: kept whole
+    level:     u8,
 }
 
 Net_Enemy :: struct #packed {
@@ -55,6 +56,7 @@ Net_Enemy :: struct #packed {
     tint:      [3]f16,
     yaw, timer, flash, freeze, bar, hp, death, rising, speed: f16,
     walk_phase, age: f32, // grow for good: kept whole
+    level:     u8,
 }
 
 player_pack :: proc(p: Player) -> (n: Net_Player) {
@@ -128,7 +130,7 @@ slime_pack :: proc(index: int, sl: ^Slime, origin: [3]i32) -> Net_Slime {
         index = u8(index), size = sl.size, state = sl.state, on_ground = sl.on_ground, uid = sl.uid,
         pos = offset_pack(sl.pos, origin), vel = la.array_cast(sl.vel, f16), color = la.array_cast(sl.color, f16),
         yaw = f16(wrap_angle(sl.yaw, 2 * math.PI)), squash = f16(sl.squash), flash = f16(sl.flash),
-        freeze = f16(sl.freeze), bar = f16(sl.bar), hp = f16(sl.hp), age = sl.age,
+        freeze = f16(sl.freeze), bar = f16(sl.bar), hp = f16(sl.hp), age = sl.age, level = sl.level,
     }
 }
 
@@ -137,7 +139,7 @@ slime_unpack :: proc(n: Net_Slime, origin: [3]i32) -> Msg_Slime_View {
         index = n.index, size = n.size, state = n.state, on_ground = n.on_ground, uid = n.uid,
         pos = offset_unpack(n.pos, origin), vel = la.array_cast(n.vel, f32), color = la.array_cast(n.color, f32),
         yaw = f32(n.yaw), squash = f32(n.squash), flash = f32(n.flash), freeze = f32(n.freeze),
-        bar = f32(n.bar), hp = f32(n.hp), age = n.age,
+        bar = f32(n.bar), hp = f32(n.hp), age = n.age, level = n.level,
     }
 }
 
@@ -147,7 +149,7 @@ enemy_pack :: proc(index: int, e: ^Enemy, origin: [3]i32) -> Net_Enemy {
         pos = offset_pack(e.pos, origin), vel = la.array_cast(e.vel, f16), tint = la.array_cast(e.tint, f16),
         yaw = f16(wrap_angle(e.yaw, 2 * math.PI)), timer = f16(e.timer), flash = f16(e.flash), freeze = f16(e.freeze),
         bar = f16(e.bar), hp = f16(e.hp), death = f16(e.death), rising = f16(e.rising), speed = f16(e.speed),
-        walk_phase = e.walk_phase, age = e.age,
+        walk_phase = e.walk_phase, age = e.age, level = e.level,
     }
 }
 
@@ -157,7 +159,7 @@ enemy_unpack :: proc(n: Net_Enemy, origin: [3]i32) -> Msg_Enemy_View {
         pos = offset_unpack(n.pos, origin), vel = la.array_cast(n.vel, f32), tint = la.array_cast(n.tint, f32),
         yaw = f32(n.yaw), timer = f32(n.timer), flash = f32(n.flash), freeze = f32(n.freeze), bar = f32(n.bar),
         hp = f32(n.hp), death = f32(n.death), rising = f32(n.rising), speed = f32(n.speed),
-        walk_phase = n.walk_phase, age = n.age,
+        walk_phase = n.walk_phase, age = n.age, level = n.level,
     }
 }
 

@@ -62,13 +62,13 @@ Enemy_Spec :: struct {
 }
 
 ENEMY_SPECS := [Enemy_Kind]Enemy_Spec{
-    .Skeleton = {scale = 1.12, radius = 0.34, height = 2.0, hp = 30, damage = 10, walk = 1.5, run = 4.2, weight = 1,
+    .Skeleton = {scale = 1.12, radius = 0.34, height = 2.0, hp = 45, damage = 13, walk = 1.5, run = 4.2, weight = 1,
                  reach = 2.1, windup = 0.5,  strike = 0.16, recover = 0.55, aggro = 20, knock = {7, 4},
                  gore = {0.82, 0.78, 0.68}},
-    .Goblin   = {scale = 0.95, radius = 0.32, height = 1.7, hp = 22, damage = 7,  walk = 2.0, run = 5.2, weight = 0.8,
+    .Goblin   = {scale = 0.95, radius = 0.32, height = 1.7, hp = 32, damage = 9,  walk = 2.0, run = 5.2, weight = 0.8,
                  reach = 1.9, windup = 0.38, strike = 0.13, recover = 0.45, aggro = 18, knock = {6, 4},
                  gore = {0.40, 0.08, 0.06}},
-    .Orc      = {scale = 1.4,  radius = 0.5,  height = 2.55, hp = 85, damage = 22, walk = 1.4, run = 3.7, weight = 2.6,
+    .Orc      = {scale = 1.4,  radius = 0.5,  height = 2.55, hp = 130, damage = 28, walk = 1.4, run = 3.7, weight = 2.6,
                  reach = 2.7, windup = 0.8,  strike = 0.2,  recover = 0.85, aggro = 22, knock = {13, 6},
                  gore = {0.40, 0.08, 0.06}},
 }
@@ -122,6 +122,7 @@ Enemy :: struct {
     flash:      f32,
     freeze:     f32,    // stuck on the sword (hit stop)
     bar:        f32,    // health bar shows while > 0
+    level:      u8,     // levels.odin: its health and blows scale with it
     age:        f32,
     walk_phase: f32,
     speed:      f32,    // smoothed ground speed (drives the gait)
@@ -181,9 +182,10 @@ enemy_spawn :: proc(sim: ^Sim, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
         tint := enemy_skin(kind, rand.float32())
         e = {
             alive = true, kind = kind, state = .Idle, pos = pos, home = pos, target = pos,
-            yaw = rand.float32_range(0, 2 * math.PI), hp = ENEMY_SPECS[kind].hp,
+            yaw = rand.float32_range(0, 2 * math.PI),
             timer = rand.float32_range(0.5, 3), tint = tint, walk_phase = rand.float32_range(0, 6),
         }
+        enemy_set_level(&e, monster_level(pos))
         s.last_uid += 1
         e.uid = s.last_uid
         return &e
@@ -387,7 +389,7 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
            la.dot(dir, fwd) > (e.swing == .Slash ? -0.1 : 0.45) {
             e.struck = true
             knock := [3]f32{dir.x * sp.knock[0], sp.knock[1], dir.y * sp.knock[0]}
-            switch player_hurt(sim, e.prey, sp.damage, knock, enemy_center(e)) {
+            switch player_hurt(sim, e.prey, sp.damage * level_damage(e.level), knock, enemy_center(e)) {
             case .Hit:
                 sim_emit(sim, {kind = .Enemy_Struck, enemy = e.kind, pos = feet + {0, world_scale, 0}})
             case .Blocked:
@@ -587,6 +589,7 @@ enemy_try_spawn :: proc(sim: ^Sim, feet: [3]f32, night: f32) -> bool {
             if !ok2 { continue }
             e := enemy_spawn(sim, i == 0 ? kind : (kind == .Orc ? .Goblin : kind), {f32(px) + 0.5, f32(py), f32(pz) + 0.5})
             if e == nil { return true }
+            if night > 0.5 { enemy_set_level(e, monster_level(e.pos, 1)) } // tougher by night
             if kind == .Skeleton && night > 0.6 {
                 e.nocturnal = true
                 e.rising = 1 // claws up out of the ground
@@ -656,6 +659,7 @@ site_spawn :: proc(sim: ^Sim, lm: Landmark, key: [2]int, night: f32) -> int {
             e := enemy_spawn(sim, kinds[i], {f32(x) + 0.5, f32(y), f32(z) + 0.5})
             if e == nil { return placed }
             e.guard, e.site = true, key
+            enemy_set_level(e, monster_level(e.pos, 2)) // a landmark's guards are the tougher ones
             placed += 1
             break
         }

@@ -45,9 +45,9 @@ SLOWMO_SCALE       :: f32(0.3) // the world's speed at the start of a slow-down.
 SLOWMO_HEAVY       :: f32(0.14) // ...lasting this long after a heavy hit...
 SLOWMO_KILL        :: f32(0.22) // ...or a kill
 
-PLAYER_MAX_HP      :: f32(100)
-REGEN_DELAY        :: f32(4)    // seconds after being hurt before health comes back...
-REGEN_RATE         :: f32(10)   // ...at this many points a second
+PLAYER_MAX_HP      :: f32(70)
+REGEN_DELAY        :: f32(6)    // seconds after being hurt before health comes back...
+REGEN_RATE         :: f32(4)    // ...at this many points a second
 HURT_INVULN        :: f32(0.5)
 
 COMBO_TIMEOUT      :: f32(2.5)  // the counter resets this long after the last hit

@@ -1025,6 +1025,49 @@ weapon_slots :: proc(gs: ^Game_State, clickable: bool) {
     }
 }
 
+// A monster's level over it (at `over`, world) while it's near, its health
+// beside that while `bar` > 0 (after a hit). The level's colour says how
+// tough it is: pale, then amber, then red.
+@(private="file")
+monster_tag :: proc(gs: ^Game_State, id: clay.ElementId, over: [3]f32, frac: f32, level: u8, bar: f32, w, h: f32) {
+    TAG_RANGE :: f32(28) // voxels
+    cam := gs.camera
+    eye := camera_view_eye(cam)
+    d := over - eye
+    dist := la.length(d)
+    if dist > TAG_RANGE && bar <= 0 { return }
+    x, y, ok := glider_project(cam, d, w, h)
+    if !ok { return }
+    a := max(clamp((TAG_RANGE - dist) / 6, 0, 1), clamp(bar * 2, 0, 1))
+    if a <= 0 { return }
+    col := level >= 8 ? COLOR_BAD : (level >= 4 ? COLOR_ACCENT : COLOR_TEXT)
+    BW :: f32(54)
+    if clay.UI(id)({
+        layout = {childGap = 4, childAlignment = {y = .Center}},
+        floating = {attachTo = .Root, offset = {x, y}, zIndex = 6, attachment = {.CenterCenter, .LeftTop}, pointerCaptureMode = .Passthrough},
+    }) {
+        if clay.UI()({
+            layout = {padding = {4, 4, 1, 2}},
+            backgroundColor = fade({COLOR_SHADE.r, COLOR_SHADE.g, COLOR_SHADE.b, 170}, a),
+            cornerRadius = clay.CornerRadiusAll(3),
+        }) {
+            text(fmt.tprintf("%d", level), fade(col, a), 11, FONT_ID_TITLE)
+        }
+        if bar > 0 {
+            ba := clamp(bar * 2, 0, 1)
+            if clay.UI()({
+                layout = {sizing = {clay.SizingFixed(BW), clay.SizingFixed(6)}, padding = {1, 1, 1, 1}},
+                backgroundColor = fade({COLOR_SHADE.r, COLOR_SHADE.g, COLOR_SHADE.b, 200}, ba),
+            }) {
+                if clay.UI()({
+                    layout = {sizing = {clay.SizingFixed((BW - 2) * clamp(frac, 0, 1)), clay.SizingGrow({})}},
+                    backgroundColor = fade({214, 72, 56, 255}, ba),
+                }) {}
+            }
+        }
+    }
+}
+
 // Health, only while hurt: a thin bar over where the hotbar sits.
 @(private="file")
 health_bar :: proc(gs: ^Game_State, w, h: f32) {
@@ -1077,25 +1120,16 @@ combat_hud_layout :: proc(gs: ^Game_State, w, h: f32) {
     health_bar(gs, w, h)
     if gs.survival { mana_bar(gs) }
 
-    // A thin health bar over an enemy for a while after it's hit.
+    // Over a monster near enough to size up, its level; once it's hit, a
+    // thin health bar beside it for a while (levels.odin).
     for &en, i in gs.enemies.list {
-        if !en.alive || en.bar <= 0 || en.state == .Dead { continue }
+        if !en.alive || en.state == .Dead { continue }
         sp := ENEMY_SPECS[en.kind]
-        x, y, ok := glider_project(cam, en.pos + {0, sp.height + 0.35, 0} - eye, w, h)
-        if !ok { continue }
-        a := clamp(en.bar * 2, 0, 1)
-        BW :: f32(54)
-        frac := clamp(en.hp / sp.hp, 0, 1)
-        if clay.UI(clay.ID("EnBar", u32(i)))({
-            layout = {sizing = {clay.SizingFixed(BW), clay.SizingFixed(6)}, padding = {1, 1, 1, 1}},
-            floating = {attachTo = .Root, offset = {x - BW / 2, y}, zIndex = 6, attachment = {.LeftTop, .LeftTop}, pointerCaptureMode = .Passthrough},
-            backgroundColor = fade({COLOR_SHADE.r, COLOR_SHADE.g, COLOR_SHADE.b, 200}, a),
-        }) {
-            if clay.UI()({
-                layout = {sizing = {clay.SizingFixed((BW - 2) * frac), clay.SizingGrow({})}},
-                backgroundColor = fade({214, 72, 56, 255}, a),
-            }) {}
-        }
+        monster_tag(gs, clay.ID("EnBar", u32(i)), en.pos + {0, sp.height + 0.35, 0}, en.hp / enemy_max_hp(&en), en.level, en.bar, w, h)
+    }
+    for &sl, i in gs.slimes.list {
+        if !sl.alive { continue }
+        monster_tag(gs, clay.ID("SlBar", u32(i)), sl.pos + {0, SLIME_KINDS[sl.size].width * 0.9 + 0.3, 0}, sl.hp / slime_max_hp(&sl), sl.level, sl.bar, w, h)
     }
 
     for n, i in fx.numbers {

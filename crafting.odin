@@ -21,7 +21,7 @@ Weapon_Info :: struct {
 
 WEAPONS := [Weapon]Weapon_Info{
     .None         = {name = "Fists"},
-    .Wooden_Sword = {name = "Wooden sword", model = .Wood_Sword,  damage = 0.55, reach = 0.9},
+    .Wooden_Sword = {name = "Wooden sword", model = .Wood_Sword,  damage = 0.6,  reach = 0.9},
     .Stone_Sword  = {name = "Stone sword",  model = .Stone_Sword, damage = 0.8,  reach = 0.95},
     .Steel_Sword  = {name = "Steel sword",  model = .Sword,       damage = 1,    reach = 1},
 }
