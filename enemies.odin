@@ -19,6 +19,9 @@ import la "core:math/linalg"
 //    most by night. They circle out of reach, each its own way round, and
 //    dart in one at a time with a leaping bite, then off again: keep them
 //    in front of you.
+//  - Wildlife (beasts.odin), kept about a player apart from the hostile
+//    ones: deer bolt when they notice you; boars root about and leave you
+//    be until struck, then paw the ground and charge.
 //
 // Each is a box swept through the world like the slimes (stepping up single
 // blocks, jumping higher ones), drawn as rigid voxel-model parts on a shared
@@ -45,13 +48,19 @@ SITE_NOTICE      :: f32(80)  // a site's guards appear when the player is this c
 SITE_RESPAWN     :: f32(600) // seconds before a cleared site fills again
 GUARD_LEASH      :: f32(20)  // guards give up a chase this far from home
 
-Enemy_Kind :: enum u8 { Skeleton, Goblin, Orc, Wolf }
+Enemy_Kind :: enum u8 { Skeleton, Goblin, Orc, Wolf, Boar, Deer }
 
 // How it's built: a humanoid on Enemy_Rig, or a beast on four legs (beasts.odin).
 Body :: enum u8 { Humanoid, Beast }
 
+// How it takes to a player: hunts them; leaves them be until struck (then
+// for a while it's out for them: Enemy.angry); or runs from them.
+Temper :: enum u8 { Hostile, Defensive, Timid }
+
 Enemy_Spec :: struct {
     body:     Body,
+    temper:   Temper,
+    leaps:    bool, // a beast's strike: a leap at you (else a charge, along the ground)
     scale:    f32, // of the rig (1 = the player's size)
     radius:   f32, // collision half width
     height:   f32,
@@ -81,8 +90,16 @@ ENEMY_SPECS := [Enemy_Kind]Enemy_Spec{
                  reach = 2.7, windup = 0.8,  strike = 0.2,  recover = 0.85, aggro = 22, knock = {13, 6},
                  gore = {0.40, 0.08, 0.06}},
     // Strike: the leap, jaws first (wolf_leap); recover: darting off.
-    .Wolf     = {body = .Beast, scale = 1, radius = 0.4, height = 0.95, hp = 38, poise = 12, damage = 11, walk = 1.6, run = 6.5, weight = 0.9,
+    .Wolf     = {body = .Beast, leaps = true, scale = 1, radius = 0.4, height = 0.95, hp = 38, poise = 12, damage = 11, walk = 1.6, run = 6.5, weight = 0.9,
                  reach = 2.4, windup = 0.4, strike = 0.35, recover = 0.7, aggro = 28, knock = {5, 3},
+                 gore = {0.40, 0.08, 0.06}},
+    // Struck, it paws the ground (windup) and charges from reach away (strike).
+    .Boar     = {body = .Beast, temper = .Defensive, scale = 1, radius = 0.5, height = 1.0, hp = 70, poise = 30, damage = 16, walk = 1.1, run = 6, weight = 2.2,
+                 reach = 6.5, windup = 0.75, strike = 0.9, recover = 1.0, aggro = 14, knock = {12, 5},
+                 gore = {0.40, 0.08, 0.06}},
+    // Never fights: aggro is how near it lets you come.
+    .Deer     = {body = .Beast, temper = .Timid, scale = 1, radius = 0.4, height = 1.7, hp = 30, poise = 6, damage = 0, walk = 1.3, run = 8, weight = 1.1,
+                 reach = 0, windup = 0.2, strike = 0.2, recover = 0.2, aggro = 20, knock = {0, 0},
                  gore = {0.40, 0.08, 0.06}},
 }
 
@@ -142,6 +159,7 @@ Enemy :: struct {
     poise:      f32,    // left before it staggers (back to full a while after the last blow)
     circle:     f32,    // a wolf: seconds more circling before it goes in
     flank:      f32,    // ...which way round it goes (+1, -1)
+    angry:      f32,    // Defensive: struck, it's after the one who did it this much longer
     poise_t:    f32,    // since the last blow
     open:       f32,    // parried: reeling this much longer, and a blow now is a riposte (server_hit)
     age:        f32,
@@ -181,6 +199,7 @@ Enemies :: struct {
     list:        [MAX_ENEMIES]Enemy,
     spawn_timer: f32,
     site_timer:  f32,
+    wild_timer:  f32, // until the next look for a place to put wildlife
     time:        f32,
     last_uid:    u32,
     landmarks:   map[[2]int]Landmark, // cell -> its landmark (cached)
@@ -224,6 +243,8 @@ enemy_skin :: proc(kind: Enemy_Kind, k: f32) -> [3]f32 {
     case .Goblin: return la.lerp([3]f32{0.42, 0.56, 0.26}, [3]f32{0.52, 0.56, 0.30}, k)
     case .Orc:    return la.lerp([3]f32{0.36, 0.44, 0.32}, [3]f32{0.50, 0.46, 0.34}, k)
     case .Wolf:   return la.lerp([3]f32{0.42, 0.42, 0.44}, [3]f32{0.62, 0.58, 0.52}, k) // grey to sandy
+    case .Boar:   return la.lerp([3]f32{0.20, 0.15, 0.11}, [3]f32{0.30, 0.22, 0.15}, k)
+    case .Deer:   return la.lerp([3]f32{0.58, 0.38, 0.22}, [3]f32{0.70, 0.50, 0.30}, k)
     }
     return {1, 1, 1}
 }
@@ -248,25 +269,30 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
         }
     }
 
-    // Each player on foot keeps a roaming population about them, and wakes
-    // the guards of the landmarks they come near.
+    // Each player on foot keeps a roaming population about them (and
+    // wildlife, apart), and wakes the guards of the landmarks they come near.
     if sim.monsters {
         s.spawn_timer -= dt
         s.site_timer -= dt
-        spawn, sites := s.spawn_timer <= 0, s.site_timer <= 0
+        s.wild_timer -= dt
+        spawn, sites, wild := s.spawn_timer <= 0, s.site_timer <= 0, s.wild_timer <= 0
         if spawn { s.spawn_timer = ROAM_CHECK }
         if sites { s.site_timer = 1 }
+        if wild { s.wild_timer = ROAM_CHECK }
         for &p in sim.players {
             if !player_hunted(&p) || p.fly_mode { continue }
             feet := player_feet(&p)
             if spawn {
                 roaming := 0
                 for &e in s.list {
-                    if e.alive && !e.guard && la.length((e.pos - feet).xz) < ENEMY_DESPAWN { roaming += 1 }
+                    if e.alive && !e.guard && ENEMY_SPECS[e.kind].temper == .Hostile && la.length((e.pos - feet).xz) < ENEMY_DESPAWN { roaming += 1 }
                 }
                 if want := ROAM_DAY + int(math.round(f32(ROAM_NIGHT - ROAM_DAY) * night)); roaming < want {
                     if enemy_try_spawn(sim, feet, night) { s.spawn_timer = rand.float32_range(ROAM_GAP_MIN, ROAM_GAP_MAX) }
                 }
+            }
+            if wild {
+                if wildlife_try_spawn(sim, feet, night) { s.wild_timer = rand.float32_range(ROAM_GAP_MIN, ROAM_GAP_MAX) }
             }
             if sites { sites_update(sim, feet) }
         }
@@ -280,6 +306,7 @@ enemies_update :: proc(sim: ^Sim, dt: f32) {
         e.bar = max(e.bar - dt, 0)
         if e.freeze > 0 { e.freeze -= dt; continue }
         e.open = max(e.open - dt, 0)
+        e.angry = max(e.angry - dt, 0)
         e.poise_t += dt
         if e.poise_t > POISE_RESET { e.poise = ENEMY_SPECS[e.kind].poise }
         e.age += dt
@@ -348,7 +375,14 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
     switch e.state {
     case .Idle, .Wander:
         if e.rising > 0 { break }
-        if hunting && abs(to_player.y) < 8 * world_scale && ((e.sees && dist < sight) || dist < hear) {
+        notice := hunting && abs(to_player.y) < 8 * world_scale && ((e.sees && dist < sight) || dist < hear)
+        if sp.temper == .Defensive && e.angry <= 0 { notice = false } // minds its own business
+        if notice && sp.temper == .Timid {
+            e.state, e.timer = .Chase, rand.float32_range(4, 7) // off: Chase is its flight
+            enemy_voice(sim, e, 0.5)
+            break
+        }
+        if notice {
             e.state, e.timer = .Chase, 0
             e.last_seen, e.seen_ago = feet, 0
             e.repath = 0
@@ -382,9 +416,18 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
             }
         }
     case .Chase:
+        if sp.temper == .Timid {
+            // Away from them as fast as it can, until well clear.
+            away := la.normalize0(-dir + [2]f32{-dir.y, dir.x} * 0.3 * math.sin(e.age))
+            turn_towards(&e.yaw, away, dt * 8)
+            want_speed, accel = sp.run, away
+            if e.timer <= 0 && dist > sp.aggro * 1.6 { e.state, e.timer = .Idle, rand.float32_range(2, 5) }
+            break
+        }
         // Keep track of where the player is, or was last seen.
         if e.sees || dist < 2.5 * world_scale { e.last_seen, e.seen_ago = feet, 0 } else { e.seen_ago += dt }
         lost := e.seen_ago > 5 || dist > sp.aggro * 1.8 || !hunting || (e.guard && la.length((e.pos - e.home).xz) > GUARD_LEASH * world_scale && dist > 4 * world_scale)
+        if sp.temper == .Defensive { lost = e.angry <= 0 || dist > sp.aggro * 3 } // it forgets, in time
         if lost {
             e.state, e.timer = .Wander, 6
             e.target = e.guard ? e.home : e.last_seen
@@ -420,7 +463,7 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
         if e.timer <= 0 {
             e.state, e.timer = .Strike, sp.strike
             sim_emit(sim, {kind = .Enemy_Swing, enemy = e.kind, pos = enemy_center(e)})
-            if sp.body == .Beast {
+            if sp.leaps {
                 // The leap: off the ground at you, jaws first.
                 fwd := [2]f32{-math.sin(e.yaw), math.cos(e.yaw)}
                 e.vel = {fwd.x * sp.run * 1.4, 4.5 * world_scale, fwd.y * sp.run * 1.4}
@@ -570,6 +613,11 @@ enemy_damage :: proc(sim: ^Sim, e: ^Enemy, damage: f32, knock: [3]f32, boosted: 
     e.bar = 4
     e.poise -= poise
     e.poise_t = 0
+    #partial switch sp.temper {
+    case .Defensive: e.angry = 18 // now it's after you
+    case .Timid:
+        if e.state != .Dead && e.hp > damage { e.state, e.timer = .Chase, rand.float32_range(5, 8) } // and off it bolts
+    }
     staggered = e.poise <= 0 || e.state == .Stagger
     k: f32 = staggered ? 1 : 0.15 // holding its ground: only a shove
     e.vel = knock * k / sp.weight
@@ -634,6 +682,51 @@ roamer_for :: proc(b: Biome, night: f32) -> (kind: Enemy_Kind, pack: int, ok: bo
     case .Taiga, .Snowy, .Mountains, .Peaks: return .Skeleton, 1 + rand.int_max(2), true
     }
     return .Goblin, 0, false
+}
+
+// Wildlife kept about a player, by day and (fewer) by night.
+WILD_DAY   :: 5
+WILD_NIGHT :: 2
+
+// What grazes or roots in biome b: a herd or a sounder; ok false: nothing.
+@(private="file")
+wildlife_for :: proc(b: Biome) -> (kind: Enemy_Kind, herd: int, ok: bool) {
+    #partial switch b {
+    case .Plains, .Savanna:  return rand.float32() < 0.6 ? .Deer : .Boar, 2 + rand.int_max(2), true
+    case .Forest:            return rand.float32() < 0.5 ? .Deer : .Boar, 1 + rand.int_max(3), true
+    case .Taiga, .Snowy:     return .Deer, 2 + rand.int_max(2), true
+    }
+    return .Deer, 0, false
+}
+
+// Some wildlife out from the player, if it's short of it; whether any came.
+@(private="file")
+wildlife_try_spawn :: proc(sim: ^Sim, feet: [3]f32, night: f32) -> bool {
+    have := 0
+    for &e in sim.enemies.list {
+        if e.alive && ENEMY_SPECS[e.kind].temper != .Hostile && la.length((e.pos - feet).xz) < ENEMY_DESPAWN { have += 1 }
+    }
+    if have >= WILD_DAY + int(math.round(f32(WILD_NIGHT - WILD_DAY) * night)) { return false }
+    for _ in 0 ..< 8 {
+        a := rand.float32_range(0, 2 * math.PI)
+        r := rand.float32_range(ROAM_SPAWN_NEAR, ROAM_SPAWN_FAR) * world_scale
+        x := int(math.floor(feet.x + math.cos(a) * r))
+        z := int(math.floor(feet.z + math.sin(a) * r))
+        g := surface_height_at(x, z)
+        if g <= SEA_LEVEL { continue }
+        y, ok := stand_y(sim, x, z, g + 2)
+        if !ok { continue }
+        kind, herd, any := wildlife_for(terrain_at(x, z).biome)
+        if !any { return false }
+        for _ in 0 ..< herd {
+            px, pz := x + rand.int_max(7) - 3, z + rand.int_max(7) - 3
+            py, ok2 := stand_y(sim, px, pz, y + 3)
+            if !ok2 { continue }
+            if enemy_spawn(sim, kind, {f32(px) + 0.5, f32(py), f32(pz) + 0.5}) == nil { return true }
+        }
+        return true
+    }
+    return false
 }
 
 // A pack somewhere out from the player (not where it's calm); whether one came.

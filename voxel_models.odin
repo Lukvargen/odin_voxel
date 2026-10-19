@@ -47,6 +47,8 @@ Model_Id :: enum u32 {
     Club, Old_Sword, Axe, // grip at the origin, along +z
     // beasts.odin: bodies pivot at their middle, heads at the neck, legs at the hip
     Wolf_Body, Wolf_Head, Wolf_Leg, Wolf_Tail,
+    Boar_Body, Boar_Head, Boar_Leg, Boar_Tail,
+    Deer_Body, Deer_Head, Deer_Leg, Deer_Tail,
     // sea.odin
     Fish_Body, Fish_Body_Striped, Fish_Tail,
     // magic.odin, felling.odin
@@ -96,6 +98,7 @@ Pal :: enum u8 {
     Bone, Bone_Shadow, Eye_Glow, Hide, Hide_Dark, Leather, Leather_Dark,
     Tusk, Iron, Rust, Wood, Wood_Dark, Cloth, Eye_Yellow, Eye_Red,
     Wood_Light, Flint, Flint_Edge, // the made swords' blades (combat.odin)
+    Antler,                        // beasts.odin
     Fish_Scale, Fish_Belly, Fish_Fin, Fish_Stripe,
     Magic,               // glows in the part's tint (sparks, motes)
     Block, Block_Glow,   // the part's block, textured (ent_texture); glowing a little (motes)
@@ -163,6 +166,7 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Wood_Light:    return {170, 126, 78}, 0
     case .Flint:         return {112, 114, 118}, 0
     case .Flint_Edge:    return {158, 160, 164}, 0
+    case .Antler:        return {206, 184, 146}, 0
     case .Cloth:         return {128, 38, 30}, 0
     case .Eye_Yellow:    return {232, 204, 70}, 0
     case .Eye_Red:       return {196, 40, 28}, PAL_EMIT

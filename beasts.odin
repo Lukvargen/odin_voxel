@@ -8,7 +8,8 @@ import la "core:math/linalg"
 // poise), but are drawn on a beast's rig: a body, a head on its neck, four
 // legs that trot (diagonal pairs together) or gallop (front and back
 // pairs), and a tail. Each kind's own way of going about it is in
-// enemy_think (wolves circle and dart in; see their spec).
+// enemy_think (wolves circle and dart in, boars charge, deer bolt: see their
+// specs).
 //
 // Shapes are in metres, facing +z, posed at the spec's scale.
 
@@ -24,6 +25,12 @@ BEAST_RIGS := #partial [Enemy_Kind]Beast_Rig{
     .Wolf = {body = .Wolf_Body, head = .Wolf_Head, leg = .Wolf_Leg, tail = .Wolf_Tail, body_y = 0.6,
         legs = {{0.11, -0.04, 0.3}, {-0.11, -0.04, 0.3}, {0.11, -0.04, -0.3}, {-0.11, -0.04, -0.3}},
         head_at = {0, 0.12, 0.42}, tail_at = {0, 0.1, -0.42}, gallop = true},
+    .Boar = {body = .Boar_Body, head = .Boar_Head, leg = .Boar_Leg, tail = .Boar_Tail, body_y = 0.48,
+        legs = {{0.14, -0.1, 0.27}, {-0.14, -0.1, 0.27}, {0.14, -0.1, -0.28}, {-0.14, -0.1, -0.28}},
+        head_at = {0, 0.04, 0.42}, tail_at = {0, 0.12, -0.46}, gallop = true},
+    .Deer = {body = .Deer_Body, head = .Deer_Head, leg = .Deer_Leg, tail = .Deer_Tail, body_y = 0.95,
+        legs = {{0.1, -0.06, 0.3}, {-0.1, -0.06, 0.3}, {0.1, -0.06, -0.32}, {-0.1, -0.06, -0.32}},
+        head_at = {0, 0.1, 0.4}, tail_at = {0, 0.12, -0.45}, gallop = true},
 }
 
 // One beast, posed from its state; also the sandbox's.
@@ -43,13 +50,21 @@ beast_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
     switch e.state {
     case .Idle:
         head_yaw = 0.5 * math.sin(e.age * 0.7 + ph)
+        // Grazing (deer) and rooting (boars): the head goes down now and then.
+        if e.kind != .Wolf {
+            graze := math.smoothstep(f32(0.2), f32(0.6), math.sin(e.age * 0.45 + ph * 0.1))
+            head_pitch, head_yaw = (e.kind == .Deer ? 1.1 : 0.5) * graze, head_yaw * (1 - graze)
+        }
     case .Wander, .Chase:
     case .Windup:
-        // Low, coiled: the tell before the spring.
+        // Low, coiled: the tell before the spring (a boar's head down,
+        // pawing the ground).
         k := 1 - max(e.timer, 0) / max(sp.windup, 0.01)
         crouch, head_pitch, tail_lift = k, 0.25 * k, -0.3 * k
+        if !sp.leaps { crouch, head_pitch, ph = 0.3 * k, 0.45 * k, e.age * 14 }
     case .Strike:
         pitch, head_pitch = -0.22, -0.3 // flying at you, jaws first
+        if !sp.leaps { pitch, head_pitch, amp = 0.05, 0.4, 1.2 } // head down, tusks first
     case .Recover:
     case .Stagger:
         pitch, head_pitch = 0.15, -0.4
@@ -142,10 +157,113 @@ shape_wolf_tail :: proc(p: [3]f32, voxel: f32) -> Pal {
     return .Empty
 }
 
+// ─── Boar ───────────────────────────────────────────────────────────────────
+// Dark bristly hide (the tint), a hump at the shoulders with a crest of
+// bristles, a long snout, tusks.
+
+@(private="file")
+shape_boar_body :: proc(p: [3]f32, voxel: f32) -> Pal {
+    trunk := vm_round_box(p, {0, 0, -0.04}, {0.2, 0.2, 0.4}, 0.12)
+    hump := la.length((p - {0, 0.08, 0.2}) / [3]f32{1, 0.95, 1.1}) - 0.25
+    if min(trunk, hump) > 0 { return .Empty }
+    if p.y > 0.24 && abs(p.x) < 0.05 { return .Hide_Dark } // the crest
+    if p.y < -0.17 { return .Hide_Dark }
+    return .Hide
+}
+
+@(private="file")
+shape_boar_head :: proc(p: [3]f32, voxel: f32) -> Pal {
+    q := [3]f32{abs(p.x), p.y, p.z}
+    // Tusks: curving up and out from the snout's sides.
+    if la.length(q - {0.075, -0.02, 0.27}) < 0.022 || la.length(q - {0.09, 0.02, 0.27}) < 0.018 { return .Tusk }
+    // Ears: small, up and back.
+    if q.y > 0.1 && q.y < 0.2 && abs(q.x - 0.1) < 0.04 * (1 - (q.y - 0.1) / 0.1) + 0.01 && abs(p.z + 0.02) < 0.025 { return .Hide_Dark }
+    // Snout: a long box with a flat, dark disc at the end.
+    if p.z > 0.12 && p.z < 0.36 && q.x < 0.075 && p.y > -0.1 && p.y < 0.04 + 0.04 * (0.36 - p.z) / 0.24 {
+        return p.z > 0.345 && q.x < 0.045 && p.y > -0.07 && p.y < 0.01 ? .Nose : .Hide
+    }
+    if vm_round_box(p, {0, 0, 0.06}, {0.13, 0.13, 0.12}, 0.05) < 0 {
+        if p.z > 0.12 && abs(q.x - 0.09) < 0.018 && abs(p.y - 0.06) < 0.018 { return .Eye }
+        return .Hide
+    }
+    return .Empty
+}
+
+@(private="file")
+shape_boar_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
+    if vm_capsule(p, {0, 0, 0}, {0, -0.3, 0.01}, 0.055) < 0 { return .Hide }
+    if vm_round_box(p, {0, -0.35, 0.02}, {0.045, 0.035, 0.05}, 0.015) < 0 { return .Fur_Dark } // hoof
+    return .Empty
+}
+
+@(private="file")
+shape_boar_tail :: proc(p: [3]f32, voxel: f32) -> Pal {
+    if vm_capsule(p, {0, 0, 0}, {0, -0.12, -0.05}, 0.018) < 0 { return .Hide }
+    if la.length(p - {0, -0.14, -0.06}) < 0.035 { return .Hide_Dark } // the tuft
+    return .Empty
+}
+
+// ─── Deer ───────────────────────────────────────────────────────────────────
+// Tawny (the tint), pale belly and rump, a long neck, antlers.
+
+@(private="file")
+shape_deer_body :: proc(p: [3]f32, voxel: f32) -> Pal {
+    trunk := vm_round_box(p, {0, 0, -0.02}, {0.14, 0.15, 0.4}, 0.1)
+    chest := la.length(p - {0, 0.02, 0.24}) - 0.19
+    if min(trunk, chest) > 0 { return .Empty }
+    if p.y < -0.13 { return .Fur_Light }
+    if p.z < -0.38 && p.y > -0.06 { return .Fur_Light } // the rump patch
+    return .Fur
+}
+
+@(private="file")
+shape_deer_head :: proc(p: [3]f32, voxel: f32) -> Pal {
+    q := [3]f32{abs(p.x), p.y, p.z}
+    // Antlers: a beam each side, up and back, with tines.
+    beam := vm_capsule(q, {0.04, 0.5, 0.16}, {0.13, 0.82, 0.06}, 0.017)
+    tine1 := vm_capsule(q, {0.07, 0.62, 0.12}, {0.09, 0.74, 0.22}, 0.013)
+    tine2 := vm_capsule(q, {0.11, 0.74, 0.08}, {0.2, 0.86, 0.12}, 0.013)
+    if min(beam, tine1, tine2) < 0 { return .Antler }
+    // Ears: out to the sides.
+    if vm_round_box(q, {0.12, 0.5, 0.12}, {0.05, 0.022, 0.015}, 0.01) < 0 { return .Fur }
+    // Neck, rising from the shoulders.
+    if vm_capsule(p, {0, 0, 0}, {0, 0.38, 0.12}, 0.07) < 0 { return p.z > 0.09 && p.y > 0.16 && p.y < 0.32 ? .Fur_Light : .Fur } // a pale throat
+    // Muzzle, tapering to a dark nose.
+    if p.z > 0.24 && p.z < 0.36 && q.x < 0.05 - 0.015 * (p.z - 0.24) / 0.12 && p.y > 0.37 && p.y < 0.46 {
+        return p.z > 0.345 && p.y > 0.4 ? .Nose : .Fur
+    }
+    if vm_round_box(p, {0, 0.44, 0.18}, {0.06, 0.06, 0.08}, 0.03) < 0 {
+        if p.z > 0.2 && abs(q.x - 0.06) < 0.016 && abs(p.y - 0.46) < 0.016 { return .Eye }
+        return .Fur
+    }
+    return .Empty
+}
+
+@(private="file")
+shape_deer_leg :: proc(p: [3]f32, voxel: f32) -> Pal {
+    if vm_capsule(p, {0, 0, 0}, {0, -0.78, 0.01}, 0.032) < 0 { return p.y < -0.74 ? .Fur_Dark : .Fur }
+    if vm_round_box(p, {0, -0.84, 0.02}, {0.03, 0.03, 0.04}, 0.01) < 0 { return .Fur_Dark } // hoof
+    return .Empty
+}
+
+@(private="file")
+shape_deer_tail :: proc(p: [3]f32, voxel: f32) -> Pal {
+    if vm_round_box(p, {0, -0.04, -0.02}, {0.035, 0.06, 0.02}, 0.015) < 0 { return .Fur_Light }
+    return .Empty
+}
+
 beasts_models_bake :: proc() {
     V :: 1.0 / 32
     ent_models[.Wolf_Body] = model_bake({-0.24, -0.26, -0.5}, {0.24, 0.26, 0.5}, V, shape_wolf_body)
     ent_models[.Wolf_Head] = model_bake({-0.16, -0.1, -0.1}, {0.16, 0.28, 0.36}, V, shape_wolf_head)
     ent_models[.Wolf_Leg]  = model_bake({-0.07, -0.57, -0.06}, {0.07, 0.05, 0.12}, V, shape_wolf_leg)
     ent_models[.Wolf_Tail] = model_bake({-0.1, -0.35, -0.48}, {0.1, 0.1, 0.04}, V, shape_wolf_tail)
+    ent_models[.Boar_Body] = model_bake({-0.34, -0.34, -0.58}, {0.34, 0.36, 0.5}, V, shape_boar_body)
+    ent_models[.Boar_Head] = model_bake({-0.2, -0.14, -0.1}, {0.2, 0.22, 0.38}, V, shape_boar_head)
+    ent_models[.Boar_Leg]  = model_bake({-0.07, -0.4, -0.06}, {0.07, 0.06, 0.09}, V, shape_boar_leg)
+    ent_models[.Boar_Tail] = model_bake({-0.05, -0.2, -0.12}, {0.05, 0.03, 0.03}, V, shape_boar_tail)
+    ent_models[.Deer_Body] = model_bake({-0.24, -0.26, -0.52}, {0.24, 0.24, 0.46}, V, shape_deer_body)
+    ent_models[.Deer_Head] = model_bake({-0.24, -0.08, -0.08}, {0.24, 0.9, 0.38}, V, shape_deer_head)
+    ent_models[.Deer_Leg]  = model_bake({-0.05, -0.88, -0.05}, {0.05, 0.04, 0.07}, V, shape_deer_leg)
+    ent_models[.Deer_Tail] = model_bake({-0.05, -0.12, -0.05}, {0.05, 0.03, 0.02}, V, shape_deer_tail)
 }

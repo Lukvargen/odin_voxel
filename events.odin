@@ -31,6 +31,8 @@ sim_event_play :: proc(gs: ^Game_State, ev: Sim_Event) {
         case .Goblin:   play_at(.Hurt, c, ev.amount * 0.45, 1.7 * vary(0.08), 16)
         case .Orc:      play_at(.Hurt, c, ev.amount * 0.7, 0.55 * vary(0.06), 22)
         case .Wolf:     play_at(.Fox, c, ev.amount * 0.7, 0.55 * vary(0.08), 24) // a snarl
+        case .Boar:     play_at(.Hurt, c, ev.amount * 0.6, 0.42 * vary(0.06), 18) // a grunt
+        case .Deer:     play_at(.Fox, c, ev.amount * 0.4, 1.35 * vary(0.06), 16)  // a bark of alarm
         }
     case .Enemy_Swing:
         play_at(.Sword_Swing, c, 0.55, 0.75 / ENEMY_SPECS[ev.enemy].scale * vary(0.06), 14)
