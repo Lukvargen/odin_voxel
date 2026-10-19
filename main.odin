@@ -772,6 +772,8 @@ on_key_down :: proc(gs: ^Game_State, key: SDL.Keycode, mods: Mods, repeat, playi
         if plain && (gs.ui.screen == .None || gs.ui.screen == .Inventory) {
             ui_open(gs, gs.ui.screen == .None ? .Inventory : .None)
         }
+    case SDL.K_F4:
+        if plain { sound_board_toggle(gs) } // debug: every sound to try (sound_board.odin)
     case SDL.K_M:
         if plain {
             audio_toggle_mute()

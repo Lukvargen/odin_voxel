@@ -236,7 +236,12 @@ magic_unweave :: proc(gs: ^Game_State, p: [3]int) {
     c := block_center(p)
     sparks_burst(gs, c, MAGIC_TINT, 10 + 4 * m.size, 5 + f32(m.size))
     motes_burst(gs, targets[:], kinds, drops)
-    play_at(.Magic_Break, c, 0.45 + 0.1 * f32(m.size), vary(0.1) * (1 - 0.08 * f32(m.size)))
+    spell_break_sound(c, m.size)
+}
+
+// The spell's work done (with the material's dig: audio_edit). Also the sound board's.
+spell_break_sound :: proc(c: [3]f32, size: int) {
+    play_at(.Magic_Break, c, 0.5 + 0.1 * f32(size), vary(0.015) * spell_pitch(size)) // in tune with the loop it ends
 }
 
 // Motes from these spots (kinds[i] at spots[i]) bringing `drops`: each kind
@@ -319,7 +324,7 @@ magic_conjure :: proc(gs: ^Game_State, hit, nrm: [3]int) {
     }
     m.conjure, m.conjure_at = 0.2, block_center(target)
     sparks_burst(gs, m.conjure_at, mote_tint(b), 8, 3)
-    play_at(.Magic_Place, m.conjure_at, 0.45, vary(0.06))
+    play_at(.Magic_Place, m.conjure_at, 0.35, vary(0.02) * spell_pitch(magic_spell_size(gs)))
 }
 
 // A mote brought blocks home (they were counted when the edit was made:
@@ -381,13 +386,15 @@ magic_update :: proc(gs: ^Game_State, dt: f32) {
             add_goo(&gs.fx, {pos = c + rand_dir() * 0.5, vel = toward * rand.float32_range(2, 5) + rand_dir() * 1.5 + {0, 2, 0},
                 life = 0.5, max = 0.5, size = rand.float32_range(0.08, 0.16), color = block_color(m.block) * 1.4, floor = c.y - 3})
         }
+        // The spell's tone (audio's Spell loop), and the block cracking in
+        // its own material, quicker and louder as it's about to give.
+        audio_spell(frac, m.block, m.size, m.starved)
         m.hum_timer -= dt
-        if m.hum_timer <= 0 && !m.starved {
-            m.hum_timer = 0.24
-            play_at(.Magic_Channel, c, 0.22 + 0.2 * frac, 0.85 + 0.5 * frac, 10)
+        if m.hum_timer <= 0 && !m.starved && spell_cracks(m.need) {
+            m.hum_timer = spell_crack(c, m.block, frac)
         }
     } else {
-        m.hum_timer = 0
+        m.hum_timer = 0.15 // the first crack a moment in, not as the beam lands
     }
 
     for &s in m.sparks {
@@ -432,14 +439,32 @@ mote_arrive :: proc(gs: ^Game_State, mo: ^Mote) {
     m := &gs.magic
     if mo.count > 0 && mo.home == 0 {
         magic_collect(gs, mo.block, mo.count)
-        if m.pickup_gap > 0.035 {
-            m.pickup_run = m.pickup_gap < 0.4 ? min(m.pickup_run + 1, 14) : 0
-            play(.Pickup, 0.3, 1 + f32(m.pickup_run) * 0.045)
-            m.pickup_gap = 0
-        }
+        pickup_sound(&m.pickup_gap, &m.pickup_run)
     }
     mo.size = 0
 }
+
+// A mote home (`gap` seconds since the last): a quick run of them climbs a
+// pentatonic scale, and stays at its top. Also the sound board's.
+pickup_sound :: proc(gap: ^f32, run: ^int) {
+    SCALE :: [8]f32{0, 2, 4, 7, 9, 12, 14, 16} // semitones
+    if gap^ <= 0.05 { return }
+    run^ = gap^ < 0.4 ? min(run^ + 1, len(SCALE) - 1) : 0
+    scale := SCALE
+    play(.Pickup, 0.24, math.pow(2, scale[run^] / 12) * vary(0.004))
+    gap^ = 0
+}
+
+// The block under the spell cracking in its own material, `frac` of the way
+// undone: quicker and louder as it's about to give. Returns the seconds to
+// the next crack. Also the sound board's.
+spell_crack :: proc(c: [3]f32, b: Block_Type, frac: f32) -> f32 {
+    play_at(step_sound(block_material(b)), c, 0.1 + 0.25 * frac, vary(0.06) * (1 + 0.2 * frac), 10)
+    return math.lerp(f32(0.3), 0.11, frac) * rand.float32_range(0.85, 1.15)
+}
+
+// Whether unweaving takes long enough to crack as it goes (not plants, leaves).
+spell_cracks :: proc(need: f32) -> bool { return need > 0.25 }
 
 // ─── Drawing ───────────────────────────────────────────────────────────────
 

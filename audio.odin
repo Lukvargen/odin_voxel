@@ -60,7 +60,7 @@ Sound :: enum u8 {
     Tree_Creak, Tree_Fall,
 }
 
-Loop_Kind :: enum u8 { Wind, Rush, Leaves, Water, Underwater, Cave, Insects }
+Loop_Kind :: enum u8 { Wind, Rush, Leaves, Water, Underwater, Cave, Insects, Spell }
 
 // A live loop. The filter/envelope fields mean different things per loop.
 Loop :: struct {
@@ -103,6 +103,31 @@ Audio :: struct {
     others:     [MAX_PLAYERS]Body_Sounds,
     prev_block: Block_Type,
     next_bird, next_eagle, next_drip, next_biome, last_edit: f32,
+
+    spell: Spell_Sound,
+}
+
+// Our spell while it unweaves a block, as a loop (Loop_Kind.Spell; magic_update
+// sets it every frame through audio_spell). A soft pad through a phaser whose
+// sweep quickens and deepens as the block comes undone, the tone rising
+// gently, the block crackling ever faster under it; the break (Magic_Break)
+// resolves it.
+SPELL_BASE_HZ :: 196 // G3; Magic_Break and Magic_Place are tuned to it
+
+Spell_Sound :: struct {
+    want:    bool, // cast this frame (audio_spell; audio_update clears it)
+    frac:    f32,  // 0..1 how far the block has come undone
+    low:     f32,  // pitch factor: bigger spells are lower
+    grit:    f32,  // 0 soft (leaves, earth) .. 1 hard (stone, ore): the crackle
+    starved: bool, // waiting for mana: it sags and goes quiet
+    // Per sample, smoothed toward the above.
+    on, amp, k, f, sweep: f32,
+    phase: [6]f32,
+    grain: [2]f32,
+    lp:    [2][2]f32,
+    ap:    [2][6]f32, // the phaser's all-passes, per channel
+    fb:    [2]f32,
+    soft:  [2]f32,    // the pad's low-pass
 }
 
 // The volume settings start at 70%, with room to turn them up.
@@ -256,6 +281,16 @@ audio_edit :: proc(pos: [3]int, block, old: Block_Type, radius: int) {
     }
 }
 
+// The pitch the spell's sounds take for a spell of this size.
+spell_pitch :: proc(size: int) -> f32 { return 1 - 0.07 * f32(min(size, 4)) }
+
+// Our spell is unweaving a block, `frac` of the way: called every frame it is.
+audio_spell :: proc(frac: f32, b: Block_Type, size: int, starved: bool) {
+    s := &audio.spell
+    s.want, s.frac, s.low, s.starved = true, frac, spell_pitch(size), starved
+    s.grit = clamp((unweave_time(b) - 0.15) / 1.0, 0, 1)
+}
+
 // A door swinging open or banging shut: a wooden knock, lower shutting.
 audio_door :: proc(pos: [3]int, opening: bool) {
     p := [3]f32{f32(pos.x) + 0.5, f32(pos.y) + 1, f32(pos.z) + 0.5}
@@ -273,6 +308,8 @@ audio_update :: proc(gs: ^Game_State, dt: f32) {
     player_sounds(gs, dt)
     others_sounds(gs, dt)
     ambient_calls(gs)
+    audio.spell.on = audio.spell.want ? (audio.spell.starved ? 0.4 : 1) : 0
+    audio.spell.want = false
     loops_update()
 }
 
@@ -558,12 +595,21 @@ loops_update :: proc() {
         .Underwater = 0.5 * audio.under,
         .Cave       = 0.4 * audio.cave,
         .Insects    = 0.09 * max(audio.crickets, audio.cicadas),
+        .Spell      = 0.5, // its own envelope (spell_sample), at the effects' volume
     }
     for kind in Loop_Kind {
         l := &audio.loops[kind]
         g := gains[kind] * amb
+        audible := g > 0.0005
+        if kind == .Spell {
+            sp := &audio.spell
+            g = gains[kind] * MASTER_VOLUME * audio.effects * (audio.muted ? 0 : 1)
+            audible = g > 0.0005 && (sp.on > 0 || sp.amp > 1e-4)
+            // Starting: what's queued is silence, so drop it and sound at once.
+            if audible && sp.on > 0 && sp.amp < 1e-4 { _ = SDL.ClearAudioStream(l.stream) }
+        }
         _ = SDL.SetAudioStreamGain(l.stream, g)
-        fill_loop(l, kind, g > 0.0005)
+        fill_loop(l, kind, audible)
     }
 }
 
@@ -572,7 +618,8 @@ loops_update :: proc() {
 @(private="file")
 fill_loop :: proc(l: ^Loop, kind: Loop_Kind, audible: bool) {
     queued := int(SDL.GetAudioStreamQueued(l.stream)) / (2 * size_of(f32))
-    need := int(LOOP_AHEAD * SAMPLE_RATE) - queued
+    ahead := kind == .Spell ? f32(0.05) : LOOP_AHEAD // the spell answers the mouse
+    need := int(ahead * SAMPLE_RATE) - queued
     if need <= 0 { return }
     resize(&audio.scratch, need * 2)
     for i in 0 ..< need {
@@ -595,9 +642,10 @@ loop_sample :: proc(l: ^Loop, kind: Loop_Kind) -> [2]f32 {
     case .Underwater: s = underwater_sample(l)
     case .Cave:       s = cave_sample(l)
     case .Insects:    s = insects_sample(l)
+    case .Spell:      s = spell_sample(l)
     }
     // Brings every loop to about 0.2 RMS at full drive (measured with `sounds`).
-    LEVEL :: [Loop_Kind]f32{.Wind = 0.7, .Rush = 0.7, .Leaves = 1.4, .Water = 0.7, .Underwater = 0.28, .Cave = 0.28, .Insects = 1.5}
+    LEVEL :: [Loop_Kind]f32{.Wind = 0.7, .Rush = 0.7, .Leaves = 1.4, .Water = 0.7, .Underwater = 0.28, .Cave = 0.28, .Insects = 1.5, .Spell = 1.4}
     level := LEVEL
     s *= level[kind]
     // Under water everything but the water itself is heard through it.
@@ -763,6 +811,71 @@ insects_sample :: proc(l: ^Loop) -> (out: [2]f32) {
         cicada := (math.sin(l.phase[1][ch] * math.TAU) * 0.6 + (n - l.lp[0][ch]) * 0.5) * buzz * swell
 
         out[ch] = cricket * audio.crickets * 0.6 + cicada * audio.cicadas * 0.5
+    }
+    return
+}
+
+@(private="file")
+spell_sample :: proc(l: ^Loop) -> [2]f32 { return spell_voice(&audio.spell) }
+
+// The spell at work: a pad of root, fifth and octave, each two voices a few
+// cents apart and split between the ears (a slow chorus), with a breath of
+// air, through a stereo phaser. As the block gives the sweep quickens and
+// deepens and the tone rises a fifth; under it the block crackles, sparse at
+// first, thick as it is about to go, drier for harder stone. Fades in and out
+// by itself (Spell_Sound.on).
+@(private="file")
+spell_voice :: proc(s: ^Spell_Sound) -> (out: [2]f32) {
+    s.amp += (s.on - s.amp) * (s.on > s.amp ? 0.003 : 0.0012) // ~8 ms in, ~20 ms out
+    s.k += (s.frac - s.k) * 0.002
+    k := s.k
+    want_f := f32(SPELL_BASE_HZ) * s.low * math.pow(f32(1.5), k) * (s.starved ? 0.94 : 1)
+    if s.f == 0 { s.f = want_f }
+    s.f += (want_f - s.f) * 0.0015
+    if s.amp < 1e-5 { return }
+
+    DET  :: [6]f32{1, 1.0035, 1.4985, 1.5025, 2.003, 1.997}
+    GAIN :: [6]f32{0.5, 0.5, 0.3, 0.3, 0.16, 0.16}
+    det, gain := DET, GAIN
+    pad: [2]f32
+    for i in 0 ..< 6 {
+        s.phase[i] = fract(s.phase[i] + s.f * det[i] / SAMPLE_RATE)
+        p := s.phase[i] * math.TAU
+        pad[i & 1] += (math.sin(p) + 0.3 * math.sin(2 * p) + 0.12 * math.sin(3 * p)) * gain[i] // some body for the phaser to carve
+    }
+
+    // The phaser: six all-passes swept between ~250 Hz and ~2.5 kHz, a
+    // quarter turn apart in each ear.
+    s.sweep = fract(s.sweep + (0.22 + 1.6 * k * k) / SAMPLE_RATE)
+    depth := 0.55 + 0.45 * k
+    rate := (4 + 150 * k * k * k) * (s.starved ? 0.15 : 1) / SAMPLE_RATE
+    hi := 0.1 + 0.45 * s.grit
+    lo := 0.015 + 0.08 * s.grit
+    for ch in 0 ..< 2 {
+        n := white()
+        s.lp[1][ch] += (n - s.lp[1][ch]) * lo
+        breath := s.lp[1][ch] * 0.6
+        lfo := 0.5 + 0.5 * math.sin((s.sweep + f32(ch) * 0.25) * math.TAU)
+        fc := 250 * math.pow(f32(10), lfo * depth)
+        tn := math.tan(math.PI * fc / SAMPLE_RATE)
+        a := (tn - 1) / (tn + 1)
+        x := pad[ch] + breath + s.fb[ch] * (0.35 + 0.3 * k)
+        y := x
+        for j in 0 ..< 6 {
+            z := s.ap[ch][j]
+            o := a * y + z
+            s.ap[ch][j] = y - a * o
+            y = o
+        }
+        s.fb[ch] = y
+        wet := (pad[ch] + breath + y) * 0.5
+        s.soft[ch] += (wet - s.soft[ch]) * 0.3 // nothing shrill: ~2.5 kHz and down
+
+        if rand.float32() < rate { s.grain[ch] = rand.float32_range(0.3, 1) }
+        s.grain[ch] *= 0.994 - 0.004 * s.grit // ~4 ms, shorter and drier in stone
+        s.lp[0][ch] += (n - s.lp[0][ch]) * hi
+        crackle := (s.lp[0][ch] - s.lp[1][ch]) * s.grain[ch] * (0.35 + 0.6 * k)
+        out[ch] = (s.soft[ch] * 0.4 + crackle) * s.amp
     }
     return
 }
@@ -1349,6 +1462,7 @@ audio_export :: proc(dir: string) {
     }
     audio.wind, audio.wind_bright, audio.rush, audio.flutter = 1, 0.5, 1, 0
     audio.crickets, audio.cicadas = 1, 1
+    audio.spell.on, audio.spell.frac, audio.spell.low, audio.spell.grit = 1, 0.8, 1, 0.6
     for kind in Loop_Kind {
         l: Loop
         buf := make([]f32, 10 * SAMPLE_RATE * 2)
@@ -1366,7 +1480,48 @@ audio_export :: proc(dir: string) {
         fmt.printf("loop %-10v rms %.3f peak %.3f\n", kind, math.sqrt(sum / f32(len(buf))), peak)
         write_wav(fmt.tprintf("%s/loop_%v.wav", dir, kind), buf, 2)
     }
+    spell_demo(fmt.tprintf("%s/demo_spell.wav", dir))
     fmt.println("wrote", dir)
+}
+
+// Stone unweaved as in the game, to listen to it all together: the Spell
+// loop climbing with the cracks (magic_update), the break, then the motes
+// coming home up their scale (mote_arrive). Mono, at the game's volumes.
+@(private="file")
+spell_demo :: proc(path: string) {
+    NEED :: 0.8 // stone's unweave_time
+    buf := new_buf(2.6)
+    defer delete(buf)
+    mix :: proc(buf: []f32, sound: Sound, at, vol, pitch: f32) {
+        src := audio.sounds[sound][rand.int_max(VARIANTS)]
+        i0 := int(at * SAMPLE_RATE)
+        for j in 0 ..< len(buf) - i0 {
+            x := f32(j) * pitch
+            k := int(x)
+            if k + 1 >= len(src) { break }
+            buf[i0 + j] += math.lerp(src[k], src[k + 1], x - f32(k)) * vol
+        }
+    }
+    l: Loop
+    audio.spell = {low = 1, grit = clamp((NEED - 0.15) / 1.0, 0, 1)}
+    for &s, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        audio.spell.on = t > 0.1 && t < 0.1 + NEED ? 1 : 0
+        audio.spell.frac = clamp((t - 0.1) / NEED, 0, 1)
+        v := loop_sample(&l, .Spell)
+        s += (v[0] + v[1]) * 0.5 * 0.5
+    }
+    for t := f32(0.25); t < 0.1 + NEED; {
+        frac := (t - 0.1) / NEED
+        mix(buf, .Step_Stone, t, 0.1 + 0.25 * frac, 1 + 0.2 * frac)
+        t += math.lerp(f32(0.3), 0.11, frac)
+    }
+    mix(buf, .Dig_Stone, 0.1 + NEED, 0.55, 1)
+    mix(buf, .Magic_Break, 0.1 + NEED, 0.5, 1)
+    SCALE :: [8]f32{0, 2, 4, 7, 9, 12, 14, 16}
+    scale := SCALE
+    for k in 0 ..< 6 { mix(buf, .Pickup, 1.45 + f32(k) * 0.09, 0.24, math.pow(2, scale[k] / 12)) }
+    write_wav(path, buf, 1)
 }
 
 @(private="file")
@@ -1393,53 +1548,92 @@ write_wav :: proc(path: string, samples: []f32, channels: int) {
     }
 }
 
-// The spell channelling: a soft cluster of high partials, wavering, with air.
+// A soft bell: a sine struck at `start`, ringing away over `decay` seconds.
+@(private="file")
+bell :: proc(buf: []f32, start, f, decay, amp: f32) {
+    phase: f32
+    i0 := int(start * SAMPLE_RATE)
+    for j in 0 ..< len(buf) - i0 {
+        t := f32(j) / SAMPLE_RATE
+        phase = fract(phase + f / SAMPLE_RATE)
+        buf[i0 + j] += math.sin(phase * math.TAU) * env(t, 0.003, decay) * amp
+    }
+}
+
+// Another's spell at work, retriggered while it lasts (client.odin): the
+// Spell loop's voice, swelling in and out so the takes overlap smoothly.
 @(private="file")
 synth_shimmer :: proc() -> []f32 {
-    buf := crunch({length = 0.32, attack = 0.06, decay = 0.2, band = {0.4, 0.95}, hiss = 0.25, grains = 200, grain_len = 0.001, thump = 0, thump_hz = 100})
-    normalize(buf, 0.25)
-    base := rand.float32_range(620, 700)
-    for k in ([4]f32{1, 1.5, 2, 3}) {
-        p: f32
-        rate := rand.float32_range(9, 15)
-        for &s, i in buf {
-            t := f32(i) / SAMPLE_RATE
-            s += osc(&p, base * k * (1 + 0.004 * math.sin(t * rate * math.TAU))) * env(t, 0.05, 0.22) * 0.22 / k
-        }
+    LENGTH :: 0.5
+    buf := new_buf(LENGTH)
+    s := Spell_Sound{on = 1, amp = 1, low = 1, grit = 0.4, sweep = rand.float32()} // the climb: its pitch (client.odin)
+    for &out, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        v := spell_voice(&s)
+        swell := math.sin(math.PI * t / LENGTH)
+        out = (v[0] + v[1]) * 0.5 * swell * swell
     }
     return buf
 }
 
-// A block coming undone: a glassy pop and a quick fall of bright notes.
+// A block coming undone: the spell's climb resolved. A deep thump and a
+// crisp pop, the octave and twelfth of the loop's root ringing out, and a
+// scatter of bright sparkles flying off.
 @(private="file")
 synth_unweave :: proc() -> []f32 {
-    buf := crunch({length = 0.6, attack = 0.001, decay = 0.12, band = {0.2, 0.9}, hiss = 0.3, grains = 1500, grain_len = 0.0015, thump = 0.4, thump_hz = 160})
-    normalize(buf, 0.45)
-    f := rand.float32_range(1500, 1800)
-    for i in 0 ..< 4 {
-        note(buf, 0.02 + f32(i) * 0.05, 0.25, f, f * 0.97, 6, 0.25)
-        f *= 0.8
+    buf := new_buf(1.0)
+    f := f32(SPELL_BASE_HZ)
+    phase, lo, hi: f32
+    for &out, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        n := white()
+        lo += (n - lo) * 0.08
+        hi += (n - hi) * 0.5
+        thump := osc(&phase, slide(t, 120, 48, 0.07)) * env(t, 0.002, 0.2) * 0.9
+        pop := (hi - lo) * env(t, 0.0008, 0.035) * 1.2
+        out = thump + pop
+    }
+    bell(buf, 0.006, f * 2, 0.75, 0.38)
+    bell(buf, 0.012, f * 3, 0.5, 0.2)
+    bell(buf, 0.02, f * 4.01, 0.3, 0.08)
+    SPARKS :: [5]f32{5, 6, 8, 10, 12} // overtones of the root: they fit the chord
+    sparks := SPARKS
+    for _ in 0 ..< 7 {
+        bell(buf, rand.float32_range(0.04, 0.32), f * sparks[rand.int_max(len(sparks))] * rand.float32_range(0.997, 1.003), 0.08, rand.float32_range(0.03, 0.07))
     }
     return buf
 }
 
-// A block conjured: a soft rising chime over a muted knock.
+// A block conjured: air drawn in, then a soft fifth over the spell's root
+// as it settles (the knock is the Place under it: audio_edit).
 @(private="file")
 synth_conjure :: proc() -> []f32 {
-    buf := synth_place()
-    normalize(buf, 0.5)
-    f := rand.float32_range(700, 780)
-    note(buf, 0, 0.18, f, f * 1.5, 4, 0.3)
-    note(buf, 0.04, 0.16, f * 1.5, f * 2, 4, 0.18)
+    buf := new_buf(0.55)
+    lo, hi: f32
+    for &out, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        n := white()
+        hi += (n - hi) * (0.05 + 0.4 * math.smoothstep(f32(0), 0.05, t))
+        lo += (n - lo) * 0.03
+        swell := math.smoothstep(f32(0), 0.05, t) * math.exp(-max(t - 0.05, 0) * 40)
+        out = (hi - lo) * swell * 0.5
+    }
+    f := f32(SPELL_BASE_HZ)
+    bell(buf, 0.045, f * 1.5, 0.35, 0.3)
+    bell(buf, 0.05, f * 2, 0.3, 0.22)
+    bell(buf, 0.05, f * 3, 0.15, 0.05)
     return buf
 }
 
-// A mote reaching you: a tiny bright blip.
+// A mote reaching you: a small soft bell (mote_arrive walks a quick run of
+// them up a scale).
 @(private="file")
 synth_pickup :: proc() -> []f32 {
-    buf := new_buf(0.09)
-    note(buf, 0, 0.09, 1250, 1900, 0, 0.6)
-    note(buf, 0, 0.06, 2500, 3600, 0, 0.2)
+    buf := new_buf(0.4)
+    f := f32(SPELL_BASE_HZ * 2) // the spell's octave: they sit in its chord
+    bell(buf, 0, f, 0.32, 0.6)
+    bell(buf, 0, f * 1.5, 0.14, 0.12)
+    bell(buf, 0, f * 2, 0.08, 0.06)
     return buf
 }
 

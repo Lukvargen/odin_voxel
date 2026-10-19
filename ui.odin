@@ -32,7 +32,7 @@ BIOME_SECONDS        :: 3.5 // a biome's name shows this long on entering it
 TOAST_SECONDS        :: 1.8
 BLOCK_NAME_SECONDS   :: 1.6
 
-Ui_Screen :: enum u8 { None, Pause, Inventory, Sandbox, Character } // Sandbox: its panel (sandbox.odin); Character: character_screen.odin
+Ui_Screen :: enum u8 { None, Pause, Inventory, Sandbox, Character, Sounds } // Sandbox: its panel (sandbox.odin); Character: character_screen.odin; Sounds: sound_board.odin
 Menu_Tab  :: enum u8 { Graphics, Sound, Controls, Multiplayer }
 
 // A one-line text box's contents (text_field).
@@ -302,6 +302,7 @@ ui_back :: proc(gs: ^Game_State) {
     #partial switch gs.ui.screen {
     case .None:      ui_open(gs, .Pause)
     case .Character: ui_open(gs, .Pause)
+    case .Sounds:    sound_board_toggle(gs)
     case:            ui_open(gs, .None)
     }
 }
@@ -371,6 +372,7 @@ ui_draw :: proc(gs: ^Game_State, dt: f32) {
     case .Inventory: inventory_layout(gs)
     case .Sandbox:   // drawn by sandbox_layout
     case .Character: character_layout(gs)
+    case .Sounds:    sound_board_layout(gs, dt)
     }
     if gs.sandbox.on { sandbox_layout(gs, fw, fh) }
     cmds := clay.EndLayout()
@@ -2033,7 +2035,7 @@ menu_controls :: proc(gs: ^Game_State) {
     tools    := Group{"Area and shape", {"Area: L / R", "the box's two corners", "Area: F / X", "fill / clear the box", "C", "area cursor: block / face / air", "Shape: L / R", "carve (hold: drill) / place", "Q", "next shape", "Wheel", "push lit face; shape size", "Shift+wheel", "move box; shape height", "Alt+wheel", "air reach; turn shape", "Ctrl+wheel", "walls (0 = solid)", "V", "fill: all / air / paint", "Shift+T, Q, V, C", "cycle back"}}
     fighting := Group{"Fighting", {"R", "draw / put away the sword", "L click (hold)", "combo; juggle in the air", "Look down + L", "plunge, from up high", "R click", "rising slash", "Shift", "dodge roll", "F (hold)", "guard; parry just in time"}}
     gliding  := Group{"Gliding", {"G", "equip the glider", "Space in the air", "open / let go", "W/S, A/D", "speed, lean", "Ctrl", "look around"}}
-    other    := Group{"Other", {"Enter", "chat", "Tab (hold)", "players", "F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)"}}
+    other    := Group{"Other", {"Enter", "chat", "Tab (hold)", "players", "F5", "camera view", "F1 / F3", "hide HUD / debug", "F2", "screenshot", "H", "controls card", "M", "mute", "L (hold)", "sun follows your view", "F6 / F8 / F7", "slime / enemy / clear (debug)", "F4", "sound board (debug)"}}
     cols := controls_columns(gs) == 3 ? [][]Group{{moving, building}, {tools, gliding}, {fighting, other}} : [][]Group{{moving, building, fighting}, {tools, gliding, other}}
     if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 22}}) {
         for col in cols {

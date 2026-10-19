@@ -716,8 +716,8 @@ others_update :: proc(gs: ^Game_State, dt: f32) {
         // Their spell hums where it works, as ours does.
         o.hum -= dt
         if p.channeling && o.hum <= 0 {
-            o.hum = 0.24
-            play_at(.Magic_Channel, p.reach, 0.18 + 0.15 * p.reach_k, 0.85 + 0.5 * p.reach_k, 10)
+            o.hum = 0.3 // the takes overlap: a steady tone, climbing a fifth as ours does
+            play_at(.Magic_Channel, p.reach, 0.16 + 0.12 * p.reach_k, math.pow(1.5, p.reach_k), 10)
         }
         // The sword swings smoothly between views (a swing is a few of them).
         k := min(dt * 30, 1)

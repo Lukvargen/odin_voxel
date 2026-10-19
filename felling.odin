@@ -439,7 +439,7 @@ fell_burst :: proc(gs: ^Game_State, t: ^Felled_Tree) {
     }
     c := t.pivot + rot * [3]f32{0, 6, 0}
     sparks_burst(gs, c, MAGIC_TINT, 24, 8)
-    play_at(.Magic_Break, c, 0.9, 0.7, 30)
+    play_at(.Magic_Break, c, 0.9, 0.75, 30) // lower, big: its octave lands on the fifth the spell climbed to
 }
 
 felling_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
