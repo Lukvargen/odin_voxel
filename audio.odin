@@ -57,6 +57,7 @@ Sound :: enum u8 {
     Clang, // a blow caught on the blade
     // magic.odin, felling.odin
     Magic_Channel, Magic_Break, Magic_Place, Pickup,
+    Spell_Crack, // a crack opening in a block being unwoven
     Tree_Creak, Tree_Fall,
 }
 
@@ -1041,6 +1042,7 @@ synth :: proc(sound: Sound) -> []f32 {
     case .Magic_Break:   return synth_unweave()
     case .Magic_Place:   return synth_conjure()
     case .Pickup:        return synth_pickup()
+    case .Spell_Crack:   return synth_snap()
     case .Tree_Creak:    return synth_creak()
     // A tree hitting the ground: a deep thud, branches cracking, leaves thrashing.
     case .Tree_Fall:     return crunch({length = 1.8, attack = 0.004, decay = 0.9, band = {0.02, 0.6}, hiss = 0.5, grains = 2600, grain_len = 0.004, thump = 1.3, thump_hz = 38, ring = 0.5, ring_hz = 240, ring_q = 0.08})
@@ -1516,6 +1518,12 @@ spell_demo :: proc(path: string) {
         mix(buf, .Step_Stone, t, 0.1 + 0.25 * frac, 1 + 0.2 * frac)
         t += math.lerp(f32(0.3), 0.11, frac)
     }
+    for st in 1 ..= CRACK_STAGES { // the cracks opening (spell_crack_open)
+        t := 0.1 + NEED * f32(st) / (CRACK_STAGES + 1)
+        k := f32(st) / CRACK_STAGES
+        mix(buf, .Spell_Crack, t, 0.3 + 0.35 * k, 1.1 - 0.25 * k)
+        mix(buf, .Dig_Stone, t, 0.15 + 0.25 * k, 1.25 - 0.2 * k)
+    }
     mix(buf, .Dig_Stone, 0.1 + NEED, 0.55, 1)
     mix(buf, .Magic_Break, 0.1 + NEED, 0.5, 1)
     SCALE :: [8]f32{0, 2, 4, 7, 9, 12, 14, 16}
@@ -1634,6 +1642,26 @@ synth_pickup :: proc() -> []f32 {
     bell(buf, 0, f, 0.32, 0.6)
     bell(buf, 0, f * 1.5, 0.14, 0.12)
     bell(buf, 0, f * 2, 0.08, 0.06)
+    return buf
+}
+
+// A crack opening under the spell: a dry snap, a short splintering
+// rattle, and a soft low blow under them. Kept low and dull: no ring.
+@(private="file")
+synth_snap :: proc() -> []f32 {
+    buf := new_buf(0.4)
+    phase, lo, hi, g: f32
+    for &out, i in buf {
+        t := f32(i) / SAMPLE_RATE
+        n := white()
+        lo += (n - lo) * 0.04
+        hi += (n - hi) * 0.35 // nothing much over ~3 kHz
+        if t < 0.06 && rand.float32() < 900.0 / SAMPLE_RATE { g = rand.float32_range(0.3, 1) }
+        g *= 0.996
+        snap := (hi - lo) * (env(t, 0.0005, 0.02) * 1.4 + g * env(t, 0.002, 0.08) * 0.8)
+        blow := osc(&phase, slide(t, 95, 50, 0.06)) * env(t, 0.003, 0.22)
+        out = snap + blow * 0.8
+    }
     return buf
 }
 

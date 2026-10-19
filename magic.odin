@@ -75,6 +75,7 @@ Magic :: struct {
     mana_total: f32, // mana it takes, all told
     tree_logs:  int, // > 0: a tree's trunk; this many logs come down with it
     chip_timer: f32,
+    stage:      int, // cracks: 0 .. CRACK_STAGES as it comes undone (crack_stage)
     hum_timer:  f32,
     // The hand: raised while casting, lowered after.
     raise:      f32, // 0 down .. 1 up
@@ -172,7 +173,7 @@ magic_build_update :: proc(gs: ^Game_State, dt: f32) {
         b := Block_Type(u8(get_voxel(gs, hit.x, hit.y, hit.z)))
         size := magic_spell_size(gs)
         if !m.channeling || hit != m.target || b != m.block || size != m.size {
-            m.channeling, m.target, m.block, m.progress, m.size = true, hit, b, 0, size
+            m.channeling, m.target, m.block, m.progress, m.size, m.stage = true, hit, b, 0, size, 0
             m.tree_logs = block_is_log(u8(b)) ? felling_trunk_logs(gs, hit) : 0
             if m.tree_logs > 0 {
                 m.need, m.mana_total, m.count = fell_time(m.tree_logs), fell_mana(m.tree_logs), m.tree_logs
@@ -393,6 +394,13 @@ magic_update :: proc(gs: ^Game_State, dt: f32) {
         if m.hum_timer <= 0 && !m.starved && spell_cracks(m.need) {
             m.hum_timer = spell_crack(c, m.block, frac)
         }
+        if st := crack_stage(frac); st > m.stage {
+            m.stage = st
+            if spell_cracks(m.need) {
+                spell_crack_open(c, m.block, st)
+                m.hum_timer = max(m.hum_timer, 0.08) // not a tick on top of the blow
+            }
+        }
     } else {
         m.hum_timer = 0.15 // the first crack a moment in, not as the beam lands
     }
@@ -465,6 +473,28 @@ spell_crack :: proc(c: [3]f32, b: Block_Type, frac: f32) -> f32 {
 
 // Whether unweaving takes long enough to crack as it goes (not plants, leaves).
 spell_cracks :: proc(need: f32) -> bool { return need > 0.25 }
+
+// The block splits in stages as it comes undone, each with a blow (the
+// tracer draws the cracks: magic_crack_uniform).
+CRACK_STAGES :: 5
+
+crack_stage :: proc(frac: f32) -> int { return clamp(int(frac * (CRACK_STAGES + 1)), 0, CRACK_STAGES) }
+
+// A new crack opening, stage 1..CRACK_STAGES: a snap and a thump, with the
+// material's crunch; heavier and deeper as the block weakens. Also the sound board's.
+spell_crack_open :: proc(c: [3]f32, b: Block_Type, stage: int) {
+    k := f32(stage) / CRACK_STAGES
+    play_at(.Spell_Crack, c, 0.3 + 0.35 * k, vary(0.04) * (1.1 - 0.25 * k), 12)
+    play_at(dig_sound(block_material(b)), c, 0.15 + 0.25 * k, vary(0.05) * (1.25 - 0.2 * k), 10)
+}
+
+// For the tracer: the block being unwoven and how far it has cracked.
+magic_crack_uniform :: proc(gs: ^Game_State) -> [4]i32 {
+    m := &gs.magic
+    if !m.channeling || m.stage == 0 { return {} }
+    size := m.tree_logs > 0 ? 0 : min(m.size, 7)
+    return {i32(m.target.x), i32(m.target.y), i32(m.target.z), i32(m.stage * 8 + size)}
+}
 
 // ─── Drawing ───────────────────────────────────────────────────────────────
 

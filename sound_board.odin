@@ -26,6 +26,7 @@ Sound_Board :: struct {
     run:        bool,
     t, need:    f32,
     next_crack: f32,
+    stage:      int,
     motes:      int,  // still to arrive...
     next_mote:  f32,  // ...the next this many seconds after the break
     gap:        f32,
@@ -68,6 +69,13 @@ board_update :: proc(gs: ^Game_State, dt: f32) {
             audio_spell(frac, b, sb.size, false)
             sb.next_crack -= dt
             if sb.next_crack <= 0 && spell_cracks(sb.need) { sb.next_crack = spell_crack(c, b, frac) }
+            if st := crack_stage(frac); st > sb.stage {
+                sb.stage = st
+                if spell_cracks(sb.need) {
+                    spell_crack_open(c, b, st)
+                    sb.next_crack = max(sb.next_crack, 0.08)
+                }
+            }
         } else {
             sb.run = false
             p := la.array_cast(la.floor(c), int)
@@ -157,7 +165,7 @@ sound_board_layout :: proc(gs: ^Game_State, dt: f32) {
         if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 6}}) {
             need := board_need(kinds[sb.kind], sb.size)
             if button(clay.ID("SbUnweave"), sb.run ? "Unweaving..." : fmt.tprintf("Unweave (%.2f s)", need), sb.run) {
-                sb.run, sb.t, sb.need, sb.next_crack, sb.hold, sb.motes = true, 0, need, 0.15, false, 0
+                sb.run, sb.t, sb.need, sb.next_crack, sb.stage, sb.hold, sb.motes = true, 0, need, 0.15, 0, false, 0
             }
             if button(clay.ID("SbHold"), "Hold the loop", sb.hold) { sb.hold, sb.run = !sb.hold, false }
             if button(clay.ID("SbPickups"), "Pickup run") { sb.motes, sb.next_mote = 8, 0 }

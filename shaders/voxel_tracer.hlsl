@@ -428,7 +428,7 @@ float3 stone_texture(int3 vkey, int3 tkey, int3 txl, float2 fuv, float3 nrm,
     return c;
 }
 
-float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm, float dist) {
+float3 voxel_surface_texture(uint block_id, int3 vkey, float3 hit_pos, float3 nrm, float dist) {
     // Sub-voxel texel coords: inset along the normal so the face plane floors
     // into THIS voxel, then quantize (frac convention per AO/grass band).
     float3 fr   = frac(hit_pos - nrm * 0.01);
@@ -838,6 +838,50 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
         }
     }
     return saturate(c * (1.0 + vj * 0.08));
+}
+
+// Cracks in the block our spell is unweaving (u_crack, magic.odin): on each
+// face a few jagged lines a texel wide run out from near its middle, more
+// of them and longer at each stage, until the face is split to its edges.
+// Each voxel and face draws its own.
+float crack_mask(int3 vkey, float3 nrm, float3 hit_pos, float k) {
+    float3 fr = frac(hit_pos - nrm * 0.01);
+    int3 txl = clamp(int3(fr * TEXELS), 0, TEXELS - 1);
+    int2 t2 = abs(nrm.y) > 0.5 ? txl.xz : (abs(nrm.x) > 0.5 ? txl.zy : txl.xy);
+    int face = abs(nrm.x) > 0.5 ? (nrm.x > 0 ? 0 : 1) : abs(nrm.y) > 0.5 ? (nrm.y > 0 ? 2 : 3) : (nrm.z > 0 ? 4 : 5);
+    int3 seed = vkey * 7 + int3(face * 31, face * 17, face * 5);
+    float2 p = float2(t2) + 0.5;
+    float2 c = float2(TEXELS * 0.5, TEXELS * 0.5) + (float2(hash31i(seed), hash31i(seed + 9)) - 0.5) * 2.0;
+    for (int i = 0; i < 5; i++) {
+        float grow = saturate((k - i * 0.16) / 0.4); // the later ones open later
+        if (grow <= 0.0) break;
+        float a = (float(i) + hash31i(seed + int3(i, 3 * i, 1))) * (6.2831853 / 5.0); // spread round the face
+        float2 d = float2(cos(a), sin(a));
+        float2 q = p - c;
+        float along = dot(q, d);
+        if (along < -0.5 || along > grow * TEXELS * 0.75) continue;
+        // Jagged: the line wanders sideways along its length (smoothly,
+        // so it stays one line).
+        float u = along * 0.7 + 4.0;
+        float j0 = hash31i(seed + int3(int(floor(u)), i * 11, 5));
+        float j1 = hash31i(seed + int3(int(floor(u)) + 1, i * 11, 5));
+        float jag = (lerp(j0, j1, frac(u)) - 0.5) * 1.8;
+        float side = abs(q.x * d.y - q.y * d.x - jag);
+        if (side < 0.62) return 1.0;
+    }
+    return 0.0;
+}
+
+float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm, float dist) {
+    float3 c = voxel_surface_texture(block_id, vkey, hit_pos, nrm, dist);
+    int stage = u_crack.w >> 3;
+    if (stage > 0) {
+        int size = u_crack.w & 7;
+        int3 d = vkey - u_crack.xyz;
+        if (dot(d, d) <= size * size && crack_mask(vkey, nrm, hit_pos, stage / 5.0) > 0.5)
+            c *= 0.22; // dark in the crack
+    }
+    return c;
 }
 
 // ---- Main -------------------------------------------------------------------

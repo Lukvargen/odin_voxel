@@ -48,6 +48,7 @@ bench_world: bool
 bench_view: bool
 bench_view_pos: [3]f32
 bench_view_yaw, bench_view_pitch: f32
+bench_view_crack: [2]int // crack=: stage, spell size
 // `ab=gi`: every shot (bench_screenshot) twice, into <dir>/on/ and with the
 // bounce-light probes off into <dir>/off/, for before/after in one run.
 bench_ab_gi: bool
@@ -221,6 +222,18 @@ bench_run :: proc(gs: ^Game_State) {
         gs.camera.fly_mode = true
         bench_teleport(gs, bench_view_pos)
         gs.camera.yaw, gs.camera.pitch = bench_view_yaw, bench_view_pitch
+        if bench_view_crack.x > 0 {
+            // Standing on the ground there, as though our spell were
+            // unweaving what's aimed at (once it has streamed in).
+            p := gs.camera.pos
+            gs.camera.pos.y = f32(surface_height_at(int(math.floor(p.x)), int(math.floor(p.z)))) + 1 + PLAYER_EYE_HEIGHT
+            bench_measure(gs)
+            if hit, _, ok := raycast_voxel(gs, camera_aim_eye(gs.camera), camera_forward(gs.camera), MAGIC_REACH * 4); ok {
+                m := &gs.magic
+                m.channeling, m.target, m.stage, m.size = true, hit, min(bench_view_crack.x, CRACK_STAGES), bench_view_crack.y
+                fmt.println("view: cracked", hit, "stage", m.stage, "size", m.size)
+            }
+        }
         bench_measure(gs)
         fmt.printf("view: %v yaw %.1f pitch %.1f\n", bench_view_pos, bench_view_yaw, bench_view_pitch)
         if bench_shot_dir != "" { bench_screenshot(gs, fmt.tprintf("%s/view.bmp", bench_shot_dir)) }

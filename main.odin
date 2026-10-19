@@ -281,6 +281,10 @@ game_main :: proc() -> (relaunch: []string) {
                 for v, i in xyz[:min(len(xyz), 3)] { bench_view_pos[i], _ = strconv.parse_f32(v) }
             case strings.has_prefix(a, "yaw="):   bench_view_yaw, _ = strconv.parse_f32(a[4:])
             case strings.has_prefix(a, "pitch="): bench_view_pitch, _ = strconv.parse_f32(a[6:])
+            case strings.has_prefix(a, "crack="): // view: the block aimed at cracked to this stage[,spell size] (magic.odin)
+                st := strings.split(a[6:], ",", context.temp_allocator)
+                bench_view_crack.x, _ = strconv.parse_int(st[0])
+                if len(st) > 1 { bench_view_crack.y, _ = strconv.parse_int(st[1]) }
             case a == "torch=0": gs.torch.enabled = false // no shadows from placed torches (torch.odin)
             case strings.has_prefix(a, "torchfloor="): // share of torch light left in its shadow
                 f, _ := strconv.parse_f32(a[11:])
