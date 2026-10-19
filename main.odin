@@ -5,6 +5,7 @@ import "core:os"
 import "core:slice"
 import "core:strconv"
 import "core:strings"
+import "core:thread"
 import SDL "vendor:sdl3"
 
 DOUBLE_TAP_MS :: u64(300)
@@ -71,6 +72,7 @@ Game_State :: struct {
     bloom_pre_pipeline: ^SDL.GPUComputePipeline,
     bloom_h_pipeline:   ^SDL.GPUComputePipeline,
     bloom_v_pipeline:   ^SDL.GPUComputePipeline,
+    pipelines_thread:   ^thread.Thread, // making the pipelines above, until gpu_init (gpu_pipelines_wait)
     out_texture:   ^SDL.GPUTexture,
     depth_texture: ^SDL.GPUTexture,
     vol_texture:   ^SDL.GPUTexture,    // half-res volumetric inscatter
@@ -431,7 +433,8 @@ game_main :: proc() -> (relaunch: []string) {
         }
     }
     if start == .Sandbox { sandbox_begin(gs) } // before the world is made: it's flat
-    if !bench && !shots { main_menu_loading(gs, start == .Sandbox ? "the Entity Sandbox" : away ? join_to : save_dir[len("saves/"):]) }
+    loading := bench || shots ? "" : start == .Sandbox ? "the Entity Sandbox" : away ? join_to : save_dir[len("saves/"):]
+    if loading != "" { main_menu_loading(gs, loading) }
 
     if bench {
         // Benches drive the simulation directly, in the world they look at:
@@ -451,6 +454,7 @@ game_main :: proc() -> (relaunch: []string) {
     }
     defer server_close(&gs.server)
     generate_world(gs)
+    gpu_pipelines_wait(gs, loading) // the world made meanwhile
     gpu_init(gs)
     defer gpu_destroy(gs)
     if !bench { ui_rewrap_out_texture(gs) } // the UI was made before there was a frame to show

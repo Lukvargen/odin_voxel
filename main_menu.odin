@@ -109,7 +109,9 @@ main_menu_run :: proc(gs: ^Game_State) -> (choice: Menu_Choice, world: string) {
 
 // One frame saying what's being loaded, shown while the world is made
 // (generate_world blocks for a few seconds).
-main_menu_loading :: proc(gs: ^Game_State, what: string) {
+// shaders: still waiting on the GPU's shaders (gpu_pipelines_wait), slow
+// the first time a new build runs.
+main_menu_loading :: proc(gs: ^Game_State, what: string, shaders := false) {
     if !gs.ui.initialized { return }
     menu_begin(gs, 0, 0)
     left, width := menu_column(gs, false)
@@ -119,6 +121,9 @@ main_menu_loading :: proc(gs: ^Game_State, what: string) {
     }) {
         menu_title(gs)
         text(fmt.tprintf("Loading %s...", what), COLOR_TEXT, 17, FONT_ID_TITLE)
+        if shaders {
+            text("Preparing the shaders. The first start after an update can take a minute.", COLOR_TEXT_DIM, 14)
+        }
     }
     menu_end(gs)
     free_all(context.temp_allocator)

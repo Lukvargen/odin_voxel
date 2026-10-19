@@ -16,6 +16,8 @@ import "core:math"
 import la "core:math/linalg"
 import "core:math/rand"
 import "core:os"
+import "core:sync"
+import "core:thread"
 import SDL "vendor:sdl3"
 
 SAMPLE_RATE   :: 44100
@@ -78,6 +80,8 @@ Audio :: struct {
     voices:     [VOICES]^SDL.AudioStream,
     next_voice: int,
     sounds:     [Sound][VARIANTS][]f32,
+    synth:      ^thread.Thread, // making the sounds, at startup (audio_init)
+    ready:      bool,           // ... done, ok or not (atomic): until then, quiet (audio_on)
     loops:      [Loop_Kind]Loop,
     mono:       [dynamic]f32,
     scratch:    [dynamic]f32,
@@ -109,23 +113,42 @@ audio_init :: proc() {
         fmt.eprintln("No audio:", SDL.GetError())
         return
     }
-    spec := SDL.AudioSpec{format = .F32, channels = 2, freq = SAMPLE_RATE}
-    audio.device = SDL.OpenAudioDevice(SDL.AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec)
-    if audio.device == 0 {
-        fmt.eprintln("No audio device:", SDL.GetError())
-        return
-    }
-    for &v in audio.voices { v = SDL.CreateAudioStream(&spec, nil) }
-    _ = SDL.BindAudioStreams(audio.device, &audio.voices[0], VOICES)
-    for &l in audio.loops {
-        l.stream = SDL.CreateAudioStream(&spec, nil)
-        _ = SDL.BindAudioStream(audio.device, l.stream)
-    }
-    generate_sounds()
-    audio.ok = true
+    // The rest on a thread, with the window still black meanwhile: opening
+    // the device takes ~0.4 s, making the sounds ~1 s in a debug build.
+    audio.synth = thread.create_and_start(proc() {
+        defer sync.atomic_store(&audio.ready, true)
+        spec := SDL.AudioSpec{format = .F32, channels = 2, freq = SAMPLE_RATE}
+        audio.device = SDL.OpenAudioDevice(SDL.AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec)
+        if audio.device == 0 {
+            fmt.eprintln("No audio device:", SDL.GetError())
+            return
+        }
+        for &v in audio.voices { v = SDL.CreateAudioStream(&spec, nil) }
+        _ = SDL.BindAudioStreams(audio.device, &audio.voices[0], VOICES)
+        for &l in audio.loops {
+            l.stream = SDL.CreateAudioStream(&spec, nil)
+            _ = SDL.BindAudioStream(audio.device, l.stream)
+        }
+        generate_sounds()
+        audio.ok = true
+    })
+}
+
+// Sound to play: the device open and the sounds made (audio_init).
+audio_on :: proc() -> bool {
+    return sync.atomic_load(&audio.ready) && audio.ok
+}
+
+// No device to play on, it turned out.
+audio_missing :: proc() -> bool {
+    return sync.atomic_load(&audio.ready) && !audio.ok
 }
 
 audio_shutdown :: proc() {
+    if audio.synth != nil {
+        thread.join(audio.synth)
+        thread.destroy(audio.synth)
+    }
     if audio.device != 0 { SDL.CloseAudioDevice(audio.device) }
     for v in audio.voices { SDL.DestroyAudioStream(v) }
     for l in audio.loops { SDL.DestroyAudioStream(l.stream) }
@@ -146,7 +169,7 @@ bench_heard: ^[Sound]int
 
 play :: proc(sound: Sound, volume: f32 = 1, pitch: f32 = 1, pan: f32 = 0) {
     if bench_heard != nil { bench_heard[sound] += 1 }
-    if !audio.ok || audio.muted || volume * audio.effects < 0.003 { return }
+    if !audio_on() || audio.muted || volume * audio.effects < 0.003 { return }
     src := audio.sounds[sound][rand.int_max(VARIANTS)]
 
     // Mono working copy: the cave echo needs room for its tail.
@@ -242,7 +265,7 @@ audio_door :: proc(pos: [3]int, opening: bool) {
 
 // Once a frame, after the player and entities have moved.
 audio_update :: proc(gs: ^Game_State, dt: f32) {
-    if !audio.ok { return }
+    if !audio_on() { return }
     audio.time += dt
     _, right, _ := camera_basis(gs.camera)
     audio.ear_pos, audio.ear_right = gs.camera.pos, right

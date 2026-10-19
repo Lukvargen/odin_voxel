@@ -1903,7 +1903,7 @@ menu_sound :: proc(gs: ^Game_State) {
         toggle("Snd", &on)
         audio.muted = !on
     }
-    if !audio.ok { text("No audio device found.", COLOR_BAD, 13) }
+    if audio_missing() { text("No audio device found.", COLOR_BAD, 13) }
 }
 
 // Open this game to others, or join someone else's (session.odin).

@@ -1473,45 +1473,76 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     return hit_color;
 }
 
+// The water surface bends one ray off it: up out of it when seen from
+// below (water_below), or the reflection when seen from above (water_above).
+// Either way it's traced in one place (trace_pixel, with water_ray): every
+// call site of a trace is another copy of it in the compiled shader, and the
+// driver's compile time (tens of seconds on a new build) grows with them.
+// The colour that ends up there: lerp(base, what the ray meets, k) + add.
+struct WaterBend {
+    bool   trace;   // the ray's worth tracing (else just base + add)
+    float3 o, d;    // the ray
+    float  t_surf;  // distance to the surface (fog)
+    bool   sky;     // a miss shows the sky (else base)
+    float3 base;
+    float  k;
+    float3 add;
+    bool   cache;   // the result (without add) is the pixel's reflection (g_refl)
+};
+
+// What a ray bent off the water meets, shaded the cheap way (no AO, no
+// shadow rays, no entities): the near voxels, else the far terrain. False
+// when it meets neither.
+bool water_ray(float3 o, float3 rd, float t_surf, out float3 c) {
+    c = float3(0, 0, 0);
+    int exit_axis;
+    float near_len = primary_max_len(o, rd, exit_axis);
+    HitInfo h = trace_ray_chunk(o, rd, false, RAY_ITERATIONS, near_len, BLOCK_WATER);
+    if (h.block_id != 0u) {
+        c = shade_voxel(h, rd, t_surf, false, false).rgb;
+        return true;
+    }
+    if (u_far_enabled != 0) {
+        FarHit fh = far_trace(o, rd, near_len, exit_axis);
+        if (fh.hit) {
+            c = shade_far(fh, rd, t_surf).rgb;
+            return true;
+        }
+    }
+    return false;
+}
+
 // What the water surface mirrors: one ray off it through the near voxels,
-// then the far terrain, else the sky, shaded the cheap way (no AO, no shadow
-// rays, no entities). Looking steeply down the Fresnel share is a few
-// percent and the sky stands in, faded in over REFL_MIN_F..REFL_FULL_F (of
-// the flat surface, so the cutoff doesn't flicker with the waves). A
-// pixel's AA samples meet the same stretch of water, so the first sample's
-// reflection is reused.
+// then the far terrain, else the sky. Looking steeply down the Fresnel share
+// is a few percent and the sky stands in, faded in over
+// REFL_MIN_F..REFL_FULL_F (of the flat surface, so the cutoff doesn't
+// flicker with the waves). A pixel's AA samples meet the same stretch of
+// water, so the first sample's reflection is reused.
 #define REFL_MIN_F  0.04
 #define REFL_FULL_F 0.08
 static bool   g_refl_cached;
 static float3 g_refl;
 
-float3 water_reflection(float3 p, float3 n, float2 wave_var, float3 dir, float t_surf, bool cacheable) {
-    float3 o = p + float3(0.0, 0.01, 0.0);
-    float3 glint = water_glint(p, n, wave_var, dir, true);
-
-    if (cacheable && g_refl_cached) return g_refl + glint;
+WaterBend water_above(float3 p, float3 n, float2 wave_var, float3 dir, float t_surf, bool cacheable) {
+    WaterBend b = (WaterBend)0;
+    b.add    = water_glint(p, n, wave_var, dir, true);
+    b.t_surf = t_surf;
+    if (cacheable && g_refl_cached) {
+        b.base = g_refl;
+        return b;
+    }
+    b.cache = cacheable;
+    b.o = p + float3(0.0, 0.01, 0.0);
     float3 rd = reflect(dir, normalize(float3(n.x * REFL_RIPPLE, n.y, n.z * REFL_RIPPLE)));
     rd.y = max(rd.y, 0.01); // ripples can tip a grazing reflection under the surface
-    rd = normalize(rd);
+    b.d = normalize(rd);
     // No sun (or moon) disc: through the calmed normal it mirrors as one
     // smooth blob; the glint stands in for it.
-    float3 c = apply_fog(float4(sky_color_impl(rd, light_dir_normalized, 0.0, 1.0, true), 1.0), t_surf, dir).rgb;
-    float  Ff = water_fresnel(dir, float3(0.0, 1.0, 0.0));
-    if (Ff >= REFL_MIN_F && (u_ent_debug & 8) == 0) {
-        int exit_axis;
-        float near_len = primary_max_len(o, rd, exit_axis);
-        HitInfo h = trace_ray_chunk(o, rd, false, RAY_ITERATIONS, near_len, BLOCK_WATER);
-        float3 w = c;
-        if (h.block_id != 0u) {
-            w = shade_voxel(h, rd, t_surf, false, false).rgb;
-        } else if (u_far_enabled != 0) {
-            FarHit fh = far_trace(o, rd, near_len, exit_axis);
-            if (fh.hit) w = shade_far(fh, rd, t_surf).rgb;
-        }
-        c = lerp(c, w, smoothstep(REFL_MIN_F, REFL_FULL_F, Ff));
-    }
-    if (cacheable) { g_refl = c; g_refl_cached = true; }
-    return c + glint;
+    b.base = apply_fog(float4(sky_color_impl(b.d, light_dir_normalized, 0.0, 1.0, true), 1.0), t_surf, dir).rgb;
+    float Ff = water_fresnel(dir, float3(0.0, 1.0, 0.0));
+    b.trace = Ff >= REFL_MIN_F && (u_ent_debug & 8) == 0;
+    b.k     = smoothstep(REFL_MIN_F, REFL_FULL_F, Ff);
+    return b;
 }
 
 // ---- View rays ------------------------------------------------------------------
@@ -1520,12 +1551,15 @@ float3 water_reflection(float3 p, float3 n, float2 wave_var, float3 dir, float t
 // than PLANT_NEAR_CLIP are passed through like geometry in front of a
 // near plane.
 #define PLANT_NEAR_CLIP 0.6
-HitInfo trace_view_ray(float3 o, float3 d, float max_len, uint skip) {
-    HitInfo h = trace_ray_chunk(o, d, false, RAY_ITERATIONS, max_len, skip);
+// clip: false for rays that don't start at the eye (bounces). One call of
+// the trace, retried in a loop (see WaterBend for why).
+HitInfo trace_view_ray(float3 o, float3 d, float max_len, uint skip, bool clip = true) {
+    HitInfo h;
     float t0 = 0.0;
-    for (int k = 0; k < 3 && block_is_cutout(h.block_id) && t0 + h.t < PLANT_NEAR_CLIP; k++) {
-        t0 += h.t + 0.02;
+    [loop] for (int k = 0; ; k++) {
         h = trace_ray_chunk(o + d * t0, d, false, RAY_ITERATIONS, max_len - t0, skip);
+        if (!clip || k == 3 || !block_is_cutout(h.block_id) || t0 + h.t >= PLANT_NEAR_CLIP) break;
+        t0 += h.t + 0.02;
     }
     h.t += t0;
     return h;
@@ -1547,28 +1581,20 @@ float water_surface_t(float3 o, float3 d) {
 // way (no entities: the screen-tile entity lists only hold for straight
 // rays). Outside it the surface is a mirror (total internal reflection)
 // that shows the water, which at that range is mostly its own colour.
-float3 water_surface_below(float3 ps, float3 dir, float t_surf) {
+WaterBend water_below(float3 ps, float3 dir, float t_surf) {
+    WaterBend b = (WaterBend)0;
     float2 wv;
     float3 n  = water_normal(ps, dir, wv);
     float3 rr = refract(dir, -n, 1.333);
-    float3 mirror = water_deep_color();
-    if (dot(rr, rr) < 1e-4) return mirror;
-    rr = normalize(rr);
-    float F = 0.02 + 0.98 * pow(1.0 - saturate(dot(rr, n)), 5.0);
-    float3 o = ps + float3(0.0, 0.02, 0.0);
-    int exit_axis;
-    float near_len = primary_max_len(o, rr, exit_axis);
-    HitInfo h = trace_ray_chunk(o, rr, false, RAY_ITERATIONS, near_len, BLOCK_WATER);
-    float3 c;
-    if (h.block_id != 0u) {
-        c = shade_voxel(h, rr, t_surf, false, false).rgb;
-    } else {
-        FarHit fh;
-        fh.hit = false;
-        if (u_far_enabled != 0) fh = far_trace(o, rr, near_len, exit_axis);
-        c = fh.hit ? shade_far(fh, rr, t_surf).rgb : sky_color(rr).rgb;
-    }
-    return lerp(c, mirror, F);
+    b.base   = water_deep_color(); // the mirror
+    b.t_surf = t_surf;
+    if (dot(rr, rr) < 1e-4) return b;
+    b.d     = normalize(rr);
+    b.o     = ps + float3(0.0, 0.02, 0.0);
+    b.trace = true;
+    b.sky   = true;
+    b.k     = 1.0 - (0.02 + 0.98 * pow(1.0 - saturate(dot(b.d, n)), 5.0)); // through, not mirrored
+    return b;
 }
 
 // hit0/far0/ehit0/use_hit0: precomputed primary voxel, far terrain and
@@ -1599,22 +1625,21 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
         if (i == 0 && use_hit0) {
             hit     = hit0;
             far_hit = far0;
-        } else if (in_water) {
-            // Under water only the next few dozen voxels can show.
-            // From above only the (1 - F) let through the surface shows, so
-            // stop where that has faded to 3% (at a grazing angle, soon).
-            float view = WATER_VIEW_DIST;
-            if (i > 0) view = min(view, log(max(1.0 - water_F, 0.03) / 0.03) / water_absorb(t_acc));
-            if (i == 0) hit = trace_view_ray(origin, dir, view, skip);
-            else        hit = trace_ray_chunk(origin, dir, false, RAY_ITERATIONS, view, skip);
-        } else if (bounce == 0) {
-            int exit_axis;
-            float near_len = primary_max_len(origin, dir, exit_axis);
-            if (i == 0) hit = trace_view_ray(origin, dir, near_len, skip);
-            else        hit = trace_ray_chunk(origin, dir, false, RAY_ITERATIONS, near_len, skip);
-            if (hit.block_id == 0u && u_far_enabled != 0) far_hit = far_trace(origin, dir, near_len, exit_axis);
         } else {
-            hit = trace_ray_chunk(origin, dir, false, RAY_ITERATIONS, RAY_MAX_LENGTH, skip);
+            // One call of the trace, however far it goes (see WaterBend).
+            float max_len = RAY_MAX_LENGTH;
+            int exit_axis = 0;
+            if (in_water) {
+                // Under water only the next few dozen voxels can show.
+                // From above only the (1 - F) let through the surface shows, so
+                // stop where that has faded to 3% (at a grazing angle, soon).
+                max_len = WATER_VIEW_DIST;
+                if (i > 0) max_len = min(max_len, log(max(1.0 - water_F, 0.03) / 0.03) / water_absorb(t_acc));
+            } else if (bounce == 0) {
+                max_len = primary_max_len(origin, dir, exit_axis);
+            }
+            hit = trace_view_ray(origin, dir, max_len, skip, i == 0);
+            if (!in_water && bounce == 0 && hit.block_id == 0u && u_far_enabled != 0) far_hit = far_trace(origin, dir, max_len, exit_axis);
         }
         float hit_t = hit.block_id != 0u ? hit.t : (far_hit.hit ? far_hit.t : RAY_MAX_LENGTH);
 
@@ -1639,19 +1664,36 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
             }
         }
 
-        if (surf_t <= hit_t && surf_t < 1e29) {
-            float3 c = water_surface_below(origin + dir * surf_t, dir, t_acc + surf_t);
-            c = water_mix(c, surf_t, t_acc, dir, water_F, water_refl);
-            pixel_color = lerp(pixel_color, float4(c, 1.0), reflection_amount);
-            break;
-        }
-
-        if (hit.block_id == BLOCK_WATER) {
+        // The water surface, from below (what shows through it, then done)
+        // or from above (its reflection, then on underneath).
+        bool below = surf_t <= hit_t && surf_t < 1e29;
+        if (below || hit.block_id == BLOCK_WATER) {
+            float3 n = hit.normal;
+            WaterBend wb;
+            if (below) {
+                wb = water_below(origin + dir * surf_t, dir, t_acc + surf_t);
+            } else {
+                float2 wave_var = float2(0, 0);
+                if (hit.normal.y > 0.5) n = water_normal(hit.hit_pos, dir, wave_var);
+                wb = water_above(hit.hit_pos, n, wave_var, dir, t_acc + hit.t, bounce == 0);
+            }
+            float3 w = wb.base;
+            if (wb.trace) {
+                float3 bent;
+                if (water_ray(wb.o, wb.d, wb.t_surf, bent)) w = bent;
+                else if (wb.sky) w = sky_color(wb.d).rgb;
+            }
+            float3 c = lerp(wb.base, w, wb.k);
+            if (wb.cache) { g_refl = c; g_refl_cached = true; }
+            c += wb.add;
+            if (below) {
+                c = water_mix(c, surf_t, t_acc, dir, water_F, water_refl);
+                pixel_color = lerp(pixel_color, float4(c, 1.0), reflection_amount);
+                break;
+            }
             // Into the water: keep the reflection, carry on underneath.
-            float2 wave_var = float2(0, 0);
-            float3 n   = hit.normal.y > 0.5 ? water_normal(hit.hit_pos, dir, wave_var) : hit.normal;
             water_F    = water_fresnel(dir, n);
-            water_refl = water_reflection(hit.hit_pos, n, wave_var, dir, t_acc + hit.t, bounce == 0);
+            water_refl = c;
             in_water   = true;
             t_acc     += hit.t;
             origin     = hit.hit_pos + dir * 0.01;

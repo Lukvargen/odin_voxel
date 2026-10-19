@@ -54,7 +54,8 @@ GI :: struct {
     buried:   f32,                    // share of probes solid all through (skipped), smoothed over timed passes
 }
 
-gi_init :: proc(gs: ^Game_State) {
+// On the pipeline thread (gpu_create_pipelines).
+gi_create_pipeline :: proc(gs: ^Game_State) {
     bytes := #load("shaders/gi_probes.spv")
     gs.gi.pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, SDL.GPUComputePipelineCreateInfo{
         code                           = raw_data(bytes),
@@ -68,7 +69,9 @@ gi_init :: proc(gs: ^Game_State) {
         threadcount_x = 64, threadcount_y = 1, threadcount_z = 1,
     })
     assert(gs.gi.pipeline != nil, "Failed to create GI probe pipeline")
+}
 
+gi_init :: proc(gs: ^Game_State) {
     rows := u32(GI_PROBES / GI_ROW)
     make_tex :: proc(gs: ^Game_State, format: SDL.GPUTextureFormat, w, h: u32) -> ^SDL.GPUTexture {
         t := SDL.CreateGPUTexture(gs.gpu_device, SDL.GPUTextureCreateInfo{
@@ -116,7 +119,6 @@ gi_clear_texture :: proc(gs: ^Game_State, tex: ^SDL.GPUTexture, w, h, texel: u32
 gi_destroy :: proc(gs: ^Game_State) {
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi.irr)
     SDL.ReleaseGPUTexture(gs.gpu_device, gs.gi.vis)
-    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.gi.pipeline)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.gi.list_buf)
     SDL.ReleaseGPUTransferBuffer(gs.gpu_device, gs.gi.list_up)
     SDL.ReleaseGPUBuffer(gs.gpu_device, gs.gi.stats)

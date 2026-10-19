@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:math"
 import "core:mem"
 import "core:slice"
+import "core:thread"
 import "core:time"
 import SDL "vendor:sdl3"
 
@@ -203,22 +204,35 @@ gpu_device_init :: proc(gs: ^Game_State) {
     gs.gpu_device = SDL.CreateGPUDevice({.SPIRV}, ODIN_DEBUG && !RELEASE, nil) // validation needs the Vulkan SDK: testers have none
     assert(gs.gpu_device != nil, "Failed to create GPU device")
     fmt.println("GPU driver:", SDL.GetGPUDeviceDriver(gs.gpu_device))
+    gs.pipelines_thread = thread.create_and_start_with_data(gs, proc(data: rawptr) {
+        gpu_create_pipelines((^Game_State)(data))
+    })
 }
 
 // After ui_shutdown: the UI's renderer shares the device.
 gpu_device_destroy :: proc(gs: ^Game_State) {
     if gs.gpu_device == nil { return }
+    if t := gs.pipelines_thread; t != nil {
+        // Quit before there was a world (gpu_init never waited for them).
+        // Still compiling: the driver has the device, and the process is
+        // ending anyway, so leave it be rather than wait.
+        if !thread.is_done(t) { return }
+        thread.join(t)
+        thread.destroy(t)
+        gs.pipelines_thread = nil
+        gpu_release_pipelines(gs)
+    }
     SDL.ReleaseWindowFromGPUDevice(gs.gpu_device, gs.window)
     SDL.DestroyGPUDevice(gs.gpu_device)
     gs.gpu_device = nil
 }
 
-gpu_init :: proc(gs: ^Game_State) {
-    if gs.gpu_device == nil { gpu_device_init(gs) }
-
-    // Note: window is claimed by SDL.CreateGPURenderer in ui_init (which
-    // shares this GPU device). Claiming it here would conflict.
-
+// The compute pipelines, made on a thread of their own from the moment the
+// device exists (gpu_device_init). A driver that hasn't seen these shaders
+// before (a new build, or the first run from a new folder) spends ~40 s
+// compiling the tracer; the main menu hides what it can of that, and
+// gpu_pipelines_wait the rest.
+gpu_create_pipelines :: proc(gs: ^Game_State) {
     // SPIR-V embedded at compile time â€” no runtime file dependency
     shader_bytes := #load("shaders/voxel_tracer.spv")
 
@@ -241,8 +255,7 @@ gpu_init :: proc(gs: ^Game_State) {
     }
     gs.pipeline = SDL.CreateGPUComputePipeline(gs.gpu_device, pipeline_info)
     assert(gs.pipeline != nil, "Failed to create compute pipeline")
-    gi_init(gs)
-    torch_init(gs)
+    gi_create_pipeline(gs)
 
     // Volumetric pass: 1 RO storage texture (depth) + 4 RO storage buffers,
     // 1 RW storage texture (half-res inscatter).
@@ -293,6 +306,45 @@ gpu_init :: proc(gs: ^Game_State) {
     assert(gs.bloom_h_pipeline != nil, "Failed to create bloom blur H pipeline")
     gs.bloom_v_pipeline = bloom_pipeline(gs, #load("shaders/bloom_blur_v.spv"))
     assert(gs.bloom_v_pipeline != nil, "Failed to create bloom blur V pipeline")
+}
+
+gpu_release_pipelines :: proc(gs: ^Game_State) {
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.gi.pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.vol_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.comp_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_pre_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_h_pipeline)
+    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_v_pipeline)
+}
+
+// Until the pipelines are made, the window kept alive (Windows calls a window
+// that stops taking its events "not responding") with the loading screen
+// redrawn, saying what's taking so long. loading: what's being loaded, as
+// main_menu_loading has it; "" to draw nothing (benches).
+gpu_pipelines_wait :: proc(gs: ^Game_State, loading := "") {
+    t := gs.pipelines_thread
+    if t == nil { return }
+    start := SDL.GetTicks()
+    for !thread.is_done(t) {
+        SDL.PumpEvents()
+        if loading != "" && SDL.GetTicks() - start > 300 { main_menu_loading(gs, loading, shaders = true) }
+        SDL.Delay(30)
+    }
+    thread.join(t)
+    thread.destroy(t)
+    gs.pipelines_thread = nil
+}
+
+gpu_init :: proc(gs: ^Game_State) {
+    if gs.gpu_device == nil { gpu_device_init(gs) }
+    gpu_pipelines_wait(gs)
+
+    // Note: window is claimed by SDL.CreateGPURenderer in ui_init (which
+    // shares this GPU device). Claiming it here would conflict.
+
+    gi_init(gs)
+    torch_init(gs)
 
     // Entity voxel models (static, uploaded once) followed by the per-frame
     // entity/part instance lists (voxel_models.odin, entities.odin).
@@ -888,10 +940,5 @@ gpu_destroy :: proc(gs: ^Game_State) {
     staging_release(gs, &gs.stage_voxel)
     staging_release(gs, &gs.stage_light)
     staging_release(gs, &gs.stage_far)
-    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.pipeline)
-    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.vol_pipeline)
-    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.comp_pipeline)
-    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_pre_pipeline)
-    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_h_pipeline)
-    SDL.ReleaseGPUComputePipeline(gs.gpu_device, gs.bloom_v_pipeline)
+    gpu_release_pipelines(gs)
 }
