@@ -39,6 +39,7 @@ Server :: struct {
     local_out:    Outbox,    // to the local client, moved to link.to_client at the flush
     away:         map[[2]int]^Column, // columns edited this step that aren't loaded: saved, then freed
     names:        [MAX_PLAYERS]Msg_Text, // what each player is called (empty: not said yet)
+    looks:        [MAX_PLAYERS]Maybe(Look), // how each looks (player_look.odin), once said
     started:      time.Tick, // Msg_Clock.time counts from here
     guests_build: bool,      // the other players may change blocks (the host always can)
     survival:     bool,      // the world's game mode (world_survival_load): everyone plays it
@@ -93,7 +94,7 @@ server_shutdown :: proc(srv: ^Server) {
         clear(&rem.out.reliable)
         clear(&rem.out.unreliable)
         srv.sim.players[slot].active = false
-        srv.names[slot], srv.kept_known[slot], srv.kicked[slot] = {}, false, false
+        srv.names[slot], srv.kept_known[slot], srv.kicked[slot], srv.looks[slot] = {}, false, false, nil
     }
     enet.host_flush(srv.host)
     enet.host_destroy(srv.host)
@@ -186,6 +187,9 @@ server_greet :: proc(srv: ^Server, peer: ^enet.Peer, data: []u8) {
         for &name, s in srv.names {
             if name.len > 0 { outbox_put(&rem.out, .Player_Name, Msg_Player_Name{slot = u8(s), name = name}) }
         }
+        for look, s in srv.looks {
+            if l, ok := look.?; ok { outbox_put(&rem.out, .Player_Look, Msg_Player_Look{slot = u8(s), look = l}) }
+        }
         fmt.printf("Host: player %d joined from %v\n", slot, peer.address)
         return
     }
@@ -268,7 +272,7 @@ server_drop :: proc(srv: ^Server, slot: int) {
     srv.sim.players[slot].active = false
     server_broadcast(srv, .Player_Gone, u8(slot))
     server_notice(srv, fmt.tprintf(srv.kicked[slot] ? "%s was removed by the host" : "%s left", server_player_name(srv, slot)))
-    srv.names[slot], srv.kicked[slot] = {}, false
+    srv.names[slot], srv.kicked[slot], srv.looks[slot] = {}, false, nil
     fmt.printf("Host: player %d left\n", slot)
 }
 
@@ -456,10 +460,15 @@ server_handle :: proc(srv: ^Server, player: int, data: []u8) {
         case .Keep:
             m := msg_get(&r, Player_Kept) or_break
             srv.kept[player], srv.kept_known[player] = m, true
+        case .Set_Look:
+            m := msg_get(&r, Look) or_break
+            l := look_clean(m)
+            srv.looks[player] = l
+            server_broadcast(srv, .Player_Look, Msg_Player_Look{slot = u8(player), look = l})
         case .Say:
             m := msg_get(&r, Msg_Text) or_break
             if len(text_of(&m)) > 0 { server_broadcast(srv, .Chat_Line, Msg_Chat_Line{slot = u8(player), line = m}) }
-        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line, .Restore, .Rules, .Items:
+        case .Hello, .Welcome, .Refuse, .Player_View, .Player_Gone, .Clock, .Event, .Edited, .Column_Data, .Monsters, .Slime_View, .Enemy_View, .Player_Name, .Chat_Line, .Restore, .Rules, .Items, .Player_Look:
             r.at = len(r.data) // not a connected client's to send: drop the rest
         }
     }

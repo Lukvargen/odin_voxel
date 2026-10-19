@@ -783,7 +783,7 @@ two_bone_ik :: proc(shoulder, target, pole: [3]f32, upper, lower: f32) -> (elbow
 // The sword in a fist at the end of an arm from `shoulder`: upper arm and
 // forearm meeting at an elbow bent toward `pole`. Out of reach, hand and
 // sword come back to where the straight arm ends.
-sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: [3]f32, scale: f32 = 1, tint := PLAYER_TINT) {
+sword_arm_parts :: proc(f: ^Ent_Frame, shoulder, grip, blade, edge, flat, pole: [3]f32, scale: f32 = 1, tint: [3]f32) {
     wrist := grip - edge * 0.075 * scale - blade * 0.012 * scale
     elbow, w := two_bone_ik(shoulder, wrist, pole, UPPER_ARM_LEN * scale, FOREARM_LEN * scale)
     g := grip + (w - wrist)
@@ -806,7 +806,7 @@ combat_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     shoulder := eye + right * SWORD_SHOULDER.x + up * SWORD_SHOULDER.y + fwd * SWORD_SHOULDER.z
     grip, blade, edge, flat := sword_world(gs, eye, fwd, right, up, shoulder)
     // The elbow hangs down and out to the side.
-    sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.7 - up - fwd * 0.3)
+    sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.7 - up - fwd * 0.3, tint = look_paint(gs.look).cloth)
     ent_end(f)
 }
 
@@ -833,8 +833,9 @@ mantle_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         shoulder := eye + right * (s * 0.19) - up * 0.22
         pole := side * (s * 0.6) - fwd * 0.8 - [3]f32{0, 0.2, 0}
         elbow, wrist := two_bone_ik(shoulder, hand, pole, UPPER_ARM_LEN, FOREARM_LEN)
-        ent_segment(f, .Arm_Upper, shoulder, elbow, pole, PLAYER_TINT)
-        ent_segment(f, .Arm_Fore, elbow, wrist, pole, PLAYER_TINT)
+        cloth := look_paint(gs.look).cloth
+        ent_segment(f, .Arm_Upper, shoulder, elbow, pole, cloth)
+        ent_segment(f, .Arm_Fore, elbow, wrist, pole, cloth)
         grip := side * s
         ent_part(f, .Fist, wrist, basis_from_axes(fwd, la.cross(grip, fwd), grip))
     }

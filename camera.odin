@@ -54,6 +54,7 @@ Camera :: struct {
     fov_scale:   f32,    // 1 = the fov setting, >1 wider
     shake:       [2]f32, // yaw/pitch jitter, degrees
     view_offset: [3]f32, // render position offset (chase camera, landing dip)
+    view_turn:   [2]f32, // render yaw / pitch on top of the look, degrees (the Character screen's portrait)
 }
 
 CROUCH_VIEW_DROP :: f32(0.3) // how far sneaking lowers the view
@@ -97,8 +98,8 @@ DEFAULT_FOV :: 70
 // horizontal one follows the screen's aspect (width / height).
 camera_view_basis :: proc(cam: Camera, aspect: f32) -> (fwd, right, up: [3]f32) {
     c := cam
-    c.yaw  += cam.shake.x
-    c.pitch = clamp(c.pitch + cam.shake.y + cam.climb_tilt.x, -89.9, 89.9)
+    c.yaw  += cam.shake.x + cam.view_turn.x
+    c.pitch = clamp(c.pitch + cam.shake.y + cam.climb_tilt.x + cam.view_turn.y, -89.9, 89.9)
     fwd, right, up = camera_basis(c)
     roll := cam.roll + cam.climb_tilt.y
     cr, sr := math.cos(roll), math.sin(roll)

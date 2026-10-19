@@ -653,11 +653,12 @@ glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     ent_scale_about(f, gs.camera.pos, world_scale)
     // The whole pilot in the chase view; from the eyes, just the arms.
     pilot := g.chase_dist > 1.5
-    rot, grip := glider_wing_parts(f, gs.camera.pos, g.heading, g.path_angle + g.aoa, g.bank, g.deploy_t, PLAYER_TINT, pilot = pilot, bar = g.bar)
+    paint := look_paint(gs.look)
+    rot, grip := glider_wing_parts(f, gs.camera.pos, g.heading, g.path_angle + g.aoa, g.bank, g.deploy_t, gs.look, paint, pilot = pilot, bar = g.bar)
     ent_end(f)
     if pilot || !ent_begin(f, seen = false) { return }
     ent_scale_about(f, gs.camera.pos, world_scale)
-    pilot_add_parts(f, gs.camera.pos, rot, PLAYER_TINT, grip, arms = false)
+    pilot_add_parts(f, gs.camera.pos, rot, gs.look, paint, grip, arms = false)
     ent_end(f)
 }
 
@@ -665,7 +666,7 @@ glider_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
 // (radians), unfolded 0..1, the speed bar pulled in 0..1 (the base bar
 // drawn in to the chest: what tells you W is held). Inside an ent_begin /
 // ent_end.
-glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy_t: f32, tint: [3]f32, pilot: bool, bar: f32 = 0) -> (rot: Basis, grip: [3]f32) {
+glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy_t: f32, look: Look, paint: Paint, pilot: bool, bar: f32 = 0) -> (rot: Basis, grip: [3]f32) {
     fwd, up := glider_axes(heading, pitch, bank)
     left := la.cross(up, fwd)
     rot = basis_from_axes(left, up, fwd)
@@ -682,10 +683,13 @@ glider_wing_parts :: proc(f: ^Ent_Frame, p: [3]f32, heading, pitch, bank, deploy
     ent_segment(f, .Rod, apex, bar_r, up)
     ent_segment(f, .Rod, bar_l, bar_r, up)
     if pilot {
-        pilot_add_parts(f, p, rot, tint, grip)
+        pilot_add_parts(f, p, rot, look, paint, grip)
     } else {
-        ent_segment(f, .Arm, at(p, rot, {0.2, -0.16, -0.05}), at(p, rot, grip), up, tint)
-        ent_segment(f, .Arm, at(p, rot, {-0.2, -0.16, -0.05}), at(p, rot, grip * {-1, 1, 1}), up, tint)
+        for side in ([2]f32{1, -1}) {
+            n := f.n_parts
+            ent_segment(f, .Arm, at(p, rot, {0.2 * side, -0.16, -0.05}), at(p, rot, grip * {side, 1, 1}), up)
+            if f.n_parts > n { ent_paint(f, paint) }
+        }
     }
     return
 }

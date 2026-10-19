@@ -32,7 +32,7 @@ BIOME_SECONDS        :: 3.5 // a biome's name shows this long on entering it
 TOAST_SECONDS        :: 1.8
 BLOCK_NAME_SECONDS   :: 1.6
 
-Ui_Screen :: enum u8 { None, Pause, Inventory, Sandbox } // Sandbox: its panel (sandbox.odin)
+Ui_Screen :: enum u8 { None, Pause, Inventory, Sandbox, Character } // Sandbox: its panel (sandbox.odin); Character: character_screen.odin
 Menu_Tab  :: enum u8 { Graphics, Sound, Controls, Multiplayer }
 
 // A one-line text box's contents (text_field).
@@ -58,6 +58,7 @@ UI_State :: struct {
     join_field:     Text_Field,  // Multiplayer tab: address to join...
     port_field:     Text_Field,  // ...port to host on...
     name_field:     Text_Field,  // ...and what you're called (client_name)
+    portrait:       Portrait,    // the Character screen's view (character_screen.odin)
     chat_field:     Text_Field,  // the chat line being typed (Enter)
     debug_open:     bool, // F3
     hud_hidden:     bool, // F1
@@ -241,6 +242,7 @@ ui_toast :: proc(gs: ^Game_State, text: string, seconds: f32 = TOAST_SECONDS) {
 // Shows a screen (.None = back to playing); the mouse is free on screens.
 ui_open :: proc(gs: ^Game_State, screen: Ui_Screen) {
     ui_type_into(gs, nil)
+    if gs.ui.screen == .Character && screen != .Character { character_closed(gs) }
     gs.ui.screen = screen
     gs.ui.dragging = 0
     gs.mouse_locked = screen == .None
@@ -294,9 +296,14 @@ ui_open_chat :: proc(gs: ^Game_State) {
     ui_type_into(gs, &gs.ui.chat_field)
 }
 
-// Esc: open the pause menu, or close whatever screen is open.
+// Esc: open the pause menu, or close whatever screen is open (the
+// Character screen back to the menu it was opened from).
 ui_back :: proc(gs: ^Game_State) {
-    ui_open(gs, gs.ui.screen == .None ? .Pause : .None)
+    #partial switch gs.ui.screen {
+    case .None:      ui_open(gs, .Pause)
+    case .Character: ui_open(gs, .Pause)
+    case:            ui_open(gs, .None)
+    }
 }
 
 ui_build_and_render :: proc(gs: ^Game_State, dt: f32) {
@@ -354,7 +361,7 @@ ui_draw :: proc(gs: ^Game_State, dt: f32) {
     ui.wheel = 0
 
     clay.BeginLayout()
-    if !ui.hud_hidden || ui.screen != .None {
+    if (!ui.hud_hidden || ui.screen != .None) && ui.screen != .Character {
         hud_layout(gs, fw, fh)
         glider_hud_layout(gs, fw, fh)
     }
@@ -363,6 +370,7 @@ ui_draw :: proc(gs: ^Game_State, dt: f32) {
     case .Pause:     menu_layout(gs)
     case .Inventory: inventory_layout(gs)
     case .Sandbox:   // drawn by sandbox_layout
+    case .Character: character_layout(gs)
     }
     if gs.sandbox.on { sandbox_layout(gs, fw, fh) }
     cmds := clay.EndLayout()
@@ -812,15 +820,15 @@ player_list_layout :: proc(gs: ^Game_State) {
             info := "connecting"
             col := COLOR_TEXT_DIM
             if n.welcomed && n.peer != nil { info, col = ping_text(int(n.peer.roundTripTime)) }
-            row(u32(me), fmt.tprintf("%s (you)", client_name(gs)), player_tint(me), info, col)
+            row(u32(me), fmt.tprintf("%s (you)", client_name(gs)), player_tint(gs, me), info, col)
         } else {
-            row(u32(me), fmt.tprintf("%s (you)", client_name(gs)), player_tint(me), session_hosting(gs) ? "host" : "", COLOR_TEXT_DIM)
+            row(u32(me), fmt.tprintf("%s (you)", client_name(gs)), player_tint(gs, me), session_hosting(gs) ? "host" : "", COLOR_TEXT_DIM)
         }
         for &o, slot in n.others {
             if !o.active { continue }
             info, col := ping_text(o.ping)
             if slot == 0 && client_joined(gs) { info, col = "host", COLOR_TEXT_DIM } // its own game: no connection to time
-            row(u32(slot), client_player_name(gs, slot), player_tint(slot), info, col)
+            row(u32(slot), client_player_name(gs, slot), player_tint(gs, slot), info, col)
         }
     }
 }
@@ -839,7 +847,7 @@ name_tags_layout :: proc(gs: ^Game_State, w, h: f32) {
         x, y, ok := glider_project(cam, d, w, h)
         if !ok { continue }
         a := clamp((64 - dist) / 16, 0, 1)
-        tint := player_tint(slot)
+        tint := player_tint(gs, slot)
         if clay.UI(clay.ID("NameTag", u32(slot)))({
             layout = {padding = {7, 7, 3, 4}},
             floating = {attachTo = .Root, offset = {x, y}, zIndex = 6, attachment = {.CenterBottom, .LeftTop}, pointerCaptureMode = .Passthrough},
@@ -1758,6 +1766,7 @@ menu_layout :: proc(gs: ^Game_State) {
         divider()
         if clay.UI()({layout = {sizing = {clay.SizingGrow(), clay.SizingFit()}, childGap = 8}}) {
             if button(clay.ID("Resume"), "Resume") { ui_open(gs, .None) }
+            if button(clay.ID("Character"), "Character") { character_open(gs) }
             if button(clay.ID("MainMenu"), "Main menu") { ui.menu_requested = true }
             if button(clay.ID("Quit"), gs.sandbox.on ? "Quit" : "Save and quit", danger = true) { ui.quit_requested = true }
         }
@@ -1967,7 +1976,7 @@ menu_multiplayer :: proc(gs: ^Game_State) {
             if !p.active || slot == gs.server.local_player { continue }
             if clay.UI(clay.ID("Visitor", u32(slot)))(setting_row()) {
                 if clay.UI()({layout = {sizing = {clay.SizingFixed(10), clay.SizingFixed(10)}},
-                    backgroundColor = {player_tint(slot).r * 255, player_tint(slot).g * 255, player_tint(slot).b * 255, 255}, cornerRadius = clay.CornerRadiusAll(5)}) {}
+                    backgroundColor = {player_tint(gs, slot).r * 255, player_tint(gs, slot).g * 255, player_tint(gs, slot).b * 255, 255}, cornerRadius = clay.CornerRadiusAll(5)}) {}
                 text(client_player_name(gs, slot), COLOR_TEXT, 15)
                 spacer()
                 if gs.server.kicked[slot] {

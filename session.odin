@@ -55,8 +55,8 @@ session_join :: proc(gs: ^Game_State, address: string) -> bool {
     client_reset_world(gs)
 
     gs.net.home_pos, gs.net.home_yaw = gs.camera.pos, gs.camera.yaw
-    gs.net.sent_name = {}
-    gs.net.names = {}
+    gs.net.sent_name, gs.net.sent_look = {}, nil
+    gs.net.names, gs.net.looks = {}, {}
     gs.net.restored, gs.net.sent_kept = false, {}
     gs.net.no_build = false
     if !client_join(gs, address) {
@@ -74,8 +74,8 @@ session_leave :: proc(gs: ^Game_State) {
     home, yaw := n.home_pos, n.home_yaw
     n.remote, n.welcomed, n.slot, n.arriving = false, false, LOCAL_PLAYER, false
     n.home_pos = {}
-    n.sent_name = {}
-    n.names = {}
+    n.sent_name, n.sent_look = {}, nil
+    n.names, n.looks = {}, {}
     n.restored, n.sent_kept = false, {}
     n.no_build = false
     for &o in n.others { o.active = false }

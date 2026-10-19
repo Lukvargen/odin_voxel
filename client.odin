@@ -66,6 +66,8 @@ Client_Net :: struct {
     sent_kept:    Player_Kept,
     kept_sent_at: time.Tick,
     names:      [MAX_PLAYERS]Msg_Text,    // what the players are called, as the server says
+    looks:      [MAX_PLAYERS]Maybe(Look), // how they look (player_look.odin), once the server's said
+    sent_look:  Maybe(Look),              // ours, as last told the server (resent when it changes)
     chat:       [CHAT_LINES]Chat_Entry,   // the latest lines, oldest first
 }
 
@@ -269,6 +271,11 @@ client_send_input :: proc(gs: ^Game_State) {
         client_send(gs, .Set_Name, name)
         n.sent_name = name
     }
+    // Our look, the same way.
+    if sent, ok := n.sent_look.?; (!ok || sent != gs.look) && (!client_joined(gs) || n.welcomed) {
+        client_send(gs, .Set_Look, gs.look)
+        n.sent_look = gs.look
+    }
     client_send_kept(gs, false)
 
     if !client_joined(gs) {
@@ -304,7 +311,7 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
             slot := msg_get(&r, u8) or_break
             if int(slot) < MAX_PLAYERS {
                 gs.net.others[slot].active = false
-                gs.net.names[slot] = {}
+                gs.net.names[slot], gs.net.looks[slot] = {}, nil
             }
         case .Restore:
             m := msg_get(&r, Msg_Restore) or_break
@@ -315,6 +322,9 @@ client_receive :: proc(gs: ^Game_State, dt: f32) {
         case .Fell:
             m := msg_get(&r, Msg_Fell) or_break
             felling_heard(gs, m)
+        case .Player_Look:
+            m := msg_get(&r, Msg_Player_Look) or_break
+            if int(m.slot) < MAX_PLAYERS { gs.net.looks[m.slot] = look_clean(m.look) }
         case .Player_Name:
             m := msg_get(&r, Msg_Player_Name) or_break
             if int(m.slot) < MAX_PLAYERS {
@@ -727,24 +737,25 @@ others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
         if d.x * d.x + d.y * d.y + d.z * d.z > ENTITY_CULL_RADIUS * ENTITY_CULL_RADIUS { continue }
         if !ent_begin(f) { return }
         p := &o.latest
-        tint := la.lerp(player_tint(slot), [3]f32{1, 0.25, 0.2}, o.hurt * 0.75) // struck: a red flash
+        look := other_look(gs, slot)
+        paint := paint_flash(look_paint(look), {1, 0.25, 0.2}, o.hurt * 0.75) // struck: a red flash
         if p.gliding {
             ent_scale_about(f, o.pos, world_scale)
-            glider_wing_parts(f, o.pos, p.glide_heading, p.glide_pitch, p.glide_bank, p.glide_unfold, tint, pilot = true)
+            glider_wing_parts(f, o.pos, p.glide_heading, p.glide_pitch, p.glide_bank, p.glide_unfold, look, paint, pilot = true)
         } else {
             feet := o.pos - {0, PLAYER_EYE_HEIGHT, 0}
             ent_scale_about(f, feet, world_scale)
             act := Body_Act{climbing = p.climbing, raise = p.sword ? 0 : p.raise, at = p.reach, k = p.reach_k, t = o.t}
-            hips := humanoid_add_parts(f, feet, &o.anim, p.yaw, p.pitch, tint, right_arm = !p.sword, act = &act)
+            hips := humanoid_add_parts(f, feet, &o.anim, p.yaw, p.pitch, look, paint, right_arm = !p.sword, act = &act)
             beam := act.raise > 0.5 && (p.channeling || p.conjuring) && !p.climbing
             if beam { o.palms, o.beam = act.palms, true } else { o.beam = false }
             if p.sword {
                 // As the player's own sword arm (creatures.odin), from its view.
                 fwd, right, up := camera_basis(Camera{yaw = p.yaw, pitch = p.pitch})
                 eye := feet + [3]f32{0, HUM_HIPS_Y + 0.6 + HUM_EYE, 0} + fwd * 0.15
-                shoulder := feet + basis_yaw(o.anim.body_yaw) * [3]f32{-HUM_ARM_X, HUM_HIPS_Y + HUM_ARM_Y, 0}
+                shoulder := feet + basis_yaw(o.anim.body_yaw) * [3]f32{-look_parts(look).arm_x, HUM_HIPS_Y + HUM_ARM_Y, 0}
                 grip, blade, edge, flat := sword_place(o.pose, eye, fwd, right, up, shoulder)
-                sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, tint = tint)
+                sword_arm_parts(f, shoulder, grip, blade, edge, flat, right * 0.6 - up - fwd * 0.4, tint = paint.cloth)
             }
         }
         ent_end(f)
@@ -759,9 +770,19 @@ others_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     ent_end(f)
 }
 
-// Each player slot its own colour of tunic; slot 0 (the host) the usual.
-player_tint :: proc(slot: int) -> [3]f32 {
-    if slot == 0 { return PLAYER_TINT }
+// How another player looks: as they said, or until they have, the first
+// preset in a dye of their slot's.
+other_look :: proc(gs: ^Game_State, slot: int) -> Look {
+    if l, ok := gs.net.looks[slot].?; ok { return l }
+    l := DEFAULT_LOOK
+    l.cloth = u8(slot * 5 % len(DYES))
+    return l
+}
+
+// A player's colour in the lists and over their heads: their cloth's.
+player_tint :: proc(gs: ^Game_State, slot: int) -> [3]f32 {
+    if slot == gs.net.slot { return look_paint(gs.look).cloth }
+    if l, ok := gs.net.looks[slot].?; ok { return look_paint(l).cloth }
     h := f32(slot) * 0.61803 // spread round the colour wheel
     h -= math.floor(h)
     return {

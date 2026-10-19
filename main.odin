@@ -25,6 +25,7 @@ Game_State :: struct {
     camera: Camera,
     glider: Glider, // hang glider (glider.odin)
     player_anim: Player_Anim, // third-person body animation (creatures.odin)
+    look:        Look,        // how the player looks (player_look.odin; the Character screen)
     combat: Combat, // the sword, health, combos (combat.odin)
     fx: Effects, // goo, sparks, dust, damage numbers (fx.odin)
     sky_thermals:      [MAX_SKY_THERMALS]Sky_Thermal, // strong thermals near the player, for cumulus (glider.odin)
@@ -170,6 +171,7 @@ game_main :: proc() -> (relaunch: []string) {
         if user.len == 0 { user = text_set("Player") }
         gs.ui.name_field.len = copy(gs.ui.name_field.buf[:], user.text[:user.len])
     }
+    gs.look = look_load() // as picked last (the Character screen), in any world
     start_yaw: f32
     start_at: bool // at= given: start there, not where we were last
     mode_arg: Maybe(bool) // mode=: the world's game mode set to survival (true) or creative
@@ -249,6 +251,7 @@ game_main :: proc() -> (relaunch: []string) {
             case a == "climb": bench_climb = true
             case a == "doors": bench_doors = true
             case a == "fell": bench_fell = true
+            case a == "character": bench_character = true
             case a == "forest": bench_fell_forest = true // bench fell: a big forest tree instead
             case a == "plants": bench_plants = true
             case a == "hear": bench_hear = true
@@ -287,6 +290,7 @@ game_main :: proc() -> (relaunch: []string) {
                 x, _ := strconv.parse_int(xz[0])
                 z, _ := strconv.parse_int(xz[1])
                 gs.camera.pos = {f32(x) + 0.5, f32(surface_height_at(x, z)) + 3, f32(z) + 0.5}
+            case look_arg(gs, a):
             case: bench_shot_dir = a
             }
         }
@@ -328,6 +332,7 @@ game_main :: proc() -> (relaunch: []string) {
                 h, _ := strconv.parse_f32(a[5:])
                 day_set_hour(gs, clamp(h, 0, 23.99), settle = true)
             case strings.has_prefix(a, "scale="): // done first, below
+            case look_arg(gs, a):
             case strings.has_prefix(a, "name="):
                 t := text_set(a[5:], NAME_MAX)
                 gs.ui.name_field.len = copy(gs.ui.name_field.buf[:], t.text[:t.len])
@@ -650,6 +655,7 @@ game_main :: proc() -> (relaunch: []string) {
         client_receive(gs, play_dt)
         fx_update(gs, fx_dt)
         glider_view_update(gs, play_dt)
+        character_view_update(gs, dt)
         combat_view_update(gs, play_dt)
         if gs.sandbox.on { sandbox_update(gs, dt, {mouse_dx, mouse_dy}) }
 

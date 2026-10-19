@@ -31,7 +31,11 @@ import clay "thirdparty/clay-odin"
 //
 // `sandbox <name> [anim=<anim>] shot=<dir>` draws a contact sheet instead,
 // with no window to see: the four sides, then four moments of the
-// animation, saved as <dir>/<name>_<anim>.png.
+// animation, saved as <dir>/<name>_<anim>.png. `sandbox player looks
+// shot=<dir> [close] [view=<deg>] [zoom=<k>]` draws the player in each of the looks'
+// presets (player_look.odin) instead, as <dir>/player_looks[_close].png.
+// The player wears your look (the Character screen's), or `look=<preset>`;
+// `body=feminine` / `body=masculine` the build, for both.
 
 Exhibit_Kind :: enum u8 {
     Player, Skeleton, Goblin, Orc, Slime_Small, Slime, Slime_Big, Fox, Eagle, Fish, Reef_Fish, Crystal,
@@ -76,6 +80,9 @@ Sandbox :: struct {
     drag:      [2]f32,
     shot_dir:  string, // contact sheets, then quit (sandbox_shots)
     close:     bool,   // `close`: the sheets framed on the head (faces)
+    looks:     bool,   // `looks`: the sheet is the player in each preset (sandbox_look_shots)...
+    looks_yaw: f32,    // ...seen from here (`view=`)
+    shot_zoom: f32,    // `zoom=`: the sheets this close (multiples of the usual distance), on the middle
     saved:     [1024]u8, // the view as last written to SANDBOX_STATE
     saved_len: int,
     save_t:    f32,
@@ -105,6 +112,12 @@ sandbox_arg :: proc(gs: ^Game_State, a: string) -> bool {
         gs.sandbox.shot_dir = a[5:]
     case a == "close":
         gs.sandbox.close = true
+    case a == "looks":
+        gs.sandbox.looks = true
+    case strings.has_prefix(a, "zoom="):
+        gs.sandbox.shot_zoom, _ = strconv.parse_f32(a[5:])
+    case strings.has_prefix(a, "view="):
+        gs.sandbox.looks_yaw, _ = strconv.parse_f32(a[5:])
     case:
         k, ok := exhibit_by_name(a)
         if !ok { return false }
@@ -441,13 +454,13 @@ sandbox_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
     for &x, k in sb.exhibits {
         if sb.solo && k != sb.picked { continue }
         if !ent_begin(f) { return }
-        exhibit_add(f, &x, k)
+        exhibit_add(f, &x, k, gs.look)
         ent_end(f)
     }
 }
 
 @(private="file")
-exhibit_add :: proc(f: ^Ent_Frame, x: ^Exhibit, k: Exhibit_Kind) {
+exhibit_add :: proc(f: ^Ent_Frame, x: ^Exhibit, k: Exhibit_Kind, look: Look) {
     t := x.t
     switch k {
     case .Player:
@@ -482,7 +495,7 @@ exhibit_add :: proc(f: ^Ent_Frame, x: ^Exhibit, k: Exhibit_Kind) {
         a.walk_phase = t * sp * 2.4
         a.amp = clamp(sp / 5, 0, 1.3)
         ent_scale_about(f, feet, world_scale)
-        humanoid_add_parts(f, feet, &a, -math.to_degrees(EXHIBIT_YAW), 0, PLAYER_TINT, right_arm = true, act = &act)
+        humanoid_add_parts(f, feet, &a, -math.to_degrees(EXHIBIT_YAW), 0, look, look_paint(look), right_arm = true, act = &act)
     case .Skeleton, .Goblin, .Orc:
         e := enemy_puppet(x, enemy_kind_of(k))
         enemy_pose(f, &e)
@@ -839,9 +852,11 @@ sandbox_tags :: proc(gs: ^Game_State, w, h: f32) {
 // four moments through the animation from the front quarter.
 sandbox_shots :: proc(gs: ^Game_State) {
     sb := &gs.sandbox
+    if sb.looks { sandbox_look_shots(gs); return }
     k := sb.picked
     x := &sb.exhibits[k]
     sb.orbit, sb.turntable, sb.paused, sb.solo, sb.zoom = true, false, true, true, sb.close ? 0.22 : 0.8
+    if sb.shot_zoom > 0 { sb.zoom = sb.shot_zoom }
     // Everything near streamed in, the far terrain too.
     sandbox_place_camera(gs)
     bench_teleport(gs, gs.camera.pos)
@@ -889,4 +904,59 @@ sandbox_shots :: proc(gs: ^Game_State) {
     }
     fmt.printf("Sandbox: %s (top: front, quarter, side, back at %.2f s; bottom at %.2f, %.2f, %.2f, %.2f s)\n",
         path, key_t, moments[0], moments[1], moments[2], moments[3])
+}
+
+// The player in each of the presets at the animation's key moment, in rows
+// of four, all seen from looks_yaw (default: the front quarter).
+@(private="file")
+sandbox_look_shots :: proc(gs: ^Game_State) {
+    sb := &gs.sandbox
+    sb.picked = .Player
+    x := &sb.exhibits[.Player]
+    key_t := exhibit_key_time(.Player, x.anim)
+    sb.orbit, sb.turntable, sb.paused, sb.solo, sb.zoom = true, false, true, true, sb.close ? 0.22 : 0.62
+    if sb.shot_zoom > 0 { sb.zoom = sb.shot_zoom }
+    sb.yaw, sb.pitch = sb.looks_yaw != 0 ? sb.looks_yaw : 205, sb.close ? 4 : 10
+    sandbox_place_camera(gs)
+    bench_teleport(gs, gs.camera.pos)
+    keep := gs.look
+    defer gs.look = keep
+
+    w, h := int(gs.render_w), int(gs.render_h)
+    rows := (len(LOOK_PRESETS) + 3) / 4
+    sheet := make([]u8, 4 * w * rows * h * 4)
+    defer delete(sheet)
+    for preset, i in LOOK_PRESETS {
+        gs.look = look_apply_preset(keep, preset)
+        exhibit_reset(x, .Player)
+        for x.t < key_t - 1e-4 { exhibit_step(x, .Player, min(1.0 / 60, key_t - x.t)) }
+        sandbox_place_camera(gs)
+        for _ in 0 ..< (i == 0 ? 120 : 20) {
+            flush_gpu_uploads(gs)
+            entities_update(gs, 0)
+            if fence := gpu_render(gs, want_fence = true); fence != nil {
+                _ = SDL.WaitForGPUFences(gs.gpu_device, true, &fence, 1)
+                SDL.ReleaseGPUFence(gs.gpu_device, fence)
+            }
+            free_all(context.temp_allocator)
+        }
+        pixels := bench_frame_pixels(gs)
+        ox, oy := (i % 4) * w, (i / 4) * h
+        for row in 0 ..< h {
+            copy(sheet[((oy + row) * 4 * w + ox) * 4:][:w * 4], pixels[row * w * 4:][:w * 4])
+        }
+        delete(pixels)
+    }
+    _ = os.make_directory_all(sb.shot_dir)
+    anim := x.anim == 0 ? "" : fmt.tprintf("_%s", strings.to_lower(exhibit_anims(.Player)[x.anim], context.temp_allocator))
+    path := fmt.tprintf("%s/player_looks%s%s%s%s.png", sb.shot_dir, keep.body == .Feminine ? "_fem" : "", anim, sb.close ? "_close" : "", sb.looks_yaw != 0 ? fmt.tprintf("_%.0f", sb.looks_yaw) : "")
+    surf := SDL.CreateSurfaceFrom(i32(4 * w), i32(rows * h), .RGBA32, raw_data(sheet), i32(4 * w * 4))
+    defer SDL.DestroySurface(surf)
+    if !SDL.SavePNG(surf, strings.clone_to_cstring(path, context.temp_allocator)) {
+        fmt.eprintln("Sandbox: can't save", path, SDL.GetError())
+        return
+    }
+    names := make([]string, len(LOOK_PRESETS), context.temp_allocator)
+    for p, i in LOOK_PRESETS { names[i] = p.name }
+    fmt.printfln("Sandbox: %s (%s)", path, strings.join(names, ", ", context.temp_allocator))
 }

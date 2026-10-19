@@ -44,6 +44,9 @@ static uint4 g_ent_tile_mask;
 #define PAL_EMIT 2u
 #define PAL_THIN 4u
 #define PAL_BLOCK 8u      // textured as the part's block
+#define PAL_TINT2 16u     // the part's second colour: tex.xyz (a part with no block voxels)
+#define PAL_TINT3 32u     // its third: the block word, rgb8
+#define PAL_TINT4 64u     // its fourth: the texture scale's word, rgb8
 #define PAL_BLOCK_BYTE 0x80u // voxel byte 0x80 | block id: that block, textured
 
 struct EntityHit {
@@ -273,9 +276,14 @@ float3 entity_albedo(EntityHit h, out uint flags) {
     flags = c >> 24;
     if (flags & PAL_BLOCK) return float3(1, 1, 1);
     float3 col = float3(c & 0xffu, (c >> 8) & 0xffu, (c >> 16) & 0xffu) / 255.0;
-    if (flags & PAL_TINT) {
+    if (flags & (PAL_TINT | PAL_TINT2 | PAL_TINT3 | PAL_TINT4)) {
         uint pb = ent_dyn_base() + ENT_PARTS_OFS + uint(h.index) * ENT_PART_STRIDE;
-        col *= asfloat(ent_data[pb + 5].xyz);
+        if (flags & PAL_TINT) col *= asfloat(ent_data[pb + 5].xyz);
+        else if (flags & PAL_TINT2) col *= asfloat(ent_data[pb + 6].xyz);
+        else {
+            uint c3 = (flags & PAL_TINT3) ? ent_data[pb + 5].w : ent_data[pb + 6].w;
+            col *= float3(c3 & 0xffu, (c3 >> 8) & 0xffu, (c3 >> 16) & 0xffu) / 255.0;
+        }
     }
     return col * (0.93 + 0.14 * float(h.vhash >> 24) / 255.0);
 }

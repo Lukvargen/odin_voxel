@@ -28,7 +28,7 @@ NET_VERSION :: u32(1) // bump when messages change meaning without changing size
 // other instead of misreading bytes.
 net_fingerprint :: proc() -> u32 {
     h := NET_VERSION * 2654435761
-    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), size_of(Msg_Rules), size_of(Msg_Items), size_of(Msg_Fell), size_of(Net_Player), size_of(Net_Slime), size_of(Net_Enemy), len(Msg_Kind), len(Sim_Event_Kind)}) {
+    for n in ([]int{size_of(Player), size_of(Sim_Event), size_of(Msg_Hit), size_of(Msg_Spawn), size_of(Msg_Player_View), size_of(Msg_Clock), size_of(Msg_Welcome), size_of(Msg_Voxels), size_of(Msg_Chunk_Voxels), size_of(Msg_Edited), size_of(Msg_Column_Data), size_of(Msg_Monsters), size_of(Msg_Slime_View), size_of(Msg_Enemy_View), size_of(Msg_Text), size_of(Msg_Player_Name), size_of(Look), size_of(Msg_Player_Look), size_of(Msg_Chat_Line), size_of(Msg_Restore), size_of(Player_Kept), size_of(Msg_Rules), size_of(Msg_Items), size_of(Msg_Fell), size_of(Net_Player), size_of(Net_Slime), size_of(Net_Enemy), len(Msg_Kind), len(Sim_Event_Kind)}) {
         h = (h ~ u32(n)) * 16777619
     }
     return h
@@ -50,6 +50,7 @@ Msg_Kind :: enum u8 {
     Say,          // Msg_Text: a chat line
     Column_Request, // [2]i32: an edited column (Edited), please
     Keep,         // Player_Kept: what this client's player carries, when it changes (player_save.odin)
+    Set_Look,     // Look: how this client's player looks (player_look.odin), when it changes
     // both ways: blocks a player changed (client → server → the others)
     Voxels,       // Msg_Voxels
     Chunk_Voxels, // Msg_Chunk_Voxels: a whole chunk, when an edit changed much of it
@@ -71,6 +72,7 @@ Msg_Kind :: enum u8 {
     Chat_Line,    // Msg_Chat_Line: a chat line, or the server's news (someone joined, left)
     Rules,        // Msg_Rules: what the host lets visitors do
     Items,        // Msg_Items: what you carry, as the server counts it (survival: items.odin)
+    Player_Look,  // Msg_Player_Look: how a player looks
 }
 
 TEXT_MAX    :: 96   // bytes of a chat line
@@ -102,6 +104,11 @@ Msg_Rules :: struct {
 Msg_Player_Name :: struct {
     slot: u8,
     name: Msg_Text,
+}
+
+Msg_Player_Look :: struct {
+    slot: u8,
+    look: Look,
 }
 
 Msg_Chat_Line :: struct {

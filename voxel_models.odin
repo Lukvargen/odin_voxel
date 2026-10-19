@@ -20,7 +20,18 @@ Model_Id :: enum u32 {
     // creatures.odin
     Fox_Body, Fox_Head, Fox_Leg, Fox_Tail,
     Bird_Body, Bird_Wing,
-    Hum_Head, Hum_Torso, Hum_Arm, Hum_Fore, Hum_Hand, Hum_Leg, Hum_Cape, // the player (creatures.odin)
+    // the player (player_model.odin): what the build shapes, masculine,
+    // then the same feminine (BODY_MODELS on); then the rest of the look
+    Hum_Arm, Hum_Head, Hum_Head_Stubble, Hum_Torso_Robe, Hum_Torso_Tunic, Hum_Torso_Coat, Hum_Torso_Padded,
+    Hum_Skirt_Robe, Hum_Skirt_Coat, Hum_Cloak_Mantle,
+    Hum_Arm_F, Hum_Head_F, Hum_Head_Stubble_F, Hum_Torso_Robe_F, Hum_Torso_Tunic_F, Hum_Torso_Coat_F, Hum_Torso_Padded_F,
+    Hum_Skirt_Robe_F, Hum_Skirt_Coat_F, Hum_Cloak_Mantle_F,
+    Hum_Hand, Hum_Leg,
+    Hum_Fore_Robe, Hum_Fore_Tunic, Hum_Fore_Coat, Hum_Fore_Padded,
+    Hum_Cape, Hum_Cloak, Hum_Scarf, Hum_Scarf_Tail,
+    Hum_Hood, Hum_Wizard_Hat, Hum_Wide_Hat, Hum_Circlet,
+    Hum_Hair_Short, Hum_Hair_Swept, Hum_Hair_Long, Hum_Hair_Tied, Hum_Hair_Braid, Hum_Hair_Bun, Hum_Hair_Fringe,
+    Hum_Beard_Short, Hum_Beard_Full,
     // combat.odin, slime.odin
     Sword,      // grip at the origin, blade along +z
     Slime,      // 1 m cube-ish blob standing on its origin, face toward +z
@@ -57,6 +68,11 @@ PAL_TINT :: 1 // colour is multiplied by the part's tint
 PAL_EMIT :: 2 // glows on its own
 PAL_THIN :: 4 // thin fabric: the sun shines through from behind
 PAL_BLOCK :: 8 // textured as the part's block (ent_texture)
+// A player's colours (ent_paint): tinted by the part's second, third and
+// fourth colours as PAL_TINT is by its first. Cloth, accent, skin, hair.
+PAL_TINT2 :: 16
+PAL_TINT3 :: 32
+PAL_TINT4 :: 64
 
 // A voxel byte of PAL_BLOCK_BYTE | block id is that block, textured as the
 // world draws it (a felled tree): not a palette entry.
@@ -81,8 +97,10 @@ Pal :: enum u8 {
     Block, Block_Glow,   // the part's block, textured (ent_texture); glowing a little (motes)
     Robe_Dark, Trousers, // the player's: the robe's shade (hood lining, cape), its legs
     Skin_Shade,          // ...and the face's shadows (lids, under the lip and chin)
+    // The player's look (player_look.odin): the second cloth, the hair, the lips.
+    Accent, Accent_Shade, Accent_Dark, Hair_Own, Hair_Own_Dark, Lip,
 }
-#assert(len(Pal) <= 64) // ENT_PAL_BASE reserves 64 entries
+#assert(len(Pal) <= 128) // ENT_PAL_BASE reserves 64 rows of 4; a voxel byte from 0x80 is a block
 
 @(private="file")
 pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
@@ -104,7 +122,7 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Feather_Dark:  return {52, 36, 26}, 0
     case .Feather_White: return {236, 232, 222}, 0
     case .Beak:          return {232, 178, 40}, 0
-    case .Skin:          return {190, 138, 104}, 0
+    case .Skin:          return {255, 255, 255}, PAL_TINT3
     case .Hair:          return {84, 52, 30}, 0
     case .Shirt:         return {255, 255, 255}, PAL_TINT
     case .Shirt_Trim:    return {205, 205, 205}, PAL_TINT
@@ -149,8 +167,14 @@ pal_entry :: proc(p: Pal) -> (rgb: [3]u8, flags: u8) {
     case .Block:         return {255, 255, 255}, PAL_BLOCK
     case .Block_Glow:    return {255, 255, 255}, PAL_BLOCK | PAL_EMIT
     case .Robe_Dark:     return {130, 130, 130}, PAL_TINT
-    case .Trousers:      return {84, 66, 50}, 0
-    case .Skin_Shade:    return {150, 102, 76}, 0
+    case .Trousers:      return {150, 150, 150}, PAL_TINT2 // the accent, darker
+    case .Skin_Shade:    return {206, 186, 180}, PAL_TINT3
+    case .Accent:        return {255, 255, 255}, PAL_TINT2
+    case .Accent_Shade:  return {205, 205, 205}, PAL_TINT2
+    case .Accent_Dark:   return {130, 130, 130}, PAL_TINT2
+    case .Hair_Own:      return {255, 255, 255}, PAL_TINT4
+    case .Hair_Own_Dark: return {165, 165, 165}, PAL_TINT4
+    case .Lip:           return {214, 150, 142}, PAL_TINT3
     }
     return {255, 0, 255}, 0
 }
@@ -277,6 +301,7 @@ model_bake :: proc(lo, hi: [3]f32, voxel: f32, shape: proc(p: [3]f32, voxel: f32
 
 ent_models_bake :: proc() {
     creature_models_bake()
+    player_models_bake()
     combat_models_bake()
     enemy_models_bake()
     fish_models_bake()
@@ -326,7 +351,7 @@ ent_model_upload :: proc(gs: ^Game_State, id: Model_Id, m: Voxel_Model) {
 
 // GPU layout of gs.entity_buf, in uint4 units (shaders/entity_voxel.hlsl):
 //   [0]                       header: dynamic base, 0, 0, 0
-//   [ENT_PAL_BASE..+64)       palette, one u32 per entry: rgb | flags << 24
+//   [ENT_PAL_BASE..+64)       palette, one u32 per entry: rgb | flags << 24 (up to 128 of them, 4 a row)
 //   [ENT_MODEL_BASE..+2/model) model table: (dims, voxel word), (brick dims, brick word)
 //   ...                       per model: voxel bytes, then one 64-bit occupancy
 //                             mask per 4^3 brick (bit = x + 4y + 16z)
@@ -635,6 +660,20 @@ ent_part :: proc(f: ^Ent_Frame, model: Model_Id, pos: [3]f32, rot: Basis, scale:
     e := &f.ents[f.n_ents]
     e.aabb_min = la.min(e.aabb_min, mn)
     e.aabb_max = la.max(e.aabb_max, mx)
+}
+
+// The last part's four colours (PAL_TINT..PAL_TINT4): a body's paint
+// (player_look.odin). A part with no block voxels keeps the last three
+// where a textured one keeps its texture.
+ent_paint :: proc(f: ^Ent_Frame, c: Paint) {
+    if f.n_parts == 0 { return }
+    rgb8 :: proc(c: [3]f32) -> u32 {
+        q := [3]u32{u32(clamp(c.r, 0, 1) * 255 + 0.5), u32(clamp(c.g, 0, 1) * 255 + 0.5), u32(clamp(c.b, 0, 1) * 255 + 0.5)}
+        return q.r | q.g << 8 | q.b << 16
+    }
+    p := &f.parts[f.n_parts - 1]
+    p.tint, p.tex = c.cloth, c.accent
+    p.block, p.tex_scale = rgb8(c.skin), transmute(f32)rgb8(c.hair)
 }
 
 // The last part's block voxels (PAL_BLOCK entries: `block`; PAL_BLOCK_BYTE

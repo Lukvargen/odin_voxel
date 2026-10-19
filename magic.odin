@@ -498,15 +498,16 @@ magic_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
             // The body's own sleeves (creatures.odin), as others see them:
             // stretched to these arms' lengths, slimmer, as they come right
             // past the eye; the gold cuff at the wrist, under the glove's.
-            limb :: proc(f: ^Ent_Frame, model: Model_Id, a, b, ref: [3]f32, length, k: f32) {
+            limb :: proc(f: ^Ent_Frame, model: Model_Id, a, b, ref: [3]f32, length, k: f32, paint: Paint) {
                 d := b - a
                 l := la.length(d)
                 if l < 1e-4 { return }
-                ent_part(f, model, a, basis_hang_along(d, ref), {k, l / length, k}, PLAYER_TINT)
+                body_part(f, model, a, basis_hang_along(d, ref), paint, {k, l / length, k})
             }
             fwd := camera_forward(gs.camera)
-            limb(f, .Hum_Arm, h.shoulder, h.elbow, fwd, HUM_UPPER_LEN, 0.75)
-            limb(f, .Hum_Fore, h.elbow, h.wrist, fwd, HUM_FORE_LEN, 0.75)
+            paint := look_paint(gs.look)
+            limb(f, look_parts(gs.look).arm, h.shoulder, h.elbow, fwd, HUM_UPPER_LEN, 0.75, paint)
+            limb(f, look_parts(gs.look).fore, h.elbow, h.wrist, fwd, HUM_FORE_LEN, 0.75, paint)
             ent_part(f, i == 0 ? .Glove_R : .Glove_L, h.wrist, h.rot, {1, 1, 1}, rune)
         }
         ent_end(f)
