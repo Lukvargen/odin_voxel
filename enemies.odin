@@ -15,6 +15,10 @@ import la "core:math/linalg"
 //    the forests. They keep camps (landmarks.odin) with an orc or two.
 //  - Orcs: big and slow with an axe, a long tell and a heavy hit; the
 //    desert and the badlands.
+//  - Wolves (beasts.odin): packs in the forest, the taiga and the snow,
+//    most by night. They circle out of reach, each its own way round, and
+//    dart in one at a time with a leaping bite, then off again: keep them
+//    in front of you.
 //
 // Each is a box swept through the world like the slimes (stepping up single
 // blocks, jumping higher ones), drawn as rigid voxel-model parts on a shared
@@ -41,9 +45,13 @@ SITE_NOTICE      :: f32(80)  // a site's guards appear when the player is this c
 SITE_RESPAWN     :: f32(600) // seconds before a cleared site fills again
 GUARD_LEASH      :: f32(20)  // guards give up a chase this far from home
 
-Enemy_Kind :: enum u8 { Skeleton, Goblin, Orc }
+Enemy_Kind :: enum u8 { Skeleton, Goblin, Orc, Wolf }
+
+// How it's built: a humanoid on Enemy_Rig, or a beast on four legs (beasts.odin).
+Body :: enum u8 { Humanoid, Beast }
 
 Enemy_Spec :: struct {
+    body:     Body,
     scale:    f32, // of the rig (1 = the player's size)
     radius:   f32, // collision half width
     height:   f32,
@@ -72,6 +80,10 @@ ENEMY_SPECS := [Enemy_Kind]Enemy_Spec{
     .Orc      = {scale = 1.4,  radius = 0.5,  height = 2.55, hp = 130, poise = 55, damage = 28, walk = 1.4, run = 3.7, weight = 2.6,
                  reach = 2.7, windup = 0.8,  strike = 0.2,  recover = 0.85, aggro = 22, knock = {13, 6},
                  gore = {0.40, 0.08, 0.06}},
+    // Strike: the leap, jaws first (wolf_leap); recover: darting off.
+    .Wolf     = {body = .Beast, scale = 1, radius = 0.4, height = 0.95, hp = 38, poise = 12, damage = 11, walk = 1.6, run = 6.5, weight = 0.9,
+                 reach = 2.4, windup = 0.4, strike = 0.35, recover = 0.7, aggro = 28, knock = {5, 3},
+                 gore = {0.40, 0.08, 0.06}},
 }
 
 // Where the parts go, in rig units (scaled by the spec's scale).
@@ -81,7 +93,7 @@ Enemy_Rig :: struct {
     arm_len: f32, // shoulder to the grip
 }
 
-ENEMY_RIGS := [Enemy_Kind]Enemy_Rig{
+ENEMY_RIGS := #partial [Enemy_Kind]Enemy_Rig{ // the humanoids
     .Skeleton = {head = .Skel_Skull, torso = .Skel_Torso, arm = .Skel_Arm, leg = .Skel_Leg, weapon = .Old_Sword, hips = 0.78, leg_x = 0.1, arm_x = 0.27, arm_y = 0.54, neck = 0.6, arm_len = 0.52},
     .Goblin   = {head = .Gob_Head, torso = .Gob_Torso, arm = .Gob_Arm, leg = .Gob_Leg, weapon = .Club, hips = 0.74, leg_x = 0.11, arm_x = 0.3, arm_y = 0.48, neck = 0.55, arm_len = 0.5},
     .Orc      = {head = .Orc_Head, torso = .Orc_Torso, arm = .Gob_Arm, leg = .Gob_Leg, weapon = .Axe, hips = 0.74, leg_x = 0.13, arm_x = 0.38, arm_y = 0.52, neck = 0.6, arm_len = 0.5},
@@ -105,7 +117,10 @@ SWING_KEYS := [Swing][2]Arm_Key{
 }
 
 // How likely each kind is to chop rather than slash.
-OVERHEAD_CHANCE := [Enemy_Kind]f32{.Skeleton = 0.35, .Goblin = 0.55, .Orc = 0.8}
+OVERHEAD_CHANCE := #partial [Enemy_Kind]f32{.Skeleton = 0.35, .Goblin = 0.55, .Orc = 0.8}
+
+// Wolves keep this far off, circling, until one goes in.
+WOLF_CIRCLE :: f32(5.5)
 
 Enemy :: struct {
     alive:      bool,
@@ -125,6 +140,8 @@ Enemy :: struct {
     bar:        f32,    // health bar shows while > 0
     level:      u8,     // levels.odin: its health and blows scale with it
     poise:      f32,    // left before it staggers (back to full a while after the last blow)
+    circle:     f32,    // a wolf: seconds more circling before it goes in
+    flank:      f32,    // ...which way round it goes (+1, -1)
     poise_t:    f32,    // since the last blow
     open:       f32,    // parried: reeling this much longer, and a blow now is a riposte (server_hit)
     age:        f32,
@@ -191,6 +208,8 @@ enemy_spawn :: proc(sim: ^Sim, kind: Enemy_Kind, pos: [3]f32) -> ^Enemy {
         }
         enemy_set_level(&e, monster_level(pos))
         e.poise = ENEMY_SPECS[kind].poise
+        e.flank = rand.float32() < 0.5 ? -1 : 1
+        e.circle = rand.float32_range(1, 4)
         s.last_uid += 1
         e.uid = s.last_uid
         return &e
@@ -204,6 +223,7 @@ enemy_skin :: proc(kind: Enemy_Kind, k: f32) -> [3]f32 {
     case .Skeleton:
     case .Goblin: return la.lerp([3]f32{0.42, 0.56, 0.26}, [3]f32{0.52, 0.56, 0.30}, k)
     case .Orc:    return la.lerp([3]f32{0.36, 0.44, 0.32}, [3]f32{0.50, 0.46, 0.34}, k)
+    case .Wolf:   return la.lerp([3]f32{0.42, 0.42, 0.44}, [3]f32{0.62, 0.58, 0.52}, k) // grey to sandy
     }
     return {1, 1, 1}
 }
@@ -368,6 +388,15 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
         if lost {
             e.state, e.timer = .Wander, 6
             e.target = e.guard ? e.home : e.last_seen
+        } else if e.kind == .Wolf && e.sees && e.circle > 0 && dist < WOLF_CIRCLE * 1.6 * world_scale {
+            // Round you at a distance, its own way, facing in; closing a
+            // little when far, backing off when close.
+            e.circle -= dt
+            side := [2]f32{-dir.y, dir.x} * e.flank
+            band := (dist - WOLF_CIRCLE * world_scale) / world_scale
+            w := la.normalize0(side + dir * clamp(band * 0.5, -1, 1))
+            turn_towards(&e.yaw, dir, dt * 6)
+            want_speed, accel = sp.run * 0.55, w
         } else if dist < sp.reach && abs(to_player.y) < 2 * world_scale && e.on_ground && e.sees {
             turn_towards(&e.yaw, dir, dt * 7)
             e.state, e.timer, e.struck = .Windup, sp.windup, false
@@ -388,13 +417,25 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
         }
     case .Windup:
         turn_towards(&e.yaw, dir, dt * 5)
-        if e.timer <= 0 { e.state, e.timer = .Strike, sp.strike; sim_emit(sim, {kind = .Enemy_Swing, enemy = e.kind, pos = enemy_center(e)}) }
+        if e.timer <= 0 {
+            e.state, e.timer = .Strike, sp.strike
+            sim_emit(sim, {kind = .Enemy_Swing, enemy = e.kind, pos = enemy_center(e)})
+            if sp.body == .Beast {
+                // The leap: off the ground at you, jaws first.
+                fwd := [2]f32{-math.sin(e.yaw), math.cos(e.yaw)}
+                e.vel = {fwd.x * sp.run * 1.4, 4.5 * world_scale, fwd.y * sp.run * 1.4}
+                e.on_ground = false
+            }
+        }
     case .Strike:
-        // Lunges a step into the swing; hurts once if the player is in front.
+        // Lunges a step into the swing (a beast flies on); hurts once if the
+        // player is in front.
         fwd := [2]f32{-math.sin(e.yaw), math.cos(e.yaw)}
-        want_speed, accel = sp.run * 0.8, fwd
-        if !e.struck && dist < sp.reach + 0.5 * world_scale && to_player.y > -1.2 * world_scale && to_player.y < sp.height &&
-           la.dot(dir, fwd) > (e.swing == .Slash ? -0.1 : 0.45) {
+        want_speed, accel = sp.run * (sp.body == .Beast ? 1.4 : 0.8), fwd
+        reach := sp.body == .Beast ? 1.1 * world_scale : sp.reach + 0.5 * world_scale // a bite lands at the jaws
+        arc: f32 = sp.body == .Beast ? 0.3 : (e.swing == .Slash ? -0.1 : 0.45)
+        if !e.struck && dist < reach && to_player.y > -1.2 * world_scale && to_player.y < sp.height + world_scale &&
+           la.dot(dir, fwd) > arc {
             e.struck = true
             knock := [3]f32{dir.x * sp.knock[0], sp.knock[1], dir.y * sp.knock[0]}
             switch player_hurt(sim, e.prey, sp.damage * level_damage(e.level), knock, enemy_center(e)) {
@@ -418,6 +459,12 @@ enemy_think :: proc(sim: ^Sim, e: ^Enemy, dt: f32) {
         }
         if e.timer <= 0 { e.state, e.timer = .Recover, sp.recover }
     case .Recover:
+        if e.kind == .Wolf {
+            // Off again, out of reach, to circle some more.
+            want_speed, accel = sp.run * 0.8, -dir
+            turn_towards(&e.yaw, -dir, dt * 8)
+            if e.timer <= 0 { e.circle = rand.float32_range(1.5, 4) }
+        }
         if e.timer <= 0 { e.state = .Chase }
     case .Stagger:
         if e.timer <= 0 && e.on_ground { e.state, e.timer = .Chase, 0 }
@@ -575,6 +622,11 @@ stand_y :: proc(sim: ^Sim, x, z, from_y: int) -> (y: int, ok: bool) {
 // What roams biome b, by day or (night) by night.
 @(private="file")
 roamer_for :: proc(b: Biome, night: f32) -> (kind: Enemy_Kind, pack: int, ok: bool) {
+    // Wolves in the woods and the snow, most of all after dark.
+    #partial switch b {
+    case .Forest, .Taiga, .Snowy:
+        if rand.float32() < 0.25 + 0.5 * night { return .Wolf, 3 + rand.int_max(2), true }
+    }
     if night > 0.6 && rand.float32() < 0.6 { return .Skeleton, 1 + rand.int_max(2), true }
     #partial switch b {
     case .Plains, .Forest:   return .Goblin, 2 + rand.int_max(2), true
@@ -766,6 +818,7 @@ enemies_add_parts :: proc(gs: ^Game_State, f: ^Ent_Frame) {
 // Also the entity sandbox's (sandbox.odin), on enemies it poses itself.
 enemy_pose :: proc(f: ^Ent_Frame, e: ^Enemy) {
     sp := ENEMY_SPECS[e.kind]
+    if sp.body == .Beast { beast_pose(f, e); return }
     rig := ENEMY_RIGS[e.kind]
     s := sp.scale
     feet := e.pos

@@ -48,6 +48,10 @@ world_scale_apply :: proc(s: f32) {
         a.reach *= s
         a.knock *= s
     }
+    for &a in FIST_ATTACKS {
+        a.reach *= s
+        a.knock *= s
+    }
     // Monsters (enemies.odin, slime.odin).
     ENEMY_GRAVITY *= s
     ENEMY_JUMP *= s

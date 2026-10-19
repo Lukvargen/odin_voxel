@@ -38,11 +38,11 @@ import clay "thirdparty/clay-odin"
 // `body=feminine` / `body=masculine` the build, for both.
 
 Exhibit_Kind :: enum u8 {
-    Player, Skeleton, Goblin, Orc, Slime_Small, Slime, Slime_Big, Fox, Eagle, Fish, Reef_Fish, Crystal,
+    Player, Skeleton, Goblin, Orc, Wolf, Slime_Small, Slime, Slime_Big, Fox, Eagle, Fish, Reef_Fish, Crystal,
 }
 
 EXHIBIT_NAMES := [Exhibit_Kind]string{
-    .Player = "Player", .Skeleton = "Skeleton", .Goblin = "Goblin", .Orc = "Orc",
+    .Player = "Player", .Skeleton = "Skeleton", .Goblin = "Goblin", .Orc = "Orc", .Wolf = "Wolf",
     .Slime_Small = "Small slime", .Slime = "Slime", .Slime_Big = "Big slime",
     .Fox = "Fox", .Eagle = "Eagle", .Fish = "Fish", .Reef_Fish = "Reef fish", .Crystal = "Crystal",
 }
@@ -202,7 +202,7 @@ exhibit_arg_name :: proc(k: Exhibit_Kind) -> string { return strings.to_lower(fm
 exhibit_anims :: proc(k: Exhibit_Kind) -> []string {
     switch k {
     case .Player:                        return reflect.enum_field_names(Walker_Anim)
-    case .Skeleton, .Goblin, .Orc:       return reflect.enum_field_names(Enemy_Anim)
+    case .Skeleton, .Goblin, .Orc, .Wolf:       return reflect.enum_field_names(Enemy_Anim)
     case .Slime_Small, .Slime, .Slime_Big: return reflect.enum_field_names(Slime_Anim)
     case .Fox:                           return reflect.enum_field_names(Fox_Anim)
     case .Eagle:                         return reflect.enum_field_names(Eagle_Anim)
@@ -228,7 +228,7 @@ Exhibit_Size :: struct { height, width, lift: f32 }
 exhibit_size :: proc(k: Exhibit_Kind) -> Exhibit_Size {
     switch k {
     case .Player: return {1.9, 1, 0}
-    case .Skeleton, .Goblin, .Orc:
+    case .Skeleton, .Goblin, .Orc, .Wolf:
         sp := ENEMY_SPECS[enemy_kind_of(k)]
         return {sp.height / world_scale, sp.radius * 2 / world_scale + 0.8, 0}
     case .Slime_Small, .Slime, .Slime_Big:
@@ -254,7 +254,7 @@ exhibit_cycle :: proc(k: Exhibit_Kind, anim: int) -> f32 {
         case .Climb: return 1.4 // a pull-up (about 0.9 s) and a moment
         case .Cast:  return 2.5
         }
-    case .Skeleton, .Goblin, .Orc:
+    case .Skeleton, .Goblin, .Orc, .Wolf:
         sp := ENEMY_SPECS[enemy_kind_of(k)]
         switch Enemy_Anim(anim) {
         case .Idle:          return math.TAU / 0.7 // the look about
@@ -291,7 +291,7 @@ exhibit_cycle :: proc(k: Exhibit_Kind, anim: int) -> f32 {
 exhibit_key_time :: proc(k: Exhibit_Kind, anim: int) -> f32 {
     c := exhibit_cycle(k, anim)
     #partial switch k {
-    case .Skeleton, .Goblin, .Orc:
+    case .Skeleton, .Goblin, .Orc, .Wolf:
         sp := ENEMY_SPECS[enemy_kind_of(k)]
         #partial switch Enemy_Anim(anim) {
         case .Chop, .Slash: return sp.windup * 0.95 // wound up
@@ -317,7 +317,7 @@ exhibit_key_time :: proc(k: Exhibit_Kind, anim: int) -> f32 {
 exhibit_moments :: proc(k: Exhibit_Kind, anim: int) -> [4]f32 {
     c := exhibit_cycle(k, anim)
     #partial switch k {
-    case .Skeleton, .Goblin, .Orc:
+    case .Skeleton, .Goblin, .Orc, .Wolf:
         sp := ENEMY_SPECS[enemy_kind_of(k)]
         #partial switch Enemy_Anim(anim) {
         case .Chop, .Slash: return {sp.windup * 0.5, sp.windup * 0.95, sp.windup + sp.strike * 0.6, sp.windup + sp.strike + sp.recover * 0.4}
@@ -496,7 +496,7 @@ exhibit_add :: proc(f: ^Ent_Frame, x: ^Exhibit, k: Exhibit_Kind, look: Look) {
         a.amp = clamp(sp / 5, 0, 1.3)
         ent_scale_about(f, feet, world_scale)
         humanoid_add_parts(f, feet, &a, -math.to_degrees(EXHIBIT_YAW), 0, look, look_paint(look), right_arm = true, act = &act)
-    case .Skeleton, .Goblin, .Orc:
+    case .Skeleton, .Goblin, .Orc, .Wolf:
         e := enemy_puppet(x, enemy_kind_of(k))
         enemy_pose(f, &e)
     case .Slime_Small, .Slime, .Slime_Big:
@@ -620,7 +620,7 @@ sandbox_place_camera :: proc(gs: ^Game_State) {
     sb := &gs.sandbox
     x := &sb.exhibits[sb.picked]
     size := exhibit_size(sb.picked)
-    if (sb.picked == .Skeleton || sb.picked == .Goblin || sb.picked == .Orc) && Enemy_Anim(x.anim) == .Die {
+    if (sb.picked >= .Skeleton && sb.picked <= .Wolf) && Enemy_Anim(x.anim) == .Die {
         size.height = 0.6 // down on the ground
     }
     target := x.pos + {0, size.height * 0.5 * world_scale, 0}

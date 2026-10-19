@@ -45,6 +45,8 @@ Model_Id :: enum u32 {
     Gob_Head, Gob_Torso, Gob_Arm, Gob_Leg,
     Orc_Head, Orc_Torso,
     Club, Old_Sword, Axe, // grip at the origin, along +z
+    // beasts.odin: bodies pivot at their middle, heads at the neck, legs at the hip
+    Wolf_Body, Wolf_Head, Wolf_Leg, Wolf_Tail,
     // sea.odin
     Fish_Body, Fish_Body_Striped, Fish_Tail,
     // magic.odin, felling.odin
@@ -309,6 +311,7 @@ ent_models_bake :: proc() {
     player_models_bake()
     combat_models_bake()
     enemy_models_bake()
+    beasts_models_bake()
     fish_models_bake()
     magic_models_bake()
     ent_models[.Crystal]      = model_bake({-0.3, -0.52, -0.3}, {0.3, 0.52, 0.3}, 1.0 / 16, shape_crystal)
