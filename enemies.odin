@@ -26,15 +26,15 @@ import la "core:math/linalg"
 // Guards belong to a site (a landmark): they keep near it, are spawned when
 // the player comes close, and the site stays empty for a while once cleared.
 
-MAX_ENEMIES      :: 24
+MAX_ENEMIES      :: 32 // (Msg_Monsters.enemies is a u32 of them)
 ENEMY_DESPAWN    :: f32(110) // roamers counted within this of a player, and forgotten beyond it (guards: their site's spawn is undone)
 ROAM_SPAWN_NEAR  :: f32(40)  // roamers appear between these (design blocks) from a player: out
 ROAM_SPAWN_FAR   :: f32(60)  // there, to be come upon, never at your back
-ROAM_DAY         :: 2        // roamers kept about a player by day...
-ROAM_NIGHT       :: 4        // ...and at night
-ROAM_CHECK       :: f32(10)  // seconds between looks for a place to put one
-ROAM_GAP_MIN     :: f32(60)  // after one spawns, at least this long before the next...
-ROAM_GAP_MAX     :: f32(120) // ...and at most this
+ROAM_DAY         :: 5        // roamers kept about a player by day...
+ROAM_NIGHT       :: 8        // ...and at night
+ROAM_CHECK       :: f32(5)   // seconds between looks for a place to put one
+ROAM_GAP_MIN     :: f32(18)  // after one spawns, at least this long before the next...
+ROAM_GAP_MAX     :: f32(40)  // ...and at most this
 ENEMY_GRAVITY    : f32 = f32(26)
 ENEMY_JUMP       : f32 = f32(8.5)
 SITE_NOTICE      :: f32(80)  // a site's guards appear when the player is this close

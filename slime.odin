@@ -23,8 +23,8 @@ import la "core:math/linalg"
 
 MAX_SLIMES        :: 40
 
-SLIME_POPULATION  :: 2       // keep this many slimes about each player (within SLIME_DESPAWN)...
-SLIME_SPAWN_EVERY :: f32(40)  // ...spawning one this often while short
+SLIME_POPULATION  :: 5       // keep this many slimes about each player (within SLIME_DESPAWN)...
+SLIME_SPAWN_EVERY :: f32(15)  // ...spawning one this often while short
 SLIME_SPAWN_NEAR  :: f32(36)  // out between these (design blocks), not where it's calm (sim.odin)
 SLIME_SPAWN_FAR   :: f32(54)
 SLIME_DESPAWN     :: f32(90)  // and forget the ones left this far behind
