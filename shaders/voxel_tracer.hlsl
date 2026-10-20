@@ -171,7 +171,7 @@ float torch_shadow(float3 p, float3 n, int3 f, bool two_sided) {
     // Loops kept loops: one shadow walk in the code, not eight inlined.
     [loop]
     for (int k = 0; k < 4; k++) {
-        uint id = ids[k];
+        uint id = k == 0 ? ids.x : k == 1 ? ids.y : k == 2 ? ids.z : ids.w;
         if (id == 0u) break;
         float4 e = torch_emit[int2(int(id) - 1, 0)];
         uint   lift_i = uint(e.w) >> 5; // torch.odin TORCH_LIFT
@@ -632,13 +632,14 @@ float3 voxel_surface_texture(uint block_id, int3 vkey, float3 hit_pos, float3 nr
 
     if (block_id == BLOCK_TERRACOTTA) {
         // Badlands strata: one colour per 2-voxel band of world height.
-        static const float3 bands[6] = {
-            float3(0.60, 0.32, 0.18), float3(0.74, 0.53, 0.34), float3(0.53, 0.23, 0.15),
-            float3(0.80, 0.70, 0.56), float3(0.66, 0.42, 0.20), float3(0.45, 0.28, 0.22),
-        };
+        // (Picked by a chain, not a table: a table indexed by a variable is
+        // a per-pixel copy in memory.)
         uint bi = min(uint(hash31i(int3(7, vkey.y >> 1, 3)) * 6.0), 5u);
+        float3 band = bi == 0u ? float3(0.60, 0.32, 0.18) : bi == 1u ? float3(0.74, 0.53, 0.34) :
+                      bi == 2u ? float3(0.53, 0.23, 0.15) : bi == 3u ? float3(0.80, 0.70, 0.56) :
+                      bi == 4u ? float3(0.66, 0.42, 0.20) :              float3(0.45, 0.28, 0.22);
         float n = tex_noise(fuv, 3.0, 4.0);
-        float3 c = bands[bi] * (0.90 + 0.10 * n + (hd - 0.5) * 0.10);
+        float3 c = band * (0.90 + 0.10 * n + (hd - 0.5) * 0.10);
         return saturate(c * (1.0 + vj * 0.05));
     }
 
@@ -797,12 +798,11 @@ float3 voxel_surface_texture(uint block_id, int3 vkey, float3 hit_pos, float3 nr
     if (block_id == BLOCK_CORAL) {
         // One colour per reef head (smooth noise picks it, so a head is
         // mostly one colour), porous: polyp pits and bright tips.
-        static const float3 coral_cols[6] = {
-            float3(0.95, 0.36, 0.50), float3(0.98, 0.52, 0.20), float3(0.62, 0.30, 0.82),
-            float3(0.96, 0.82, 0.28), float3(0.25, 0.58, 0.92), float3(0.92, 0.26, 0.24),
-        };
         float  pick = vnoise2(float2(vkey.xz) * 0.31 + float(vkey.y) * 0.07 + 5.3);
-        float3 c = coral_cols[min(int(pick * 6.0), 5)];
+        int    ci   = min(int(pick * 6.0), 5);
+        float3 c = ci == 0 ? float3(0.95, 0.36, 0.50) : ci == 1 ? float3(0.98, 0.52, 0.20) :
+                   ci == 2 ? float3(0.62, 0.30, 0.82) : ci == 3 ? float3(0.96, 0.82, 0.28) :
+                   ci == 4 ? float3(0.25, 0.58, 0.92) :            float3(0.92, 0.26, 0.24);
         float  pit = tex_noise(fuv, 1.5, 33.0);
         c *= lerp(1.0, pit < 0.35 ? 0.55 : (h > 0.85 ? 1.25 : 0.95), detail);
         if (top) c *= 1.1;
@@ -918,12 +918,10 @@ float3 voxel_surface_color(uint block_id, int3 vkey, float3 hit_pos, float3 nrm,
 
 // Sub-pixel offsets (in pixel units). Sample 0 is the pixel CENTER so it can
 // share the primary trace already done in main() for depth (see use_hit0).
-static const float2 aa_offsets[4] = {
-    float2( 0.0,    0.0  ),
-    float2( 0.125, -0.375),
-    float2( 0.375,  0.125),
-    float2(-0.125,  0.375),
-};
+float2 aa_offset(int s) {
+    return s == 0 ? float2( 0.0,    0.0  ) : s == 1 ? float2( 0.125, -0.375) :
+           s == 2 ? float2( 0.375,  0.125) :           float2(-0.125,  0.375);
+}
 
 // ---- Cumulus over thermals ---------------------------------------------------
 // Every strong thermal near the player (u_thermals, filled by the CPU and
@@ -982,11 +980,12 @@ CloudResult march_clouds(float3 ro, float3 rd, float t_max, uint2 pix) {
     if (max(min(ty0, ty1), 0.0) >= min(max(ty0, ty1), t_max)) return r;
 
     // Clouds this ray crosses, nearest first (a ray rarely crosses more
-    // than two, so keep four).
+    // than two, so keep four). Kept in vectors, a lane each: arrays indexed
+    // by a variable would be a per-pixel copy in memory.
     float3 inv = 1.0 / ent_safe_dir(rd);
-    int   ids[4];
-    float t0s[4], t1s[4];
-    int   n = 0;
+    int4   ids = int4(0, 0, 0, 0);
+    float4 t0s = float4(1e30, 1e30, 1e30, 1e30), t1s = float4(0, 0, 0, 0);
+    int    n = 0;
     for (int i = 0; i < u_thermal_count.x && n < 4; i++) {
         float4 th = u_thermals[i];
         float R = th.z * 1.4;
@@ -997,9 +996,13 @@ CloudResult march_clouds(float3 ro, float3 rd, float t_max, uint2 pix) {
         t0 = max(t0, 0.0);
         t1 = min(t1, t_max);
         if (t0 >= t1) continue;
-        int k = n++;
-        for (; k > 0 && t0s[k - 1] > t0; k--) { ids[k] = ids[k - 1]; t0s[k] = t0s[k - 1]; t1s[k] = t1s[k - 1]; }
-        ids[k] = i; t0s[k] = t0; t1s[k] = t1;
+        // Into lane k, after those not farther; the lanes past it move up one.
+        int  k = int(t0s.x <= t0) + int(t0s.y <= t0) + int(t0s.z <= t0) + int(t0s.w <= t0);
+        int4 up = int4(int4(0, 1, 2, 3) > k), at = int4(int4(0, 1, 2, 3) == k), keep = 1 - up - at;
+        ids = ids * keep + ids.xxyz * up + i * at;
+        t0s = t0s * float4(keep) + t0s.xxyz * float4(up) + t0 * float4(at);
+        t1s = t1s * float4(keep) + t1s.xxyz * float4(up) + t1 * float4(at);
+        n++;
     }
     if (n == 0) return r;
 
@@ -1011,11 +1014,13 @@ CloudResult march_clouds(float3 ro, float3 rd, float t_max, uint2 pix) {
     float jitter = frac(52.9829189 * frac(0.06711056 * float(pix.x) + 0.00583715 * float(pix.y)));
 
     for (int c = 0; c < n; c++) {
-        int ci = ids[c];
+        int   ci  = c == 0 ? ids.x : c == 1 ? ids.y : c == 2 ? ids.z : ids.w;
+        float c_t0 = c == 0 ? t0s.x : c == 1 ? t0s.y : c == 2 ? t0s.z : t0s.w;
+        float c_t1 = c == 0 ? t1s.x : c == 1 ? t1s.y : c == 2 ? t1s.z : t1s.w;
         float H = u_thermals[ci].z * 1.4;
-        float dt = (t1s[c] - t0s[c]) / CLOUD_STEPS;
+        float dt = (c_t1 - c_t0) / CLOUD_STEPS;
         for (int s = 0; s < CLOUD_STEPS; s++) {
-            float t = t0s[c] + (float(s) + jitter) * dt;
+            float t = c_t0 + (float(s) + jitter) * dt;
             float3 p = ro + rd * t;
             float dens = cloud_density(p, ci);
             if (dens < 0.002) continue;
@@ -1358,8 +1363,8 @@ float3 far_block_color(uint id, int2 cell, float3 n, float y) {
     if (id == BLOCK_TORCH)         return float3(0.45, 0.26, 0.10);
     if (id == BLOCK_CRYSTAL)       return float3(0.95, 0.65, 0.25);
     if (id == BLOCK_TERRACOTTA) {
-        static const float3 bands[3] = { float3(0.62, 0.35, 0.20), float3(0.72, 0.51, 0.33), float3(0.54, 0.25, 0.17) };
-        return n.y > 0.5 ? bands[0] : bands[uint(floor(y / 6.0)) % 3u];
+        uint b = n.y > 0.5 ? 0u : uint(floor(y / 6.0)) % 3u;
+        return b == 0u ? float3(0.62, 0.35, 0.20) : b == 1u ? float3(0.72, 0.51, 0.33) : float3(0.54, 0.25, 0.17);
     }
     // Stone: the same strata and ledge snow as the near texture.
     float3 p = float3(float(cell.x * FAR_CELL) + 2.0, y, float(cell.y * FAR_CELL) + 2.0);
@@ -1484,18 +1489,13 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
         // t0 is binary for solid occluders, so it can't detect
         // penumbra by itself; only taken near the camera.
         if (full_sun && (u_quality % 10) == 3 && hit.t + t_acc < 150.0) {
-            static const float2 disk[4] = {
-                float2( 0.0,    1.0),
-                float2( 0.866, -0.5),
-                float2(-0.866, -0.5),
-                float2( 0.0,   -0.3),
-            };
             float3 tangent   = normalize(cross(abs(l.x) > 0.9 ? float3(0,1,0) : float3(1,0,0), l));
             float3 bitangent = cross(l, tangent);
             float spread = 0.052; // tan(3 deg)
             float acc = shadow_factor;
             for (int k = 0; k < 4; k++) {
-                float3 jitter = (disk[k].x * tangent + disk[k].y * bitangent) * spread;
+                float2 disk = k == 0 ? float2(0.0, 1.0) : k == 1 ? float2(0.866, -0.5) : k == 2 ? float2(-0.866, -0.5) : float2(0.0, -0.3);
+                float3 jitter = (disk.x * tangent + disk.y * bitangent) * spread;
                 acc += trace_shadow_transmittance(shadow_origin, normalize(l + jitter));
             }
             shadow_factor = acc / 5.0;
@@ -1855,7 +1855,7 @@ void main(uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
     int aa = clamp(u_quality / 10, 1, AA_SAMPLES);
     float4 color = float4(0, 0, 0, 0);
     for (int s = 0; s < aa; s++) {
-        color += trace_pixel(float2(ipix) + aa_offsets[s], dims, hit0, far0, ehit0, s == 0);
+        color += trace_pixel(float2(ipix) + aa_offset(s), dims, hit0, far0, ehit0, s == 0);
     }
     color /= float(aa);
 

@@ -99,6 +99,10 @@ int ent_min_axis(float3 v) {
     return (v.x <= v.y && v.x <= v.z) ? 0 : (v.y <= v.z ? 1 : 2);
 }
 
+// Axis a as a 0/1 mask. The walks step with it rather than v[a]: a vector
+// indexed by a variable is kept in memory, not registers.
+int3 ent_axis(int a) { return int3(a == 0, a == 1, a == 2); }
+
 // Walk part p's grid along a world ray within [0, t_max]. t stays in world
 // units: the grid-space ray is the world ray pushed through the affine map
 // without renormalising. Returns true on a hit (t, grid normal axis/sign,
@@ -157,26 +161,27 @@ bool ent_trace_part(uint p, float3 ro_w, float3 rd_w, float t_max,
                 if ((word >> (bit & 31u)) & 1u) {
                     t_hit = tf; vox = v;
                     pal = ent_byte(m0.w, uint(v.x + dims.x * (v.y + dims.y * v.z)));
-                    n_grid = float3(0, 0, 0);
-                    n_grid[fax] = -stp_f[fax];
+                    n_grid = -stp_f * float3(ent_axis(fax));
                     grid_pos = clamp(ro + rd * tf, float3(v), float3(v + 1));
                     return true;
                 }
                 fax = ent_min_axis(tmf);
-                tf = tmf[fax];
+                int3 e = ent_axis(fax);
+                tf = min(tmf.x, min(tmf.y, tmf.z));
                 if (tf > t_brick_exit || tf > t1) break;
-                v[fax] += stp[fax];
-                tmf[fax] += tdf[fax];
+                v += stp * e;
+                tmf += tdf * float3(e);
                 // Brick and voxel boundaries coincide, so a float tie can
                 // step out of the brick: the mask bit would be someone else's.
-                if (v[fax] < lo[fax] || v[fax] > lo[fax] + 3) break;
+                if (any(v < lo) || any(v > lo + 3)) break;
             }
         }
         axis = ent_min_axis(tmc);
-        t = tmc[axis];
+        int3 ea = ent_axis(axis);
+        t = min(tmc.x, min(tmc.y, tmc.z));
         if (t > t1) break;
-        c[axis] += stp[axis];
-        tmc[axis] += tdc[axis];
+        c += stp * ea;
+        tmc += tdc * float3(ea);
         if (any(c < 0) || any(c >= bdims)) break;
     }
     return false;

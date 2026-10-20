@@ -50,9 +50,11 @@ int region_of(int rx, int ry, int rz) {
         int3   rs_lo = (int3(x_i, y_i, z_i) >> 2) << 2;                           \
         float3 rs_t  = (float3(rs_lo + max(rs_s, 0) * 4) - chunk_origin) / dir;   \
         axis = rs_t.x < rs_t.y && rs_t.x < rs_t.z ? 0 : (rs_t.y < rs_t.z ? 1 : 2); \
-        t = rs_t[axis];                                                           \
+        t = min(rs_t.x, min(rs_t.y, rs_t.z));                                     \
+        /* (No v[axis]: a vector indexed by a variable goes to memory.) */        \
+        int3 rs_e = int3(axis == 0, axis == 1, axis == 2);                        \
         int3 rs_c = clamp(int3(floor(chunk_origin + dir * t)), rs_lo, rs_lo + 3); \
-        rs_c[axis] = rs_s[axis] > 0 ? rs_lo[axis] + 4 : rs_lo[axis] - 1;          \
+        rs_c += rs_e * (rs_lo + 4 * max(rs_s, 0) + min(rs_s, 0) - rs_c);        \
         x_i = rs_c.x; y_i = rs_c.y; z_i = rs_c.z;                                 \
         float3 rs_m = (float3(rs_c + int3(dir_x, dir_y, dir_z)) - chunk_origin) / dir; \
         t_max_x = rs_m.x; t_max_y = rs_m.y; t_max_z = rs_m.z;                     \
