@@ -38,15 +38,24 @@ int region_of(int rx, int ry, int rz) {
         z_i += step_z; t = t_max_z; t_max_z += t_delta_z; axis = 2; \
     }
 
-// Step out of the current (empty) region without touching memory. Leaving
-// a 4^3 box takes at most 10 steps.
-#define SKIP_EMPTY_REGION                                           \
-    {                                                               \
-        int3 rc = int3(x_i, y_i, z_i) >> 2;                         \
-        [loop] for (int k = 0; k < 12; k++) {                       \
-            CHUNK_DDA_STEP                                          \
-            if (any((int3(x_i, y_i, z_i) >> 2) != rc)) break;       \
-        }                                                           \
+// Leave the current (empty) region in one step, without touching memory:
+// jump to where the ray crosses the 4^3-chunk box's face and carry on the
+// chunk walk from the chunk beyond it. (Chunk by chunk this took up to 10
+// steps a region, dozens a pixel in views from high up.) Across the face
+// the chunk is exact; along it, it comes from the hit point, clamped to the
+// box so a rounding error can never step past a chunk.
+#define SKIP_EMPTY_REGION                                                         \
+    {                                                                             \
+        int3   rs_s  = int3(step_x, step_y, step_z);                              \
+        int3   rs_lo = (int3(x_i, y_i, z_i) >> 2) << 2;                           \
+        float3 rs_t  = (float3(rs_lo + max(rs_s, 0) * 4) - chunk_origin) / dir;   \
+        axis = rs_t.x < rs_t.y && rs_t.x < rs_t.z ? 0 : (rs_t.y < rs_t.z ? 1 : 2); \
+        t = rs_t[axis];                                                           \
+        int3 rs_c = clamp(int3(floor(chunk_origin + dir * t)), rs_lo, rs_lo + 3); \
+        rs_c[axis] = rs_s[axis] > 0 ? rs_lo[axis] + 4 : rs_lo[axis] - 1;          \
+        x_i = rs_c.x; y_i = rs_c.y; z_i = rs_c.z;                                 \
+        float3 rs_m = (float3(rs_c + int3(dir_x, dir_y, dir_z)) - chunk_origin) / dir; \
+        t_max_x = rs_m.x; t_max_y = rs_m.y; t_max_z = rs_m.z;                     \
     }
 #define RAY_ITERATIONS      3000
 
