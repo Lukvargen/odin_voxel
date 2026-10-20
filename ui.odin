@@ -1964,10 +1964,12 @@ menu_layout :: proc(gs: ^Game_State) {
 menu_graphics :: proc(gs: ^Game_State) {
     if clay.UI()(setting_row()) {
         row_label("Render scale")
-        scales := [?]f32{1, 0.75, 0.5, 0.33, 0.25}
+        // 85%: about 28% fewer pixels to trace, only a little softer (the
+        // step to 75% almost halves them).
+        scales := [?]f32{1, 0.85, 0.75, 0.5, 0.33, 0.25}
         cur := 0
         for s, i in scales { if abs(s - gs.render_scale) < 0.01 { cur = i } }
-        if i := segmented("Rs", {"100%", "75%", "50%", "33%", "25%"}, cur); i >= 0 {
+        if i := segmented("Rs", {"100%", "85%", "75%", "50%", "33%", "25%"}, cur); i >= 0 {
             gs.render_scale = scales[i] // applied next frame (gpu_fit_render_size)
         }
     }
