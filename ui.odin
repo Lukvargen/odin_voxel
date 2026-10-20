@@ -313,7 +313,9 @@ ui_build_and_render :: proc(gs: ^Game_State, dt: f32) {
     ui := &gs.ui
     if !ui.initialized || ui.renderer_data.renderer == nil { return }
     ui_draw(gs, dt)
+    frame_phase(.UI)
     SDL.RenderPresent(ui.renderer_data.renderer)
+    frame_phase(.Present)
 }
 
 // Lays out and draws the frame and the UI to the current render target.
@@ -1682,6 +1684,23 @@ debug_layout :: proc(gs: ^Game_State) {
         line("fps", fmt.tprintf("%.1f  (%.2f ms)", ui.fps, ui.frame_ms))
         // Ray tracing alone, and its share of a 60 fps frame: the headroom.
         line("gpu", gs.gpu_ms > 0 ? fmt.tprintf("%.2f ms  (%.0f%% of 60 fps)", gs.gpu_ms, gs.gpu_ms / (1000.0 / 60.0) * 100) : "...")
+        // The main thread's work a frame, its three biggest parts, and the
+        // worst frame of the last second (profile.odin).
+        {
+            work: f32
+            for p in Frame_Phase { if p != .Present { work += frame_phase_ms[p] } }
+            top: [3]Frame_Phase
+            taken: bit_set[Frame_Phase] = {.Present}
+            for &t in top {
+                best := -1.0
+                for p in Frame_Phase {
+                    if p not_in taken && f64(frame_phase_ms[p]) > best { t, best = p, f64(frame_phase_ms[p]) }
+                }
+                taken += {t}
+            }
+            line("cpu", fmt.tprintf("%.2f ms (worst %.1f): %v %.2f, %v %.2f, %v %.2f", work, frame_cpu_worst,
+                top[0], frame_phase_ms[top[0]], top[1], frame_phase_ms[top[1]], top[2], frame_phase_ms[top[2]]))
+        }
         p := gs.camera.pos
         line("pos", fmt.tprintf("%.1f  %.1f  %.1f", p.x, p.y, p.z))
         line("look", fmt.tprintf("yaw %.0f  pitch %.0f", gs.camera.yaw, gs.camera.pitch))

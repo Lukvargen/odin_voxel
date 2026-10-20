@@ -45,7 +45,7 @@ Camera_Uniform :: struct #packed {
     _pad5:          f32,
     near_circle:    [4]f32, // near (voxel) region: XZ center, radius in voxels, unused
     sun_true:       [4]f32, // xyz = real sun direction (light_dir is the moon at night), w = night 0..1
-    atmos:          [4]f32, // x = valley mist amount, yzw unused
+    atmos:          [4]f32, // x = valley mist amount, y/z = highest y of anything near / far (near_top, far_top), w unused
     thermals:       [MAX_SKY_THERMALS][4]f32, // cumulus over thermals: XZ centre at cloud base, radius, strength
     thermal_count:  [4]i32, // x = count
     cloud_puffs:    [MAX_SKY_THERMALS * 4][4]f32, // per thermal 4 towers: offset (cloud radii), radius
@@ -403,6 +403,8 @@ gpu_init :: proc(gs: ^Game_State) {
     assert(gs.light_index_buf != nil, "Failed to create light index buffer")
 
     gs.region_dirty = true
+    gs.near_top = f32((WORLD_CHUNK_Y_MIN + CHUNKS_H) * CHUNK_VOXELS) // nothing known yet: the whole range
+    gs.far_top  = gs.near_top
 
     gs.far_buf = SDL.CreateGPUBuffer(gs.gpu_device, SDL.GPUBufferCreateInfo{
         usage = {.COMPUTE_STORAGE_READ},
@@ -604,9 +606,25 @@ flush_voxel_uploads :: proc(gs: ^Game_State) {
     }
     SDL.EndGPUCopyPass(copy_pass)
 
+    if gs.region_dirty { gs.near_top = region_top(gs) }
     gs.index_dirty  = false
     gs.owner_dirty  = false
     gs.region_dirty = false
+}
+
+// Top of the highest region layer holding anything (stale slots of the
+// ring count too, so it can only be too high, never too low).
+region_top :: proc(gs: ^Game_State) -> f32 {
+    RW :: CHUNKS_W / REGION_CHUNKS
+    RH :: CHUNKS_H / REGION_CHUNKS
+    for ly := RH - 1; ly >= 0; ly -= 1 {
+        for rz in 0 ..< RW {
+            for c in gs.region_count[ly * RW + rz * RW * RH:][:RW] {
+                if c != 0 { return f32(((ly + 1) * REGION_CHUNKS + WORLD_CHUNK_Y_MIN) * CHUNK_VOXELS) }
+            }
+        }
+    }
+    return f32(WORLD_Y_MIN)
 }
 
 // The dirty planes of a slot table, cleared, in ascending order.
@@ -820,7 +838,7 @@ gpu_render :: proc(gs: ^Game_State, want_fence := false) -> ^SDL.GPUFence {
             0,
         },
         sun_true       = {gs.sky.sun_true.x, gs.sky.sun_true.y, gs.sky.sun_true.z, gs.sky.night},
-        atmos          = {gs.sky.mist, 0, 0, 0},
+        atmos          = {gs.sky.mist, gs.near_top, gs.far_top, 0},
     }
     sky_thermals_update(gs)
     // The cumulus shrink as the sun sinks and the thermals under them die,

@@ -46,6 +46,10 @@ Game_State :: struct {
     index_planes, owner_planes, light_planes: [CHUNKS_W]bool,
     region_count:    []u32,          // non-air slots per 4^3-chunk region (world.odin)
     region_dirty:    bool,
+    // The highest anything stands in the near voxels (top of the highest
+    // occupied region layer) and in the far tiles: rays climbing past them
+    // meet nothing more (gpu.odin region_top, far.odin flush_far_uploads).
+    near_top, far_top: f32,
 
     // Far terrain LOD (far.odin)
     far_cells:       []u32,          // FAR_CELLS_PER_TILE packed cells per tile slot
@@ -233,6 +237,7 @@ game_main :: proc() -> (relaunch: []string) {
         for a in os.args[2:] {
             switch {
             case a == "quick": bench_quick = true
+            case a == "hd": bench_hd = true // 1920x1080, as played
             case a == "glider": bench_glider = true
             case a == "entcost": bench_entcost = true
             case a == "stream": bench_stream = true
@@ -339,6 +344,7 @@ game_main :: proc() -> (relaunch: []string) {
             case strings.has_prefix(a, "yaw="):
                 start_yaw, _ = strconv.parse_f32(a[4:])
             case a == "notex": gs.no_textures = true // blocks plain grey (F10)
+            case a == "perf": frame_perf_print = true // where each frame's time goes, every second (profile.odin)
             case a == "f3": gs.ui.debug_open = true // the debug panel open from the start (checking things without input)
             case strings.has_prefix(a, "hour="):
                 h, _ := strconv.parse_f32(a[5:])
@@ -398,9 +404,10 @@ game_main :: proc() -> (relaunch: []string) {
 
     // Bench runs hidden and unfocusable so it never interrupts the user.
     window_flags: SDL.WindowFlags = bench || shots ? {.HIDDEN, .NOT_FOCUSABLE} : {.RESIZABLE}
-    // The bench keeps a fixed square view so its timings and shots compare.
+    // The bench keeps a fixed square view so its timings and shots compare
+    // (`hd`: 1920x1080, the size played at).
     win_w, win_h := i32(WINDOW_W), i32(WINDOW_H)
-    if bench { win_w, win_h = BENCH_RENDER_W, BENCH_RENDER_H }
+    if bench { win_w, win_h = bench_hd ? 1920 : BENCH_RENDER_W, bench_hd ? 1080 : BENCH_RENDER_H }
     if shots { win_w, win_h = SHOT_TILE, SHOT_TILE }
     if window_given && !bench && !shots { win_w, win_h = window[2], window[3] }
     if no_focus { SDL.SetHint(SDL.HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0") }
@@ -511,6 +518,7 @@ game_main :: proc() -> (relaunch: []string) {
         dt  := f32(now - gs.last_ticks) / 1000.0
         gs.last_ticks = now
         if dt > 0.1 { dt = 0.1 }
+        frame_phase_begin()
 
         // Input state for this frame
         mouse_dx, mouse_dy: f32
@@ -668,6 +676,7 @@ game_main :: proc() -> (relaunch: []string) {
             }
         }
         combat_post_update(gs, play_dt)
+        frame_phase(.Input)
 
         // The world moves on: this client tells the server about its player
         // (and its sword's hits, sent above), the server steps, and the
@@ -675,6 +684,7 @@ game_main :: proc() -> (relaunch: []string) {
         client_send_input(gs)
         if !client_joined(gs) { server_step(&gs.server, play_dt) }
         client_receive(gs, play_dt)
+        frame_phase(.Server)
         fx_update(gs, fx_dt)
         shots_fx_update(gs, fx_dt)
         glider_view_update(gs, play_dt)
@@ -686,6 +696,7 @@ game_main :: proc() -> (relaunch: []string) {
         // and cave fog in the shaders. Smoothed ~0.5 s so moving through a
         // cave mouth reads as eye adaptation instead of a pop.
         gs.cave_factor += (cave_factor_target(gs) - gs.cave_factor) * min(1.0, play_dt * 2.0)
+        frame_phase(.Fx)
 
         // Enqueue new chunks when crossing a chunk boundary
         new_pc := [3]int{
@@ -706,21 +717,28 @@ game_main :: proc() -> (relaunch: []string) {
         far_enqueue(gs)
         integrate_far_tiles(gs)
         stitch_pending_columns(gs)
+        frame_phase(.Stream)
 
         // Edits with the current tool (build_tools.odin), or the spell
         // (survival: magic.odin), and trees coming down (felling.odin).
         build_update(gs, play_dt)
         magic_update(gs, play_dt)
         felling_update(gs, play_dt)
+        frame_phase(.Edits)
 
         flush_gpu_uploads(gs)
         gpu_fit_render_size(gs) // before the entity masks, which are per screen tile
+        frame_phase(.Upload)
         entities_update(gs, fx_dt)
+        frame_phase(.Entities)
         audio_update(gs, dt)
+        frame_phase(.Audio)
         gpu_render_timed(gs)
-        ui_build_and_render(gs, dt)
+        frame_phase(.Render)
+        ui_build_and_render(gs, dt) // marks UI and Present
 
         free_all(context.temp_allocator)
+        frame_phase_end()
     }
     return
 }

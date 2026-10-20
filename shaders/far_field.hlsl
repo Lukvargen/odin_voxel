@@ -14,7 +14,6 @@
 #define FAR_RING        128
 #define FAR_MAX_T       2800.0
 #define FAR_CELLS_BASE  (FAR_RING * FAR_RING * 4)
-#define FAR_MAX_Y       float((WORLD_CHUNK_Y_MIN + GPU_CHUNKS_HEIGHT) * BRICK_CHUNK_SIZE)
 
 struct FarHit {
     bool   hit;
@@ -44,14 +43,7 @@ float far_span_hit(float3 o, float3 d, float t0, float t1, float ya, float yb,
 // (0 = x, 1 = z; the normal of a far side hit right at the edge).
 float near_exit_t(float3 o, float3 d, out int axis) {
     axis = abs(d.x) > abs(d.z) ? 0 : 1;
-    float2 p = o.xz - u_near_circle.xy;
-    float  r = u_near_circle.z;
-    float  a = dot(d.xz, d.xz);
-    float  c = dot(p, p) - r * r;
-    if (c >= 0.0) return 0.0;                 // outside: no near region ahead
-    if (a < 1e-8) return RAY_MAX_LENGTH;      // straight up/down: never leaves
-    float b = dot(p, d.xz);
-    return (-b + sqrt(b * b - a * c)) / a;
+    return max(near_circle_exit(o, d), 0.0); // outside: no near region ahead
 }
 
 // Cells of one tile between t_in and t_out. axis_in: axis of the step that
@@ -133,7 +125,7 @@ FarHit far_trace(float3 o, float3 d, float t0, int axis0) {
             if (min(ya, yb) < float(tile.z) &&
                 far_trace_tile(o, d, slot, ti, t_enter, t_exit, axis, h)) return h;
         }
-        if (d.y > 0.0 && o.y + d.y * t_exit > FAR_MAX_Y) break; // above everything, climbing
+        if (d.y > 0.0 && o.y + d.y * t_exit > u_atmos.z) break; // above every tile (far_top), climbing
         if (tmax.x < tmax.y) { ti.x += st.x; t_enter = tmax.x; tmax.x += tdelta.x; axis = 0; }
         else                 { ti.y += st.y; t_enter = tmax.y; tmax.y += tdelta.y; axis = 1; }
     }

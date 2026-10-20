@@ -41,6 +41,7 @@ Bench_Config :: struct {
 bench_shot_dir: string
 // Only measure the first (default) config.
 bench_quick: bool
+bench_hd: bool // `hd`: render 1920x1080 instead of the square view
 // `world=<name>`: the bench plays saves/<name>'s edits (read only; use a copy).
 bench_world: bool
 // `bench view world=<copy> pos=x,y,z yaw=a pitch=b [notex] [dir]`: one shot

@@ -34,14 +34,16 @@ int gi_slot(int3 pw) {
 }
 
 // Which of the probes sharing a slot is in it (never 0: unwritten slots).
-uint gi_owner(int3 pw) {
-    int3 g = gi_floor_div3(pw, GI_DIMS);
+// g: which copy of the grid pw is in (gi_floor_div3(pw, GI_DIMS)).
+uint gi_owner_of(int3 g) {
     return (uint(g.x) & 0x1FFFu) | ((uint(g.z) & 0x1FFFu) << 13) | ((uint(g.y) & 0xFu) << 26) | 0x80000000u;
 }
+uint gi_owner(int3 pw) { return gi_owner_of(gi_floor_div3(pw, GI_DIMS)); }
 
 // Directions: 0 +x, 1 -x, 2 +y, 3 -y, 4 +z, 5 -z.
-int2 gi_irr_texel(int s, int dir) { return int2((s % GI_ROW) * 6 + dir, s / GI_ROW); }
-int2 gi_vis_texel(int s, int w)   { return int2((s % GI_ROW) * GI_VIS_WORDS + w, s / GI_ROW); }
+// (Unsigned: slots are never negative, and a signed % and / cost more.)
+int2 gi_irr_texel(int s, int dir) { return int2(int(uint(s) % GI_ROW) * 6 + dir, int(uint(s) / GI_ROW)); }
+int2 gi_vis_texel(int s, int w)   { return int2(int(uint(s) % GI_ROW) * GI_VIS_WORDS + w, int(uint(s) / GI_ROW)); }
 
 // A probe's updates so far (alpha of its light, 1..GI_SETTLED): a new
 // probe's first few are noisy, so shading eases from its stand-in to the
@@ -78,13 +80,18 @@ bool gi_sample(int3 f, float3 p, float3 n, float3 guess, out float3 light, out f
     float3 g = p / float(GI_SPACING);
     // Probe coords of the corner probe: f's own cell, so f lies in every
     // one of the 8 probes' boxes (offsets -4..3).
-    int3 b = gi_floor_div3(f, int3(GI_SPACING, GI_SPACING, GI_SPACING));
+    int3 b = f >> 2; // floor(f / GI_SPACING), GI_SPACING being 4
     float3 fr = saturate(g - float3(b));
     float my = min(g.y - float(u_gi_origin.y), float(u_gi_origin.y + GI_DIMS.y - 1) - g.y);
     fade = saturate((GI_FADE_END - length(p.xz - u_cam_pos.xz)) / (GI_FADE_END - GI_FADE_FULL))
          * saturate((my - 0.5) / 3.0);
     if (fade <= 0.0) return false;
 
+    // The corner probe's place in the wrapped grid, once: the other seven
+    // are a step from it, wrapping at most once per axis (gi_slot and
+    // gi_owner divide, eight times over, otherwise).
+    int3 g0 = gi_floor_div3(b, GI_DIMS);
+    int3 m0 = b - g0 * GI_DIMS;
     float  wsum = 0.0;
     float3 acc = float3(0, 0, 0);
     [unroll]
@@ -94,8 +101,11 @@ bool gi_sample(int3 f, float3 p, float3 n, float3 guess, out float3 light, out f
         float3 tw = lerp(1.0 - fr, fr, float3(o));
         float  w = tw.x * tw.y * tw.z;
         if (w < 1e-4) continue;
-        int s = gi_slot(pw);
-        if (gi_vis[gi_vis_texel(s, GI_OWNER_WORD)] != gi_owner(pw)) {
+        int3 wrap = int3(m0 + o >= GI_DIMS);
+        int3 m = m0 + o - wrap * GI_DIMS;
+        int3 g = g0 + wrap;
+        int s = m.x + m.y * GI_DIMS.x + m.z * GI_DIMS.x * GI_DIMS.y;
+        if (gi_vis[gi_vis_texel(s, GI_OWNER_WORD)] != gi_owner_of(g)) {
             acc  += w * guess; // not updated since it entered the grid
             wsum += w;
             continue;

@@ -50,6 +50,24 @@ int region_of(int rx, int ry, int rz) {
     }
 #define RAY_ITERATIONS      3000
 
+// Nothing near stands above this (gpu.odin region_top): a ray climbing into
+// the chunk layer at it has nothing left to meet. Most sun shadow rays and
+// rays into the sky end here instead of at the top of the world.
+#define NEAR_TOP_Y          u_atmos.y
+
+// Distance along d from o to where it leaves the near voxel region (the
+// circle in XZ around the player, u_near_circle), or -1 if o is outside it.
+float near_circle_exit(float3 o, float3 d) {
+    float2 p = o.xz - u_near_circle.xy;
+    float  r = u_near_circle.z;
+    float  a = dot(d.xz, d.xz);
+    float  c = dot(p, p) - r * r;
+    if (c >= 0.0) return -1.0;                // outside: no near region ahead
+    if (a < 1e-8) return RAY_MAX_LENGTH;      // straight up/down: never leaves
+    float b = dot(p, d.xz);
+    return (-b + sqrt(b * b - a * c)) / a;
+}
+
 #define BLOCK_AIR    0u
 #define BLOCK_GRASS  1u
 #define BLOCK_STONE  2u
@@ -659,6 +677,11 @@ float shadow_chunk_transmit(int chunk_i, int3 chunk_ic, float3 local_entry, floa
 // can overrun max_t slightly; callers stop ~0.9 short of the light so this
 // is not visible.
 float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MAX_LENGTH, bool exact_plants = false) {
+    // Past the loaded columns there's nothing to cast a shadow (the far
+    // terrain casts none): a low sun's ray would walk on for hundreds of
+    // voxels of empty or stale ring slots.
+    float t_near = near_circle_exit(origin, dir);
+    if (t_near >= 0.0) max_t = min(max_t, t_near);
     dir = safe_dir(dir);
 
     float t_delta_x = abs(1.0 / dir.x);
@@ -691,6 +714,7 @@ float trace_shadow_transmittance(float3 origin, float3 dir, float max_t = RAY_MA
     // Worst-case diagonal within RAY_MAX_LENGTH crosses ~3*128 chunks.
     for (int i = 0; i < 512; i++) {
         if (t > max_t / float(BRICK_CHUNK_SIZE)) break;
+        if (step_y > 0 && float(y_i * BRICK_CHUNK_SIZE) >= NEAR_TOP_Y) break;
 
         int ry = y_i - WORLD_CHUNK_Y_MIN;
         if (ry < 0 || ry >= GPU_CHUNKS_HEIGHT) {
@@ -1060,6 +1084,7 @@ HitInfo trace_ray_chunk(float3 origin, float3 dir, bool is_light, int max_iters 
     while (i < max_iters) {
         i++;
         if (t > max_len / float(BRICK_CHUNK_SIZE)) break;
+        if (step_y > 0 && float(y_i * BRICK_CHUNK_SIZE) >= NEAR_TOP_Y) break;
 
         // Y is not wrapped — hard bounds against the resident world-Y range.
         int ry = y_i - WORLD_CHUNK_Y_MIN;
@@ -1239,7 +1264,7 @@ float face_light(int3 vkey, float3 nrm, float3 hit_pos, out float3 block) {
     w *= float4(1.0, l10 != 0u ? 1.0 : 0.0, l01 != 0u ? 1.0 : 0.0, l11 != 0u ? 1.0 : 0.0);
     uint4 l = uint4(l00, l10, l01, l11);
     float inv = 1.0 / (w.x + w.y + w.z + w.w);
-    float fl = torch_flicker(hit_pos);
+    float fl = any((l & 31u) != 0u) ? torch_flicker(hit_pos) : 1.0; // most faces: no block light
     block = (w.x * block_radiance(l00, fl) + w.y * block_radiance(l10, fl)
            + w.z * block_radiance(l01, fl) + w.w * block_radiance(l11, fl)) * inv;
     return dot(w, float4((l >> 5) & 31u)) * inv;

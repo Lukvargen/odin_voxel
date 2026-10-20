@@ -54,3 +54,76 @@ profile_dump :: proc(label: string) {
             z, ms, c, avg_us)
     }
 }
+
+// Where a frame's time goes on the main thread: the F3 panel's "cpu" line,
+// and every second on the terminal with the `perf` argument. Present waits
+// for vsync and for the GPU to catch up, so it's slack, not work.
+Frame_Phase :: enum {
+    Input,    // events, the camera, combat
+    Server,   // the server's step and what it sent back
+    Fx,       // effects and views
+    Stream,   // chunks, far tiles and light stitching taken in
+    Edits,    // building, the spell, felling
+    Upload,   // flush_gpu_uploads
+    Entities, // posing and uploading the entities
+    Audio,
+    Render,   // the GPU passes recorded and submitted
+    UI,       // the HUD laid out and drawn
+    Present,
+}
+
+frame_phase_ms:    [Frame_Phase]f32 // average a frame over the last second
+frame_phase_worst: [Frame_Phase]f32 // the worst frame in it
+frame_cpu_worst:   f32              // the worst frame's work (all but Present)
+frame_perf_print:  bool             // `perf`: print them each second
+
+@(private="file") phase_t:      time.Tick
+@(private="file") phase_frame0: time.Tick
+@(private="file") phase_since:  time.Tick
+@(private="file") phase_ns:     [Frame_Phase]i64
+@(private="file") phase_max:    [Frame_Phase]i64
+@(private="file") phase_cpu_max: i64
+@(private="file") phase_frames: int
+@(private="file") phase_wait:   i64 // this frame's Present
+
+frame_phase_begin :: proc() {
+    phase_t = time.tick_now()
+    phase_frame0 = phase_t
+    if phase_since == {} { phase_since = phase_t }
+}
+
+// The time since the last mark goes to phase p.
+frame_phase :: proc(p: Frame_Phase) {
+    now := time.tick_now()
+    d := i64(time.tick_diff(phase_t, now))
+    phase_ns[p] += d
+    phase_max[p] = max(phase_max[p], d)
+    if p == .Present { phase_wait = d }
+    phase_t = now
+}
+
+frame_phase_end :: proc() {
+    phase_cpu_max = max(phase_cpu_max, i64(time.tick_diff(phase_frame0, phase_t)) - phase_wait)
+    phase_wait = 0
+    phase_frames += 1
+    if time.duration_seconds(time.tick_since(phase_since)) < 1 { return }
+    n := f32(max(phase_frames, 1))
+    for p in Frame_Phase {
+        frame_phase_ms[p]    = f32(phase_ns[p]) / 1e6 / n
+        frame_phase_worst[p] = f32(phase_max[p]) / 1e6
+    }
+    frame_cpu_worst = f32(phase_cpu_max) / 1e6
+    if frame_perf_print {
+        work: f32
+        for p in Frame_Phase { if p != .Present { work += frame_phase_ms[p] } }
+        fmt.printf("perf: %5.1f fps  work %5.2f ms (worst frame %5.2f)  present %5.2f |", n / f32(time.duration_seconds(time.tick_since(phase_since))),
+            work, frame_cpu_worst, frame_phase_ms[.Present])
+        for p in Frame_Phase {
+            if p == .Present || frame_phase_worst[p] < 0.05 { continue }
+            fmt.printf(" %v %.2f/%.2f", p, frame_phase_ms[p], frame_phase_worst[p])
+        }
+        fmt.println()
+    }
+    phase_ns, phase_max, phase_cpu_max, phase_frames = {}, {}, 0, 0
+    phase_since = time.tick_now()
+}

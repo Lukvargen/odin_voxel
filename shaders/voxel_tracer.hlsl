@@ -1454,7 +1454,7 @@ float4 shade_voxel(HitInfo hit, float3 dir, float t_acc, bool ao_on, bool full_s
     if (plant || door) {
         uint pl = sample_light(hit.vkey);
         sky_level   = float(light_sky(pl));
-        block_light = block_radiance(pl, torch_flicker(hit_point));
+        block_light = block_radiance(pl, light_block(pl) != 0u ? torch_flicker(hit_point) : 1.0);
     } else {
         sky_level = face_light(hit.vkey, surf_normal, hit_point, block_light);
     }
@@ -1811,7 +1811,12 @@ float4 trace_pixel(float2 pixel, float2 dims, HitInfo hit0, FarHit far0, EntityH
 }
 
 [numthreads(16, 16, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
+void main(uint3 gid : SV_GroupID, uint gidx : SV_GroupIndex) {
+    // Each 32-thread warp takes an 8x4 block of the 16x16 tile, not a 16x2
+    // strip: its rays stay closer together, so they walk the same chunks and
+    // diverge less in the traversal loops.
+    uint  lane = gidx & 31u, warp = gidx >> 5;
+    uint3 id = uint3(gid.xy * 16u + uint2((warp & 1u) * 8u + (lane & 7u), (warp >> 1) * 4u + (lane >> 3)), 0u);
     light_dir_normalized = normalize(u_light_dir_raw);
 
     uint w, h;

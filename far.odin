@@ -363,5 +363,10 @@ flush_far_uploads :: proc(gs: ^Game_State) {
             false)
     }
     SDL.EndGPUCopyPass(copy_pass)
+    if gs.far_tiles_dirty {
+        top := WORLD_Y_MIN
+        for t in gs.far_tiles { if t.x != FAR_NO_TILE { top = max(top, int(t.z)) } }
+        gs.far_top = f32(top)
+    }
     gs.far_tiles_dirty = false
 }
